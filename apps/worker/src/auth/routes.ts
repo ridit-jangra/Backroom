@@ -3,6 +3,7 @@ import { AuthStartBody, AuthVerifyBody } from '@backroom/protocol';
 import type { AppEnv } from '../app';
 import { ApiError } from '../lib/errors';
 import { randomToken, sha256Hex } from '../lib/crypto';
+import { readJson } from '../lib/http';
 import { hitRateLimit } from '../lib/rateLimit';
 import { checkEligibility, checkEligibilityByInviteId } from './eligibility';
 import { createSession, deleteAllSessions, deleteSession } from './sessions';
@@ -15,7 +16,7 @@ const LINK_TTL_MS = 900_000;
 export const authRoutes = new Hono<AppEnv>();
 
 authRoutes.post('/start', async (c) => {
-  const { email, inviteToken } = AuthStartBody.parse(await c.req.json());
+  const { email, inviteToken } = AuthStartBody.parse(await readJson(c));
   const { now: nowFn, mailer } = c.var.deps;
   const now = nowFn();
   const db = c.env.DB;
@@ -31,18 +32,25 @@ authRoutes.post('/start', async (c) => {
         .prepare('INSERT INTO login_tokens (token_hash, email, invite_id, expires_at) VALUES (?, ?, ?, ?)')
         .bind(await sha256Hex(raw), email, elig.inviteId, now + LINK_TTL_MS)
         .run();
+      // Send off the response path so timing does not reveal allowlist membership.
+      const send = mailer
+        .sendMagicLink(c.env, email, `${c.env.APP_ORIGIN}/verify?t=${raw}`)
+        .catch(() => console.error(JSON.stringify({ level: 'error', code: 'email_failed' })));
+      let ctx: { waitUntil(p: Promise<unknown>): void } | undefined;
       try {
-        await mailer.sendMagicLink(c.env, email, `${c.env.APP_ORIGIN}/verify?t=${raw}`);
+        ctx = c.executionCtx;
       } catch {
-        console.error(JSON.stringify({ level: 'error', code: 'email_failed' }));
+        ctx = undefined;
       }
+      if (ctx) ctx.waitUntil(send);
+      else await send;
     }
   }
   return c.json({ ok: true });
 });
 
 authRoutes.post('/verify', async (c) => {
-  const { token } = AuthVerifyBody.parse(await c.req.json());
+  const { token } = AuthVerifyBody.parse(await readJson(c));
   const now = c.var.deps.now();
   const db = c.env.DB;
   const row = await db

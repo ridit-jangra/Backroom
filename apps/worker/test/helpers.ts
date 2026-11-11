@@ -1,4 +1,7 @@
-import type { Deps } from '../src/app';
+import { createExecutionContext, env, waitOnExecutionContext } from 'cloudflare:test';
+import type { Hono } from 'hono';
+import type { AppEnv, Deps } from '../src/app';
+import type { Mailer } from '../src/auth/mailer';
 
 export function testDeps(overrides: Partial<Deps> = {}): Deps {
   return {
@@ -8,10 +11,6 @@ export function testDeps(overrides: Partial<Deps> = {}): Deps {
   };
 }
 
-import { env } from 'cloudflare:test';
-import type { Hono } from 'hono';
-import type { AppEnv } from '../src/app';
-import type { Mailer } from '../src/auth/mailer';
 
 export function captureMailer(): { mailer: Mailer; sent: { to: string; url: string }[] } {
   const sent: { to: string; url: string }[] = [];
@@ -25,18 +24,20 @@ export function captureMailer(): { mailer: Mailer; sent: { to: string; url: stri
   };
 }
 
-export function post(app: Hono<AppEnv>, path: string, body: unknown, headers: Record<string, string> = {}): Promise<Response> {
-  return Promise.resolve(
-    app.request(
-      path,
-      {
-        method: 'POST',
-        headers: { Origin: 'https://app.test', 'Content-Type': 'application/json', ...headers },
-        body: JSON.stringify(body),
-      },
-      env,
-    ),
+export async function post(app: Hono<AppEnv>, path: string, body: unknown, headers: Record<string, string> = {}): Promise<Response> {
+  const ctx = createExecutionContext();
+  const res = await app.request(
+    path,
+    {
+      method: 'POST',
+      headers: { Origin: 'https://app.test', 'Content-Type': 'application/json', ...headers },
+      body: JSON.stringify(body),
+    },
+    env,
+    ctx,
   );
+  await waitOnExecutionContext(ctx); // flush waitUntil work (e.g. captured emails)
+  return res;
 }
 
 /** start -> captured link -> verify; returns the Cookie header value. */
@@ -53,4 +54,20 @@ export async function signIn(
   const res = await post(app, '/auth/verify', { token });
   if (res.status !== 200) throw new Error(`verify failed: ${res.status}`);
   return res.headers.get('Set-Cookie')!.split(';')[0]!;
+}
+
+const SEED_CHANNELS = ['01JCLUBHACK0000000000000GN', '01JCLUBHACK0000000000000RD'];
+
+/** Clear all application data, keeping the seeded workspace and channels (last_seq reset to 0). */
+export async function resetDb(): Promise<void> {
+  const tables = [
+    'message_files', 'files', 'custom_emoji', 'reactions', 'mentions', 'thread_follows', 'messages',
+    'channel_members', 'sessions', 'login_codes', 'login_tokens', 'rate_limits', 'invites',
+    'workspace_members', 'users',
+  ];
+  await env.DB.batch([
+    ...tables.map((t) => env.DB.prepare(`DELETE FROM ${t}`)),
+    env.DB.prepare(`DELETE FROM channels WHERE id NOT IN (${SEED_CHANNELS.map(() => '?').join(',')})`).bind(...SEED_CHANNELS),
+    env.DB.prepare('UPDATE channels SET last_seq = 0, topic = NULL, archived_at = NULL'),
+  ]);
 }

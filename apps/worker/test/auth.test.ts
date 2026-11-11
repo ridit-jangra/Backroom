@@ -1,15 +1,10 @@
 import { env } from 'cloudflare:test';
 import { beforeEach, it, expect } from 'vitest';
+import { HTTPException } from 'hono/http-exception';
 import { createApp } from '../src/app';
-import { captureMailer, post, signIn, testDeps } from './helpers';
+import { captureMailer, post, resetDb, signIn, testDeps } from './helpers';
 
-beforeEach(async () => {
-  await env.DB.batch(
-    ['rate_limits', 'login_tokens', 'sessions', 'channel_members', 'workspace_members', 'users'].map((t) =>
-      env.DB.prepare(`DELETE FROM ${t}`),
-    ),
-  );
-});
+beforeEach(resetDb);
 
 function setup(now?: () => number) {
   const { mailer, sent } = captureMailer();
@@ -59,6 +54,8 @@ it('verify page link is not consumed by GET', async () => {
   await post(app, '/auth/start', { email: 'owner@test.dev' });
   const t = tokenOf(sent[0]!.url);
   await app.request(`/verify?t=${t}`, {}, env);
+  const row = await env.DB.prepare('SELECT used_at FROM login_tokens').first<{ used_at: number | null }>();
+  expect(row!.used_at).toBeNull();
   const res = await post(app, '/auth/verify', { token: t });
   expect(res.status).toBe(200);
 });
@@ -147,4 +144,14 @@ it('malformed JSON body is 400 invalid_request', async () => {
   );
   expect(raw.status).toBe(400);
   expect(((await raw.json()) as { error: { code: string } }).error.code).toBe('invalid_request');
+});
+
+it('non-400 HTTPException maps to its status with an error body', async () => {
+  const { app } = setup();
+  app.post('/auth/teapot', () => {
+    throw new HTTPException(418, { message: 'short and stout' });
+  });
+  const res = await post(app, '/auth/teapot', {});
+  expect(res.status).toBe(418);
+  expect(await res.json()).toEqual({ error: { code: 'http_418', message: 'short and stout' } });
 });
