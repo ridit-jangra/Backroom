@@ -21,6 +21,10 @@ npm run dev:all
 
 `npm run dev:all` builds the web app and starts `wrangler dev` on http://localhost:8787.
 
+Open the app at the same origin as APP_ORIGIN (http://localhost:8787 by default); other origins are rejected by design.
+
+Safari refuses Secure cookies on http://localhost — use Chrome or Firefox locally.
+
 ### Browser walkthrough
 
 1. Open http://localhost:8787 and request a sign-in link for your `OWNER_EMAIL`.

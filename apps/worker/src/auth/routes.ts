@@ -27,15 +27,26 @@ authRoutes.post('/start', async (c) => {
   if (emailOk && ipOk) {
     const elig = await checkEligibility(db, email, inviteToken, c.env.OWNER_EMAIL, now);
     if (elig.ok) {
+      // Token creation, hashing, insert and send all run off the response path so timing
+      // does not reveal allowlist membership.
       const raw = randomToken();
-      await db
-        .prepare('INSERT INTO login_tokens (token_hash, email, invite_id, expires_at) VALUES (?, ?, ?, ?)')
-        .bind(await sha256Hex(raw), email, elig.inviteId, now + LINK_TTL_MS)
-        .run();
-      // Send off the response path so timing does not reveal allowlist membership.
-      const send = mailer
-        .sendMagicLink(c.env, email, `${c.env.APP_ORIGIN}/verify?t=${raw}`)
-        .catch(() => console.error(JSON.stringify({ level: 'error', code: 'email_failed' })));
+      const inviteId = elig.inviteId;
+      const send = (async () => {
+        try {
+          await db
+            .prepare('INSERT INTO login_tokens (token_hash, email, invite_id, expires_at) VALUES (?, ?, ?, ?)')
+            .bind(await sha256Hex(raw), email, inviteId, now + LINK_TTL_MS)
+            .run();
+        } catch {
+          console.error(JSON.stringify({ level: 'error', code: 'login_token_failed' }));
+          return;
+        }
+        try {
+          await mailer.sendMagicLink(c.env, email, `${c.env.APP_ORIGIN}/verify?t=${raw}`);
+        } catch {
+          console.error(JSON.stringify({ level: 'error', code: 'email_failed' }));
+        }
+      })();
       let ctx: { waitUntil(p: Promise<unknown>): void } | undefined;
       try {
         ctx = c.executionCtx;
@@ -70,8 +81,8 @@ authRoutes.post('/verify', async (c) => {
   return c.json({ ok: true, workspace: WORKSPACE_SLUG });
 });
 
-authRoutes.post('/logout', requireSession, async (c) => {
-  await deleteSession(c.env.DB, c.var.session!.token);
+authRoutes.post('/logout', async (c) => {
+  if (c.var.session) await deleteSession(c.env.DB, c.var.session.token);
   clearSessionCookie(c);
   return c.json({ ok: true });
 });

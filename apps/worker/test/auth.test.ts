@@ -3,7 +3,7 @@ import { beforeEach, it, expect } from 'vitest';
 import { HTTPException } from 'hono/http-exception';
 import { createApp } from '../src/app';
 import { consoleMailer, pickMailer, resendMailer } from '../src/auth/mailer';
-import { captureMailer, post, resetDb, signIn, testDeps } from './helpers';
+import { captureMailer, post, resetDb, send, signIn, testDeps } from './helpers';
 
 beforeEach(resetDb);
 
@@ -114,10 +114,51 @@ it('logout clears cookie and session', async () => {
   expect(await count('sessions')).toBe(0);
 });
 
-it('logout requires a session', async () => {
+it('logout without a session is idempotent: 200 and cookie cleared', async () => {
   const { app } = setup();
   const res = await post(app, '/auth/logout', {});
+  expect(res.status).toBe(200);
+  expect(await res.json()).toEqual({ ok: true });
+  expect(res.headers.get('Set-Cookie')).toContain('Max-Age=0');
+});
+
+it('logout-all requires a session', async () => {
+  const { app } = setup();
+  const res = await post(app, '/auth/logout-all', {});
   expect(res.status).toBe(401);
+});
+
+it('start: token insert happens in the background and mail failure logs only a code', async () => {
+  const logs: string[] = [];
+  const orig = console.error;
+  console.error = (...a: unknown[]) => void logs.push(a.map(String).join(' '));
+  try {
+    const app = createApp(
+      testDeps({
+        mailer: {
+          async sendMagicLink() {
+            throw new Error('boom owner@test.dev');
+          },
+        },
+      }),
+    );
+    const res = await post(app, '/auth/start', { email: 'owner@test.dev' });
+    expect(res.status).toBe(200);
+    expect(await count('login_tokens')).toBe(1);
+    expect(logs).toEqual([JSON.stringify({ level: 'error', code: 'email_failed' })]);
+  } finally {
+    console.error = orig;
+  }
+});
+
+it('unmatched routes return the JSON 404 shape', async () => {
+  const { app, sent } = setup();
+  const cookie = await signIn(app, sent, 'owner@test.dev');
+  for (const path of ['/auth/start', '/w/clubhack/nope']) {
+    const res = await send(app, 'GET', path, undefined, cookie);
+    expect(res.status).toBe(404);
+    expect(await res.json()).toEqual({ error: { code: 'not_found', message: 'Not found.' } });
+  }
 });
 
 it('logout-all ends every session', async () => {

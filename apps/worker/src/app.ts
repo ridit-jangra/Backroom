@@ -20,6 +20,7 @@ export function createApp(deps: Deps): Hono<AppEnv> {
   const app = new Hono<AppEnv>();
 
   app.onError(errorHandler);
+  app.notFound((c) => c.json({ error: { code: 'not_found', message: 'Not found.' } }, 404));
   app.use('*', requireSameOrigin);
   app.use('*', async (c, next) => {
     c.set('deps', deps);

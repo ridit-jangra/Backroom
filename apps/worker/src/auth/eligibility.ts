@@ -9,7 +9,7 @@ async function evaluate(
   db: D1Database,
   rawEmail: string,
   invite: { by: 'hash'; value: string | null } | { by: 'id'; value: string | null },
-  ownerEmail: string,
+  ownerEmail: string | undefined,
   now: number,
 ): Promise<Eligibility> {
   const email = rawEmail.trim().toLowerCase();
@@ -35,12 +35,13 @@ async function evaluate(
   }
 
   // (c) owner bootstrap
-  if (email === ownerEmail.trim().toLowerCase()) {
-    const owner = await db
+  const owner = (ownerEmail ?? '').trim().toLowerCase();
+  if (owner !== '' && email === owner) {
+    const existingOwner = await db
       .prepare("SELECT 1 AS x FROM workspace_members WHERE workspace_id = ? AND role = 'owner' LIMIT 1")
       .bind(workspaceId)
       .first();
-    if (!owner) return { ok: true, inviteId: null };
+    if (!existingOwner) return { ok: true, inviteId: null };
   }
   return NO;
 }
@@ -49,7 +50,7 @@ export async function checkEligibility(
   db: D1Database,
   email: string,
   inviteToken: string | undefined,
-  ownerEmail: string,
+  ownerEmail: string | undefined,
   now: number,
 ): Promise<Eligibility> {
   const value = inviteToken ? await sha256Hex(inviteToken) : null;
@@ -60,7 +61,7 @@ export async function checkEligibilityByInviteId(
   db: D1Database,
   email: string,
   inviteId: string | null,
-  ownerEmail: string,
+  ownerEmail: string | undefined,
   now: number,
 ): Promise<Eligibility> {
   return evaluate(db, email, { by: 'id', value: inviteId }, ownerEmail, now);

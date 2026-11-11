@@ -48,6 +48,11 @@ describe('eligibility', () => {
     expect(await checkEligibility(db(), 'x@example.com', undefined, OWNER, now)).toEqual({ ok: false });
   });
 
+  it('empty or unset owner email never matches and does not throw', async () => {
+    expect(await checkEligibility(db(), 'x@example.com', undefined, '', now)).toEqual({ ok: false });
+    expect(await checkEligibility(db(), 'x@example.com', undefined, undefined, now)).toEqual({ ok: false });
+  });
+
   it('owner email bootstraps owner', async () => {
     expect(await checkEligibility(db(), OWNER, undefined, OWNER, now)).toEqual({ ok: true, inviteId: null });
     const { userId } = await acceptLogin(db(), OWNER, null, OWNER, now);

@@ -17,7 +17,7 @@ export async function acceptLogin(
   db: D1Database,
   rawEmail: string,
   inviteId: string | null,
-  ownerEmail: string,
+  ownerEmail: string | undefined,
   now: number,
 ): Promise<{ userId: string }> {
   const email = rawEmail.trim().toLowerCase();
@@ -32,7 +32,8 @@ export async function acceptLogin(
     .first<{ deactivated_at: number | null }>();
   if (existing && existing.deactivated_at !== null) throw new ApiError(403, 'not_allowed', 'This account is deactivated.');
   const isMember = existing !== null;
-  const isOwnerEmail = email === ownerEmail.trim().toLowerCase();
+  const owner = (ownerEmail ?? '').trim().toLowerCase();
+  const isOwnerEmail = owner !== '' && email === owner;
 
   const stmts: D1PreparedStatement[] = [
     db

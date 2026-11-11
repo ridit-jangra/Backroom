@@ -6,6 +6,7 @@ import { navigate } from '../nav';
 export function Workspace({ slug }: { slug: string }) {
   const [data, setData] = useState<Bootstrap | null>(null);
   const [error, setError] = useState('');
+  const [signOutError, setSignOutError] = useState('');
   const [selected, setSelected] = useState<string | null>(null);
 
   useEffect(() => {
@@ -18,7 +19,7 @@ export function Workspace({ slug }: { slug: string }) {
       })
       .catch((err) => {
         if (!live) return;
-        if (err instanceof ApiClientError && err.status === 401) navigate('/login');
+        if (err instanceof ApiClientError && err.status === 401) navigate('/login', { replace: true });
         else setError(err instanceof Error ? err.message : 'Something went wrong');
       });
     return () => {
@@ -27,11 +28,16 @@ export function Workspace({ slug }: { slug: string }) {
   }, [slug]);
 
   async function signOut() {
+    setSignOutError('');
     try {
       await api('/auth/logout', { method: 'POST', body: {} });
-    } finally {
-      navigate('/login');
+    } catch (err) {
+      if (!(err instanceof ApiClientError && err.status === 401)) {
+        setSignOutError("Couldn't sign out. Check your connection and try again.");
+        return;
+      }
     }
+    navigate('/login');
   }
 
   if (error) return <p role="alert" className="card">{error}</p>;
@@ -76,6 +82,7 @@ export function Workspace({ slug }: { slug: string }) {
           <button type="button" onClick={signOut}>
             Sign out
           </button>
+          {signOutError && <span role="alert">{signOutError}</span>}
         </header>
         <section>
           <p>Messages arrive in Phase 2.</p>

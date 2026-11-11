@@ -8,7 +8,7 @@ import { Workspace } from './pages/Workspace';
 export const DEFAULT_WORKSPACE = 'clubhack';
 
 function Redirect({ to }: { to: string }) {
-  useEffect(() => navigate(to), [to]);
+  useEffect(() => navigate(to, { replace: true }), [to]);
   return null;
 }
 
