@@ -2,6 +2,7 @@ import { env } from 'cloudflare:test';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { checkEligibility, checkEligibilityByInviteId } from '../src/auth/eligibility';
 import { sha256Hex } from '../src/lib/crypto';
+import { ApiError } from '../src/lib/errors';
 import { acceptLogin } from '../src/workspace/membership';
 
 const WS = '01JCLUBHACK0000000000000WS';
@@ -103,8 +104,33 @@ describe('eligibility', () => {
 
   it('normalizes email', async () => {
     await db().prepare('INSERT INTO users (id, email, created_at) VALUES (?, ?, ?)').bind('01JUSER00000000000000000003', 'alice@example.com', now).run();
-    const { userId } = await acceptLogin(db(), 'alice@example.com', null, OWNER, now);
+    await addInvite('inv7', 'tok7');
+    const { userId } = await acceptLogin(db(), ' Alice@Example.COM ', 'inv7', OWNER, now);
     expect(userId).toBe('01JUSER00000000000000000003');
     expect(await count('SELECT count(*) AS n FROM users WHERE email = ?', 'alice@example.com')).toBe(1);
+  });
+
+  it('acceptLogin rejects when the invite was exhausted after eligibility', async () => {
+    await addInvite('inv5', 'tok5');
+    expect(await checkEligibilityByInviteId(db(), 'late@example.com', 'inv5', OWNER, now)).toEqual({ ok: true, inviteId: 'inv5' });
+    await db().prepare('UPDATE invites SET uses = max_uses WHERE id = ?').bind('inv5').run();
+    await expect(acceptLogin(db(), 'late@example.com', 'inv5', OWNER, now)).rejects.toMatchObject({ status: 403, code: 'not_allowed' });
+    await expect(acceptLogin(db(), 'late@example.com', 'inv5', OWNER, now)).rejects.toBeInstanceOf(ApiError);
+    expect(await count('SELECT count(*) AS n FROM workspace_members')).toBe(0);
+    expect(await count('SELECT count(*) AS n FROM channel_members')).toBe(0);
+    expect(await count('SELECT uses AS n FROM invites WHERE id = ?', 'inv5')).toBe(1);
+  });
+
+  it('acceptLogin twice for the same new email consumes one use', async () => {
+    await addInvite('inv6', 'tok6', { max: 2 });
+    const a = await acceptLogin(db(), 'dup@example.com', 'inv6', OWNER, now);
+    const b = await acceptLogin(db(), 'dup@example.com', 'inv6', OWNER, now);
+    expect(a.userId).toBe(b.userId);
+    expect(await count('SELECT uses AS n FROM invites WHERE id = ?', 'inv6')).toBe(1);
+  });
+
+  it('acceptLogin refuses a deactivated member', async () => {
+    await addMember('01JUSER00000000000000000004', 'gone@example.com', 'member', now);
+    await expect(acceptLogin(db(), 'gone@example.com', null, OWNER, now)).rejects.toMatchObject({ status: 403, code: 'not_allowed' });
   });
 });

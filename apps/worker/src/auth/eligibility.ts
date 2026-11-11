@@ -7,11 +7,12 @@ const NO: Eligibility = { ok: false };
 
 async function evaluate(
   db: D1Database,
-  email: string,
+  rawEmail: string,
   invite: { by: 'hash'; value: string | null } | { by: 'id'; value: string | null },
   ownerEmail: string,
   now: number,
 ): Promise<Eligibility> {
+  const email = rawEmail.trim().toLowerCase();
   const workspaceId = await getWorkspaceId(db);
   if (!workspaceId) return NO;
 
