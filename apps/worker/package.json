@@ -1,0 +1,22 @@
+{
+  "name": "@backroom/worker",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "pretest": "mkdir -p ../web/dist",
+    "test": "vitest run",
+    "predev": "mkdir -p ../web/dist",
+    "dev": "wrangler dev"
+  },
+  "dependencies": {
+    "@backroom/protocol": "*",
+    "hono": "4.13.18"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "0.23.0",
+    "@cloudflare/workers-types": "5.20261110.1",
+    "typescript": "6.0.3",
+    "vitest": "4.1.12",
+    "wrangler": "4.160.1"
+  }
+}
