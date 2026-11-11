@@ -2,6 +2,7 @@ import { env } from 'cloudflare:test';
 import { beforeEach, it, expect } from 'vitest';
 import { HTTPException } from 'hono/http-exception';
 import { createApp } from '../src/app';
+import { consoleMailer, pickMailer, resendMailer } from '../src/auth/mailer';
 import { captureMailer, post, resetDb, signIn, testDeps } from './helpers';
 
 beforeEach(resetDb);
@@ -154,4 +155,9 @@ it('non-400 HTTPException maps to its status with an error body', async () => {
   const res = await post(app, '/auth/teapot', {});
   expect(res.status).toBe(418);
   expect(await res.json()).toEqual({ error: { code: 'http_418', message: 'short and stout' } });
+});
+
+it('pickMailer selects console mailer only for "dev"', () => {
+  expect(pickMailer({ ...env, RESEND_API_KEY: 'dev' })).toBe(consoleMailer);
+  expect(pickMailer({ ...env, RESEND_API_KEY: 're_x' })).toBe(resendMailer);
 });

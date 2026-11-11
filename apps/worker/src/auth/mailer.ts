@@ -21,3 +21,15 @@ export const resendMailer: Mailer = {
     if (!res.ok) throw new ApiError(500, 'email_failed', 'Could not send email.');
   },
 };
+
+// Dev only: prints the link instead of emailing it. This is the single place a
+// sign-in token is allowed to be logged; only selected when RESEND_API_KEY === 'dev'.
+export const consoleMailer: Mailer = {
+  async sendMagicLink(_env, to, url) {
+    console.log(`Sign-in link for ${to}: ${url}`);
+  },
+};
+
+export function pickMailer(env: Env): Mailer {
+  return env.RESEND_API_KEY === 'dev' ? consoleMailer : resendMailer;
+}
