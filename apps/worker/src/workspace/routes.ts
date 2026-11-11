@@ -1,8 +1,10 @@
 import { Hono } from 'hono';
-import { MePatchBody } from '@backroom/protocol';
+import { InviteCreateBody, MemberPatchBody, MePatchBody } from '@backroom/protocol';
 import type { AppEnv } from '../app';
 import { readJson } from '../lib/http';
 import { requireSession } from '../middleware/session';
+import { requireAdmin } from './access';
+import { createInvite, listInvites, patchMember, revokeInvite } from './invites';
 import { getBootstrap, getMe } from './bootstrap';
 
 export const workspaceRoutes = new Hono<AppEnv>();
@@ -18,4 +20,29 @@ workspaceRoutes.patch('/me', requireSession, async (c) => {
   const userId = c.var.session!.userId;
   await c.env.DB.prepare('UPDATE users SET display_name = ? WHERE id = ?').bind(displayName, userId).run();
   return c.json(await getMe(c.env.DB, userId));
+});
+
+workspaceRoutes.post('/w/:slug/invites', requireSession, async (c) => {
+  const userId = c.var.session!.userId;
+  const { workspaceId } = await requireAdmin(c.env.DB, c.req.param('slug'), userId);
+  const opts = InviteCreateBody.parse(await readJson(c));
+  const { invite, token } = await createInvite(c.env.DB, workspaceId, userId, opts, c.var.deps.now());
+  return c.json({ invite, url: `${c.env.APP_ORIGIN}/invite/${token}` }, 201);
+});
+
+workspaceRoutes.get('/w/:slug/invites', requireSession, async (c) => {
+  const { workspaceId } = await requireAdmin(c.env.DB, c.req.param('slug'), c.var.session!.userId);
+  return c.json({ invites: await listInvites(c.env.DB, workspaceId, c.var.deps.now()) });
+});
+
+workspaceRoutes.delete('/invites/:id', requireSession, async (c) => {
+  await revokeInvite(c.env.DB, c.req.param('id'), c.var.session!.userId, c.var.deps.now());
+  return c.json({ ok: true });
+});
+
+workspaceRoutes.patch('/w/:slug/members/:userId', requireSession, async (c) => {
+  const patch = MemberPatchBody.parse(await readJson(c));
+  return c.json(
+    await patchMember(c.env.DB, c.req.param('slug'), c.var.session!.userId, c.req.param('userId'), patch, c.var.deps.now()),
+  );
 });
