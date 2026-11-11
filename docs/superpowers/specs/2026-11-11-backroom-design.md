@@ -76,7 +76,7 @@ Storage, Cookies) were not opened.
 | `packages/emoji` | Shortcode table (from `emoji-datasource`), shortcode parse/render, skin tones | — |
 | `apps/desktop` | Electron shell: hardened window, preload bridge, notifications, tray/badge, deep links, keychain session | Hosted web app |
 
-Monorepo with pnpm workspaces; TypeScript throughout.
+Monorepo with npm workspaces (no global tool installs needed); TypeScript throughout.
 
 **Why one hub per workspace:** ordering and fan-out are trivial and one Durable
 Object comfortably serves <50 users. It can be split per channel later without a
@@ -195,7 +195,7 @@ only when `seq` advances; typing never touches D1; presence never touches D1.
 | Method & path | Purpose |
 |---|---|
 | `POST /auth/start` | `{email, inviteToken?}` → always 200 "check your email" |
-| `GET /auth/verify?t=` | consume token → session cookie → redirect to app (or to `backroom://auth?code=` when started from desktop) |
+| `POST /auth/verify` | `{token}` → consume token → session cookie (or, when started from desktop, a one-time `code` for `backroom://auth?code=`). The emailed link opens the SPA page `/verify?t=…`, which shows a "Sign in" button that makes this POST, so link scanners that prefetch URLs cannot consume the token. |
 | `POST /auth/desktop/exchange` | `{code}` → session token (one-time, 2 min TTL) |
 | `POST /auth/logout`, `POST /auth/logout-all` | end session(s) |
 | `GET /me`, `PATCH /me` | profile (display name, avatar) |
