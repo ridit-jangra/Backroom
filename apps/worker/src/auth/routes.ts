@@ -1,0 +1,75 @@
+import { Hono } from 'hono';
+import { AuthStartBody, AuthVerifyBody } from '@backroom/protocol';
+import type { AppEnv } from '../app';
+import { ApiError } from '../lib/errors';
+import { randomToken, sha256Hex } from '../lib/crypto';
+import { hitRateLimit } from '../lib/rateLimit';
+import { checkEligibility, checkEligibilityByInviteId } from './eligibility';
+import { createSession, deleteAllSessions, deleteSession } from './sessions';
+import { acceptLogin, WORKSPACE_SLUG } from '../workspace/membership';
+import { clearSessionCookie, requireSession, setSessionCookie } from '../middleware/session';
+
+const HOUR_MS = 3_600_000;
+const LINK_TTL_MS = 900_000;
+
+export const authRoutes = new Hono<AppEnv>();
+
+authRoutes.post('/start', async (c) => {
+  const { email, inviteToken } = AuthStartBody.parse(await c.req.json());
+  const { now: nowFn, mailer } = c.var.deps;
+  const now = nowFn();
+  const db = c.env.DB;
+  const ip = c.req.header('CF-Connecting-IP') ?? 'unknown';
+
+  const emailOk = await hitRateLimit(db, `start:email:${email}`, 5, HOUR_MS, now);
+  const ipOk = await hitRateLimit(db, `start:ip:${ip}`, 20, HOUR_MS, now);
+  if (emailOk && ipOk) {
+    const elig = await checkEligibility(db, email, inviteToken, c.env.OWNER_EMAIL, now);
+    if (elig.ok) {
+      const raw = randomToken();
+      await db
+        .prepare('INSERT INTO login_tokens (token_hash, email, invite_id, expires_at) VALUES (?, ?, ?, ?)')
+        .bind(await sha256Hex(raw), email, elig.inviteId, now + LINK_TTL_MS)
+        .run();
+      try {
+        await mailer.sendMagicLink(c.env, email, `${c.env.APP_ORIGIN}/verify?t=${raw}`);
+      } catch {
+        console.error(JSON.stringify({ level: 'error', code: 'email_failed' }));
+      }
+    }
+  }
+  return c.json({ ok: true });
+});
+
+authRoutes.post('/verify', async (c) => {
+  const { token } = AuthVerifyBody.parse(await c.req.json());
+  const now = c.var.deps.now();
+  const db = c.env.DB;
+  const row = await db
+    .prepare(
+      'UPDATE login_tokens SET used_at = ? WHERE token_hash = ? AND used_at IS NULL AND expires_at > ? RETURNING email, invite_id',
+    )
+    .bind(now, await sha256Hex(token), now)
+    .first<{ email: string; invite_id: string | null }>();
+  if (!row) throw new ApiError(400, 'link_invalid', 'This sign-in link is invalid, expired or already used.');
+
+  const elig = await checkEligibilityByInviteId(db, row.email, row.invite_id, c.env.OWNER_EMAIL, now);
+  if (!elig.ok) throw new ApiError(403, 'not_allowed', 'This email is not allowed to join.');
+
+  const { userId } = await acceptLogin(db, row.email, elig.inviteId, c.env.OWNER_EMAIL, now);
+  const session = await createSession(db, userId, c.req.header('User-Agent') ?? null, now);
+  setSessionCookie(c, session);
+  return c.json({ ok: true, workspace: WORKSPACE_SLUG });
+});
+
+authRoutes.post('/logout', requireSession, async (c) => {
+  await deleteSession(c.env.DB, c.var.session!.token);
+  clearSessionCookie(c);
+  return c.json({ ok: true });
+});
+
+authRoutes.post('/logout-all', requireSession, async (c) => {
+  await deleteAllSessions(c.env.DB, c.var.session!.userId);
+  clearSessionCookie(c);
+  return c.json({ ok: true });
+});
