@@ -1,0 +1,10 @@
+{
+  "name": "backroom",
+  "private": true,
+  "workspaces": ["packages/*", "apps/*"],
+  "scripts": {
+    "test": "npm test --workspaces --if-present",
+    "build": "npm run build -w apps/web",
+    "dev": "npm run dev -w apps/worker"
+  }
+}
