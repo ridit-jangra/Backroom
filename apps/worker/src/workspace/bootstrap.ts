@@ -21,6 +21,7 @@ export async function getBootstrap(db: D1Database, slug: string, userId: string)
     db
       .prepare(
         `SELECT c.id AS id, c.name AS name, c.kind AS kind, c.topic AS topic,
+                c.created_by AS createdBy, c.dm_key AS dmKey,
                 c.last_seq AS lastSeq, cm.last_read_seq AS lastReadSeq,
                 (SELECT COUNT(*) FROM messages m
                   WHERE m.channel_id = c.id AND m.seq > cm.last_read_seq AND m.deleted_at IS NULL
@@ -49,7 +50,12 @@ export async function getBootstrap(db: D1Database, slug: string, userId: string)
   return {
     workspace: ws!.results[0] as { id: string; slug: string; name: string },
     me: { ...(me!.results[0] as Me), role: role as Role },
-    channels: channels!.results as ChannelSummary[],
+    channels: (channels!.results as Array<Omit<ChannelSummary, 'dmUserIds'> & { dmKey: string | null }>).map(
+      ({ dmKey, ...c }) => ({
+        ...c,
+        dmUserIds: c.kind === 'dm' && dmKey ? dmKey.split(',') : null,
+      }),
+    ),
     members: members!.results as MemberSummary[],
   };
 }

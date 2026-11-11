@@ -23,11 +23,16 @@ export type ApiErrorBody = { error: { code: string; message: string } };
 
 export type Role = 'owner' | 'admin' | 'member';
 
+export type ChannelKind = 'public' | 'private' | 'dm';
+
 export type ChannelSummary = {
   id: string;
   name: string | null;
-  kind: 'public' | 'private' | 'dm';
+  kind: ChannelKind;
   topic: string | null;
+  createdBy: string | null;
+  /** Sorted member IDs for kind 'dm', otherwise null. */
+  dmUserIds: string[] | null;
   lastSeq: number;
   lastReadSeq: number;
   unreadCount: number;

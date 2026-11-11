@@ -39,6 +39,25 @@ describe('bootstrap', () => {
     expect(b.members.map((m) => m.id)).toEqual([b.me.id]);
   });
 
+  it('channels carry createdBy and dmUserIds (null unless dm)', async () => {
+    const { app, cookie, userId } = await setup();
+    const first = (await (await send(app, 'GET', '/w/clubhack/bootstrap', undefined, cookie)).json()) as Bootstrap;
+    expect(first.channels[0]!.dmUserIds).toBeNull();
+    expect(first.channels[0]).toHaveProperty('createdBy');
+    const seeded = await env.DB.prepare('SELECT created_by AS c FROM channels WHERE id = ?').bind(GENERAL).first<{ c: string | null }>();
+    expect(first.channels[0]!.createdBy).toBe(seeded!.c);
+    await env.DB.batch([
+      env.DB.prepare(
+        "INSERT INTO channels (id, workspace_id, name, kind, dm_key, created_by, created_at) VALUES ('01JDMTEST000000000000000AB', (SELECT workspace_id FROM channels WHERE id = ?), NULL, 'dm', 'A,B', ?, 1)",
+      ).bind(GENERAL, userId),
+      env.DB.prepare("INSERT INTO channel_members (channel_id, user_id, joined_at) VALUES ('01JDMTEST000000000000000AB', ?, 1)").bind(userId),
+    ]);
+    const b = (await (await send(app, 'GET', '/w/clubhack/bootstrap', undefined, cookie)).json()) as Bootstrap;
+    const dm = b.channels.find((c) => c.kind === 'dm')!;
+    expect(dm.dmUserIds).toEqual(['A', 'B']);
+    expect(dm.createdBy).toBe(userId);
+  });
+
   it('unread excludes thread replies unless also_in_channel', async () => {
     const { app, cookie, userId } = await setup();
     await addMessage('m1', 1, userId);
