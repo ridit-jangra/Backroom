@@ -1,14 +1,9 @@
 import type { D1Migration } from 'cloudflare:test';
+import type { Env as AppBindings } from '../src/env';
 
 declare global {
   namespace Cloudflare {
-    interface Env {
-      DB: D1Database;
-      ASSETS: Fetcher;
-      RESEND_API_KEY: string;
-      OWNER_EMAIL: string;
-      APP_ORIGIN: string;
-      EMAIL_FROM: string;
+    interface Env extends AppBindings {
       TEST_MIGRATIONS: D1Migration[];
     }
   }

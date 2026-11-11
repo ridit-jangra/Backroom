@@ -18,7 +18,18 @@ it('keeps messages_fts in sync on insert and soft delete', async () => {
   expect((await hit())!.n).toBe(0);
 });
 
-it('rejects an invalid role', async () => {
-  await expect(env.DB.prepare(
-    "INSERT INTO workspace_members(workspace_id,user_id,role,joined_at) VALUES ('w','u','god',0)").run()).rejects.toThrow();
+it('keeps messages_fts in sync on edit', async () => {
+  const ch = await env.DB.prepare("SELECT id FROM channels WHERE name='general'").first<{ id: string }>();
+  await env.DB.prepare("INSERT INTO messages(id,channel_id,seq,user_id,body,created_at) VALUES ('m2',?,2,'u1','hello banana',0)").bind(ch!.id).run();
+  await env.DB.prepare("UPDATE messages SET body='hello cherry' WHERE id='m2'").run();
+  const count = (q: string) => env.DB.prepare('SELECT count(*) n FROM messages_fts WHERE messages_fts MATCH ?').bind(q).first<{ n: number }>();
+  expect((await count('banana'))!.n).toBe(0);
+  expect((await count('cherry'))!.n).toBe(1);
+});
+
+it('rejects an invalid role but accepts a valid one', async () => {
+  const insert = (role: string) => env.DB.prepare(
+    'INSERT INTO workspace_members(workspace_id,user_id,role,joined_at) VALUES (?,?,?,0)').bind('w', 'u-' + role, role).run();
+  await expect(insert('god')).rejects.toThrow(/CHECK constraint/);
+  await expect(insert('member')).resolves.toBeDefined();
 });
