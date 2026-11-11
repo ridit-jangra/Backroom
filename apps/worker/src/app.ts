@@ -1,13 +1,14 @@
 import { Hono } from 'hono';
 import type { Env } from './env';
+import type { SessionInfo } from './auth/sessions';
 import { errorHandler } from './lib/errors';
 import { requireSameOrigin } from './middleware/origin';
+import { loadSession } from './middleware/session';
 
-// Placeholders: Mailer moves to its own module in Task 6, SessionInfo in Task 4.
+// Placeholder: Mailer moves to its own module in Task 6.
 export interface Mailer {
   sendMagicLink(env: Env, to: string, url: string): Promise<void>;
 }
-export type SessionInfo = { userId: string; token: string };
 
 export interface Deps {
   mailer: Mailer;
@@ -25,6 +26,7 @@ export function createApp(deps: Deps): Hono<AppEnv> {
     c.set('deps', deps);
     await next();
   });
+  app.use('*', loadSession);
 
   app.get('/health', (c) => c.json({ ok: true }));
 
