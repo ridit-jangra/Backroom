@@ -71,3 +71,25 @@ export async function resetDb(): Promise<void> {
     env.DB.prepare('UPDATE channels SET last_seq = 0, topic = NULL, archived_at = NULL'),
   ]);
 }
+
+/** Generic request with Origin; `body` is JSON-encoded when provided. */
+export async function send(
+  app: Hono<AppEnv>,
+  method: string,
+  path: string,
+  body?: unknown,
+  cookie?: string,
+): Promise<Response> {
+  const ctx = createExecutionContext();
+  const headers: Record<string, string> = { Origin: 'https://app.test' };
+  if (body !== undefined) headers['Content-Type'] = 'application/json';
+  if (cookie) headers.Cookie = cookie;
+  const res = await app.request(
+    path,
+    { method, headers, body: body === undefined ? undefined : JSON.stringify(body) },
+    env,
+    ctx,
+  );
+  await waitOnExecutionContext(ctx);
+  return res;
+}

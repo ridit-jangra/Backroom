@@ -6,6 +6,7 @@ import { authRoutes } from './auth/routes';
 import { errorHandler } from './lib/errors';
 import { requireSameOrigin } from './middleware/origin';
 import { loadSession } from './middleware/session';
+import { workspaceRoutes } from './workspace/routes';
 
 
 export interface Deps {
@@ -29,6 +30,7 @@ export function createApp(deps: Deps): Hono<AppEnv> {
   app.get('/health', (c) => c.json({ ok: true }));
 
   app.route('/auth', authRoutes);
+  app.route('/', workspaceRoutes);
 
   return app;
 }
