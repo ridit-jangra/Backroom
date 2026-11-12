@@ -10,6 +10,7 @@ import {
   type ThreadPage,
 } from '@backroom/protocol';
 import { api, ApiClientError } from '../api';
+import { desktopNotify, isDesktop } from '../desktop/bridge';
 import { navigate } from '../nav';
 import { notificationText, showNotification } from '../notifications';
 import { initialChat, isViewing, lastSeenFor, reduce, type ChatEvent, type ChatState } from '../state/chat';
@@ -318,6 +319,11 @@ function startSession(
       if (tid && state.openThreadId === tid && threadChannel === f.channelId && !state.threads[tid]) void loadThread(tid);
     } else if (f.t === 'notify') {
       const text = notificationText(f, { channels: state.channels, members: state.bootstrap?.members ?? [], me: state.me });
+      if (isDesktop()) {
+        // The shell owns permission; notify whenever the user is not looking at that channel.
+        if (!isViewing(state, f.channelId)) void desktopNotify({ ...text, channelId: f.channelId });
+        return;
+      }
       showNotification(f, {
         viewing: isViewing(state, f.channelId),
         ...text,

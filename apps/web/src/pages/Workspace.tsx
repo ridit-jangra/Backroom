@@ -9,6 +9,7 @@ import { NewDmDialog } from '../components/NewDmDialog';
 import { Sidebar } from '../components/Sidebar';
 import { ThreadPanel } from '../components/ThreadPanel';
 import { TypingIndicator } from '../components/TypingIndicator';
+import { desktopSetBadge, isDesktop, onDesktopNavigate } from '../desktop/bridge';
 import { channelLabel, notificationPermission, requestNotificationPermission } from '../notifications';
 import { useChat } from '../realtime/useChat';
 import { EmojiProvider } from '../emoji/EmojiContext';
@@ -18,7 +19,7 @@ import type { SearchHit } from '@backroom/protocol';
 export function Workspace({ slug, channelId }: { slug: string; channelId?: string }) {
   const { state, actions, error, threadError } = useChat(slug);
   const [signOutError, setSignOutError] = useState('');
-  const [permission, setPermission] = useState(notificationPermission);
+  const [permission, setPermission] = useState(() => (isDesktop() ? 'unsupported' : notificationPermission()));
   const [searchQuery, setSearchQuery] = useState('');
   const [searchDraft, setSearchDraft] = useState('');
   const [jumpError, setJumpError] = useState('');
@@ -29,6 +30,15 @@ export function Workspace({ slug, channelId }: { slug: string; channelId?: strin
   const customEmoji = useMemo(() => Object.values(state.customEmoji), [state.customEmoji]);
 
   useEffect(() => setJumpError(''), [channelId]);
+
+  // Desktop shell: dock/taskbar badge = unread across the channels I belong to.
+  const totalUnread = Object.values(state.channels).reduce((n, c) => n + c.unreadCount, 0);
+  useEffect(() => {
+    if (state.bootstrap) void desktopSetBadge(totalUnread);
+  }, [totalUnread, state.bootstrap]);
+
+  // A clicked desktop notification asks to open its channel.
+  useEffect(() => onDesktopNavigate((id) => navigate(`/client/${encodeURIComponent(slug)}/${encodeURIComponent(id)}`)), [slug]);
 
   // With no channel in the URL, land on #general (else the first channel).
   useEffect(() => {

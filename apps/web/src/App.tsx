@@ -7,6 +7,7 @@ import { Admin } from './pages/Admin';
 import { CustomEmojiPage } from './pages/CustomEmoji';
 import { Workspace } from './pages/Workspace';
 import { About } from './pages/About';
+import { DesktopAuth } from './pages/DesktopAuth';
 
 export const DEFAULT_WORKSPACE = 'clubhack';
 
@@ -26,6 +27,7 @@ export function App() {
   if (path === '/') return <Redirect to={`/client/${DEFAULT_WORKSPACE}`} />;
   if (path === '/login') return <Login />;
   if (path === '/verify') return <Verify />;
+  if (path === '/desktop-auth') return <DesktopAuth />;
   if (path === '/about') return <About />;
   const invite = /^\/invite\/([^/]+)$/.exec(path);
   if (invite) return <Invite token={decodeURIComponent(invite[1]!)} />;

@@ -1,5 +1,6 @@
 import { useState, type FormEvent } from 'react';
 import { api } from '../api';
+import { desktopLoginChallenge, isDesktop } from '../desktop/bridge';
 
 export function Login() {
   const [email, setEmail] = useState('');
@@ -13,9 +14,14 @@ export function Login() {
     setError('');
     const inviteToken = new URLSearchParams(location.search).get('invite');
     try {
+      const desktopChallenge = isDesktop() ? await desktopLoginChallenge() : '';
       await api('/auth/start', {
         method: 'POST',
-        body: inviteToken ? { email, inviteToken } : { email },
+        body: {
+          email,
+          ...(inviteToken ? { inviteToken } : {}),
+          ...(desktopChallenge ? { desktopChallenge } : {}),
+        },
       });
       setSent(true);
     } catch (err) {

@@ -13,6 +13,7 @@
   "dependencies": {
     "@backroom/emoji": "*",
     "@backroom/protocol": "*",
+    "@tauri-apps/api": "2.12.4",
     "fflate": "0.8.3",
     "react": "19.3.1",
     "react-dom": "19.3.1"
