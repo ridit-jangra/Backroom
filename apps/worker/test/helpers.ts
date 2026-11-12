@@ -109,6 +109,14 @@ export function jpeg(w: number, h: number): Uint8Array {
   return padTo([0xff, 0xd8, ...app0, ...sof0, 0xff, 0xd9]);
 }
 
+/** RIFF/WEBP with a VP8X chunk carrying the canvas size, padded with zeros to `size`. */
+export function webp(w: number, h: number, size?: number): Uint8Array {
+  const le24 = (n: number) => [n & 255, (n >>> 8) & 255, (n >>> 16) & 255];
+  const riff = [0x52, 0x49, 0x46, 0x46, 0, 0, 0, 0, 0x57, 0x45, 0x42, 0x50];
+  const vp8x = [0x56, 0x50, 0x38, 0x58, 10, 0, 0, 0, 0, 0, 0, 0, ...le24(w - 1), ...le24(h - 1)];
+  return padTo([...riff, ...vp8x], size);
+}
+
 /** Multipart `POST /w/:slug/emoji` (slug `clubhack`) with `name` and `image`, plus Origin. */
 export async function uploadEmoji(
   app: Hono<AppEnv>,

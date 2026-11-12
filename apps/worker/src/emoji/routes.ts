@@ -13,7 +13,9 @@ import {
 import { lookupEmoji } from '@backroom/emoji';
 import type { AppEnv } from '../app';
 import { hubFor } from '../hub/client';
+import { readCappedBody } from '../lib/body';
 import { ApiError } from '../lib/errors';
+import { MEDIA_SECURITY_HEADERS } from '../lib/media';
 import { requireSession } from '../middleware/session';
 import { requireMember } from '../workspace/access';
 import { readJson } from '../lib/http';
@@ -26,31 +28,6 @@ const ID_RE = /^[0-9A-Z]{26}$/;
 const SERVABLE = new Set(['image/png', 'image/gif', 'image/jpeg']);
 const tooLarge = () => new ApiError(413, 'too_large', 'Emoji images must be 128 KB or smaller.');
 const invalidRequest = () => new ApiError(400, 'invalid_request', 'Send a multipart form with a name and an image.');
-
-/** Reads at most `max` bytes of the body, failing with 413 as soon as more arrive (covers bodies without Content-Length). */
-async function readCappedBody(req: Request, max: number): Promise<Uint8Array> {
-  if (!req.body) return new Uint8Array(0);
-  const reader = req.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    total += value.byteLength;
-    if (total > max) {
-      await reader.cancel().catch(() => {});
-      throw tooLarge();
-    }
-    chunks.push(value);
-  }
-  const out = new Uint8Array(total);
-  let at = 0;
-  for (const c of chunks) {
-    out.set(c, at);
-    at += c.byteLength;
-  }
-  return out;
-}
 
 async function broadcast(env: AppEnv['Bindings'], workspaceId: string, change: { added: CustomEmoji[]; removed: string[] }) {
   try {
@@ -93,7 +70,7 @@ emojiRoutes.post('/w/:slug/emoji', requireSession, async (c) => {
 
   // The client's Content-Type header is only used to find the multipart boundary.
   if (!/^multipart\/form-data\s*;/i.test(contentType)) throw invalidRequest();
-  const body = await readCappedBody(c.req.raw, CUSTOM_EMOJI_UPLOAD_MAX_BYTES);
+  const body = await readCappedBody(c.req.raw, CUSTOM_EMOJI_UPLOAD_MAX_BYTES, tooLarge);
   let form: FormData;
   try {
     form = await new Response(body, { headers: { 'Content-Type': contentType } }).formData();
@@ -169,9 +146,7 @@ emojiRoutes.get('/emoji/:id', requireSession, async (c) => {
   const stored = obj.httpMetadata?.contentType ?? '';
   const headers = new Headers({
     'Content-Type': SERVABLE.has(stored) ? stored : 'application/octet-stream',
-    'X-Content-Type-Options': 'nosniff',
-    'Cache-Control': 'private, max-age=31536000, immutable',
-    'Content-Security-Policy': "default-src 'none'; sandbox",
+    ...MEDIA_SECURITY_HEADERS,
     ETag: obj.httpEtag,
   });
   // A conditional get whose precondition failed returns the object without a body: the etag matched.
