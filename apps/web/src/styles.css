@@ -129,3 +129,12 @@ button.link:hover { text-decoration: underline; }
 .search-panel .result .meta { display: block; font-size: 0.8rem; color: var(--muted); }
 mark { background: #ffe58a; color: inherit; border-radius: 2px; }
 @media (prefers-color-scheme: dark) { mark { background: #7a6212; } }
+
+.error-boundary {
+  margin: 4rem auto;
+  max-width: 24rem;
+  padding: 1.5rem;
+  text-align: center;
+  border: 1px solid currentColor;
+  border-radius: 8px;
+}
