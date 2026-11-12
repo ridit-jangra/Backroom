@@ -4,7 +4,7 @@ import type { FileInfo, SearchHit, SearchPage } from '@backroom/protocol';
 import { createApp } from '../src/app';
 import { deleteMessage, sendMessage } from '../src/messaging/store';
 import { newId } from '../src/lib/ids';
-import { HIT_END, HIT_START, decodeCursor, encodeCursor, splitSnippet } from '../src/search/search';
+import { HIT_END, HIT_START, buildSearchSql, decodeCursor, encodeCursor, splitSnippet } from '../src/search/search';
 import { GENERAL, captureMailer, insertChannel, resetDb, seedUsers, send, testDeps, uploadFile } from './helpers';
 
 beforeEach(resetDb);
@@ -135,6 +135,18 @@ describe('search', () => {
       env.DB.prepare("INSERT INTO messages (id, channel_id, seq, user_id, body, created_at) VALUES (?, ?, 1, ?, 'zebra elsewhere', ?)").bind(newId(), OTHER_CH, s.bob.userId, NOW),
     ]);
 
+    // ... with an attached file whose name matches.
+    const otherMsg = newId();
+    const otherFile = newId();
+    await env.DB.batch([
+      env.DB.prepare("INSERT INTO messages (id, channel_id, seq, user_id, body, created_at) VALUES (?, ?, 2, ?, 'see file', ?)").bind(otherMsg, OTHER_CH, s.bob.userId, NOW),
+      env.DB.prepare(
+        "INSERT INTO files (id, workspace_id, uploader_id, r2_key, name, mime, size, created_at) VALUES (?, ?, ?, ?, 'zebra-plans.pdf', 'application/pdf', 1, ?)",
+      ).bind(otherFile, OTHER_WS, s.bob.userId, `ws/${OTHER_WS}/${otherFile}`, NOW),
+      env.DB.prepare('INSERT INTO message_files (message_id, file_id) VALUES (?, ?)').bind(otherMsg, otherFile),
+    ]);
+    expect((await s.q(s.bob.cookie, 'plans')).results).toEqual([]);
+
     const carol = await s.q(s.carol.cookie, 'zebra');
     expect(s.chans(carol)).toEqual([GENERAL, ZOO].sort());
     expect(carol.results.find((r) => r.channel.id === ZOO)!.channel).toEqual({ id: ZOO, name: 'zoo', kind: 'public', isMember: false });
@@ -147,6 +159,12 @@ describe('search', () => {
     // Filter-only search follows the same rules.
     expect(s.chans(await s.q(s.carol.cookie, `from:@alice`)).every((c) => c === GENERAL || c === ZOO)).toBe(true);
     expect((await s.q(s.carol.cookie, 'in:#p')).results).toEqual([]);
+    for (const f of ['from:@alice', 'in:#general']) {
+      const page = await s.q(s.carol.cookie, f);
+      expect(page.results.length, f).toBeGreaterThan(0);
+      expect(page.results.some((r) => r.message.id === gone.id), f).toBe(false);
+      expect(page.results.every((r) => r.message.deletedAt === null), f).toBe(true);
+    }
 
     expect((await send(s.app, 'POST', `/channels/${P}/leave`, undefined, s.bob.cookie)).status).toBe(200);
     expect(s.chans(await s.q(s.bob.cookie, 'zebra'))).toEqual([GENERAL, DM, ZOO].sort());
@@ -267,6 +285,10 @@ describe('search', () => {
     expect(s.ids(await s.q(s.carol.cookie, 'zebra after:2026-11-01')).sort()).toEqual([a2.id, a3.id, b2.id].sort());
     expect(s.ids(await s.q(s.carol.cookie, 'zebra before:2026-11-03')).sort()).toEqual([a1.id, a2.id, b2.id].sort());
     expect(s.ids(await s.q(s.carol.cookie, 'after:2026-11-01 before:2026-11-03 from:@alice'))).toEqual([a2.id]);
+    // A channel named like another channel's (lower-cased) id cannot take over `in:<id>`.
+    const decoy = await insertChannel({ name: RANDOM.toLowerCase(), kind: 'public', memberIds: [s.alice.userId] });
+    await s.say(decoy, 'zebra decoy', { now: nov3 });
+    expect(s.ids(await s.q(s.carol.cookie, `zebra in:${RANDOM}`))).toEqual([a3.id]);
     expect(await s.q(s.carol.cookie, 'zebra in:#nope')).toEqual({ results: [], nextCursor: null });
     expect(await s.q(s.carol.cookie, 'zebra from:@nobody')).toEqual({ results: [], nextCursor: null });
     const bad = await s.raw(s.carol.cookie, 'zebra before:2026-13-01');
@@ -336,6 +358,32 @@ describe('search', () => {
     const g = await s.upload(s.alice.cookie, 'plan.pdf');
     await s.say(GENERAL, '', { fileIds: [g.id] });
     expect((await s.q(s.carol.cookie, 'plan')).results[0]!.snippet).toEqual([]);
+  });
+
+  it('query plans do not depend on planner statistics', async () => {
+    const plan = async (hasMatch: boolean) => {
+      const binds = [hasMatch ? '"zebra"' : null, WS, 'U', NOW, 21, 0];
+      const { results } = await env.DB.prepare(`EXPLAIN QUERY PLAN ${buildSearchSql(hasMatch, '')}`)
+        .bind(...binds)
+        .all<{ id: number; parent: number; detail: string }>();
+      return results;
+    };
+    const firstTopLevelAccess = (rows: { parent: number; detail: string }[]) =>
+      rows.find((r) => r.parent === 0 && /^(SCAN|SEARCH) /.test(r.detail))?.detail;
+
+    // Filter-only: a backward rowid scan of messages that stops early, never a sort over the workspace.
+    const f = await plan(false);
+    expect(firstTopLevelAccess(f)).toBe('SCAN m');
+    expect(f.some((r) => r.detail.includes('USE TEMP B-TREE FOR ORDER BY'))).toBe(false);
+    expect(f.some((r) => r.detail.includes('idx_messages_channel_seq'))).toBe(false);
+
+    // Match: each FTS table drives its CTE branch; the outer query starts from `best` and looks rows up by key.
+    const m = await plan(true);
+    expect(firstTopLevelAccess(m)).toBe('SCAN best');
+    expect(m.some((r) => r.detail.startsWith('SCAN messages_fts VIRTUAL TABLE'))).toBe(true);
+    expect(m.some((r) => r.detail.startsWith('SCAN files_fts VIRTUAL TABLE'))).toBe(true);
+    expect(m.some((r) => r.detail.includes('idx_messages_channel_seq'))).toBe(false);
+    expect(m.some((r) => /^SCAN (m|c|channels|messages)\b/.test(r.detail))).toBe(false);
   });
 
   it('results carry files and reactions', async () => {
