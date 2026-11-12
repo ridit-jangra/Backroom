@@ -41,7 +41,7 @@ function mentionStatements(db: D1Database, messageId: string, m: ParsedMentions)
 type Context = {
   channel: { kind: ChannelKind; archivedAt: number | null } | null;
   members: MemberNotify[];
-  parent: { channelId: string; parentId: string | null } | null;
+  parent: { channelId: string; parentId: string | null; deletedAt: number | null } | null;
   followers: string[];
 };
 
@@ -61,7 +61,9 @@ async function loadContext(db: D1Database, channelId: string, parentId: string |
   ];
   if (parentId) {
     stmts.push(
-      db.prepare('SELECT channel_id AS channelId, parent_id AS parentId FROM messages WHERE id = ?').bind(parentId),
+      db
+        .prepare('SELECT channel_id AS channelId, parent_id AS parentId, deleted_at AS deletedAt FROM messages WHERE id = ?')
+        .bind(parentId),
       db.prepare('SELECT user_id AS userId FROM thread_follows WHERE message_id = ?').bind(parentId),
     );
   }
@@ -89,7 +91,11 @@ export async function sendMessage(
   const ctx = await loadContext(db, input.channelId, input.parentId);
   if (!ctx.channel || !ctx.members.some((m) => m.userId === input.userId)) return { ok: false, code: 'not_found' };
   if (ctx.channel.archivedAt !== null) return { ok: false, code: 'archived' };
-  if (input.parentId && (!ctx.parent || ctx.parent.channelId !== input.channelId || ctx.parent.parentId !== null)) {
+  if (
+    input.parentId &&
+    (!ctx.parent || ctx.parent.channelId !== input.channelId || ctx.parent.parentId !== null || ctx.parent.deletedAt !== null)
+  ) {
+    // A deleted parent is a placeholder: it takes no new replies.
     return { ok: false, code: 'invalid' };
   }
 

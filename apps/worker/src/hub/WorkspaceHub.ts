@@ -7,10 +7,12 @@ import {
   type ClientFrame,
   type HubFrame,
   type Message,
+  type NackCode,
   type PresenceState,
 } from '@backroom/protocol';
 import type { Env } from '../env';
 import { catchUp } from '../messaging/read';
+import { deleteMessage, editMessage, sendMessage, type Audience } from '../messaging/store';
 import { channelsOf, getAtt, setAtt } from './attachment';
 
 const MAX_FRAME_CHARS = 262_144;
@@ -51,6 +53,13 @@ export function budgetCatchup(
 }
 /** Never schedule an alarm in the real past: workerd would fire it at once and could spin (P2-R6). */
 const MIN_ALARM_DELAY_MS = 1_000;
+/** How long the in-memory clientId map remembers a send; D1's unique index is the backstop after that. */
+const RECENT_TTL_MS = 300_000;
+const RECENT_MAX = 1_000;
+
+type SendFrame = Extract<ClientFrame, { t: 'send' }>;
+type EditFrame = Extract<ClientFrame, { t: 'edit' }>;
+type DeleteFrame = Extract<ClientFrame, { t: 'delete' }>;
 
 function errorResponse(status: number, code: string, message: string): Response {
   return Response.json({ error: { code, message } }, { status });
@@ -63,6 +72,11 @@ function errorResponse(status: number, code: string, message: string): Response 
 export class WorkspaceHub extends DurableObject<Env> {
   /** Clock for presence; tests override it through `runInDurableObject`. */
   now: () => number = () => Date.now();
+
+  /** Per-channel tail of the write chain, so D1 writes and their broadcasts leave in `seq` order. */
+  private queues = new Map<string, Promise<unknown>>();
+  /** Recent sends keyed `${userId}:${clientId}` (insertion order = age); a nack deletes its entry. */
+  private recent = new Map<string, { at: number; result: Promise<HubFrame> }>();
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -118,10 +132,124 @@ export class WorkspaceHub extends DurableObject<Env> {
       case 'ping':
         // Normally answered by the auto-response; this covers any non-identical ping text.
         return this.sendFrame(ws, { t: 'pong' });
+      case 'send':
+        return this.onSend(ws, f);
+      case 'edit':
+        return this.onEditOrDelete(ws, f);
+      case 'delete':
+        return this.onEditOrDelete(ws, f);
       default:
-        // send/edit/delete/mark_read/mark_thread_read/typing: added by later tasks.
+        // mark_read/mark_thread_read/typing: added by later tasks.
         return;
     }
+  }
+
+  private enqueue<T>(channelId: string, fn: () => Promise<T>): Promise<T> {
+    const prev = this.queues.get(channelId) ?? Promise.resolve();
+    const run = prev.then(fn);
+    const tail = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.queues.set(channelId, tail);
+    void tail.then(() => {
+      if (this.queues.get(channelId) === tail) this.queues.delete(channelId);
+    });
+    return run;
+  }
+
+  private pruneRecent(now: number): void {
+    for (const [key, entry] of this.recent) {
+      if (now - entry.at < RECENT_TTL_MS && this.recent.size <= RECENT_MAX) break;
+      this.recent.delete(key);
+    }
+  }
+
+  private async onSend(ws: WebSocket, f: SendFrame): Promise<void> {
+    const att = getAtt(ws);
+    const key = `${att.userId}:${f.clientId}`;
+    const now = this.now();
+    this.pruneRecent(now);
+    const hit = this.recent.get(key);
+    if (hit) {
+      // In-flight or recently answered: replay the original answer only (no second broadcast).
+      this.sendFrame(ws, await hit.result);
+      return;
+    }
+    if (!channelsOf(ws).includes(f.channelId)) {
+      this.sendFrame(ws, { t: 'nack', clientId: f.clientId, code: 'not_found' });
+      return;
+    }
+    const result = this.enqueue(f.channelId, async (): Promise<HubFrame> => {
+      let r: Awaited<ReturnType<typeof sendMessage>>;
+      try {
+        r = await sendMessage(this.env.DB, {
+          clientId: f.clientId,
+          channelId: f.channelId,
+          userId: att.userId,
+          parentId: f.parentId ?? null,
+          body: f.body,
+          alsoInChannel: f.alsoInChannel ?? false,
+          fileIds: f.fileIds ?? [],
+          // Stamped when the queued write runs, so created_at (and the ULID) follow seq order.
+          now: this.now(),
+        });
+      } catch {
+        console.error(JSON.stringify({ level: 'error', code: 'send_failed' }));
+        return { t: 'nack', clientId: f.clientId, code: 'failed' };
+      }
+      if (!r.ok) return { t: 'nack', clientId: f.clientId, code: r.code };
+      if (!r.duplicate) {
+        const frame: HubFrame = { t: 'message.new', message: r.message };
+        for (const s of this.socketsForChannel(f.channelId)) if (s !== ws) this.sendFrame(s, frame);
+        this.notify(r.message, r.audience);
+      }
+      return { t: 'ack', clientId: f.clientId, message: r.message };
+    });
+    this.recent.set(key, { at: now, result });
+    if (this.recent.size > RECENT_MAX) this.pruneRecent(now);
+    const frame = await result;
+    if (frame.t === 'nack' && this.recent.get(key)?.result === result) this.recent.delete(key);
+    this.sendFrame(ws, frame);
+  }
+
+  /** Notification fan-out for a freshly stored message (Task 6). */
+  private notify(_message: Message, _audience: Audience): void {}
+
+  private async onEditOrDelete(ws: WebSocket, f: EditFrame | DeleteFrame): Promise<void> {
+    const { userId } = getAtt(ws);
+    const nack = (code: NackCode) => {
+      if (f.clientId !== undefined) this.sendFrame(ws, { t: 'nack', clientId: f.clientId, code });
+    };
+    let row: { channelId: string } | null;
+    try {
+      row = await this.env.DB.prepare('SELECT channel_id AS channelId FROM messages WHERE id = ?')
+        .bind(f.messageId)
+        .first<{ channelId: string }>();
+    } catch {
+      return nack('failed');
+    }
+    if (!row) return nack('not_found');
+    const channelId = row.channelId;
+    await this.enqueue(channelId, async () => {
+      let r: Awaited<ReturnType<typeof editMessage>>;
+      try {
+        r =
+          f.t === 'edit'
+            ? await editMessage(this.env.DB, { messageId: f.messageId, userId, body: f.body, now: this.now() })
+            : await deleteMessage(this.env.DB, { messageId: f.messageId, userId, now: this.now() });
+      } catch {
+        console.error(JSON.stringify({ level: 'error', code: `${f.t}_failed` }));
+        return nack('failed');
+      }
+      if (!r.ok) return nack(r.code);
+      const frame: HubFrame =
+        f.t === 'edit' ? { t: 'message.edit', message: r.message } : { t: 'message.delete', message: r.message };
+      const targets = this.socketsForChannel(channelId);
+      // A public channel's author may edit after leaving it; they still see their own change.
+      if (!targets.includes(ws)) targets.push(ws);
+      for (const s of targets) this.sendFrame(s, frame);
+    });
   }
 
   private async onHello(ws: WebSocket, lastSeen: Record<string, number>): Promise<void> {
