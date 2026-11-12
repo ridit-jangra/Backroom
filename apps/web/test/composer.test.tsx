@@ -336,6 +336,32 @@ describe('Composer attachments', () => {
     void onSubmit; void ta; void up;
   });
 
+  it('a failed upload blocks Enter with a visible reason, and removing it unblocks', async () => {
+    const { onSubmit, ta, calls } = await attachSetup();
+    choose([file('a.png'), file('b.png')]);
+    type(ta, 'hi');
+    await act(async () => {
+      calls[0]!.resolve(info('A', 'a.png'));
+      calls[1]!.reject(new Error('quota'));
+    });
+    fireEvent.keyDown(ta, { key: 'Enter' });
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(screen.getByRole('alert').textContent).toBe('Remove or retry failed attachments to send.');
+    fireEvent.click(screen.getByLabelText('Remove b.png'));
+    expect(screen.queryByRole('alert')).toBeNull();
+    fireEvent.keyDown(ta, { key: 'Enter' });
+    expect(onSubmit).toHaveBeenCalledWith('hi', [info('A', 'a.png')]);
+  });
+
+  it('Enter while uploading says to wait', async () => {
+    const { onSubmit, ta } = await attachSetup();
+    choose([file('a.png')]);
+    type(ta, 'hi');
+    fireEvent.keyDown(ta, { key: 'Enter' });
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(screen.getByRole('alert').textContent).toBe('Wait for uploads to finish.');
+  });
+
   it('no attach button without uploadSlug', () => {
     setup();
     expect(screen.queryByLabelText('Attach files')).toBeNull();

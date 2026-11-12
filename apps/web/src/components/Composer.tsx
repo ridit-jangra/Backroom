@@ -115,7 +115,11 @@ export function Composer({
     const body = encoded.trimEnd();
     if (body.length > MAX_BODY) return;
     if (attach) {
-      if (uploads.busy || (body === '' && uploads.ready.length === 0)) return;
+      if (uploads.busy) {
+        uploads.blocked();
+        return;
+      }
+      if (body === '' && uploads.ready.length === 0) return;
       if (onSubmit(body, uploads.ready) === false) return;
       uploads.clear();
     } else {

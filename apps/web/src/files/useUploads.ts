@@ -122,5 +122,18 @@ export function useUploads(slug: string, deps: UploadDeps = {}) {
 
   const ready = items.flatMap((i) => (i.status === 'done' && i.info ? [i.info] : []));
   const busy = items.some((i) => i.status !== 'done');
-  return { items, notice, add, remove, retry, clear, ready, busy };
+  /** True (with a visible reason) when Enter must not send yet. */
+  const blocked = useCallback((): boolean => {
+    const cur = itemsRef.current;
+    if (cur.some((i) => i.status === 'failed')) {
+      setNotice('Remove or retry failed attachments to send.');
+      return true;
+    }
+    if (cur.some((i) => i.status !== 'done')) {
+      setNotice('Wait for uploads to finish.');
+      return true;
+    }
+    return false;
+  }, []);
+  return { items, notice, add, remove, retry, clear, ready, busy, blocked };
 }
