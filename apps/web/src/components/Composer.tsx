@@ -1,11 +1,12 @@
-import { useId, useMemo, useRef, useState, type KeyboardEvent } from 'react';
-import { MAX_BODY, TYPING_THROTTLE_MS, type MemberSummary } from '@backroom/protocol';
+import { useId, useMemo, useRef, useState, type ClipboardEvent, type DragEvent, type KeyboardEvent } from 'react';
+import { MAX_BODY, TYPING_THROTTLE_MS, type FileInfo, type MemberSummary } from '@backroom/protocol';
 import { formatShortcode } from '@backroom/emoji';
 import { decodeMentions, encodeMentions } from '../text/tokenize';
 import { useEmoji } from '../emoji/EmojiContext';
 import { EmojiImg } from '../emoji/EmojiImg';
 import { EmojiPicker } from '../emoji/EmojiPicker';
 import { suggestEmoji } from '../emoji/suggest';
+import { useUploads } from '../files/useUploads';
 
 const MENTION_QUERY_RE = /(?:^|\s)@([^\s@]+)$/;
 const EMOJI_QUERY_RE = /(?:^|\s):([A-Za-z0-9_+-]{2,})$/;
@@ -18,14 +19,17 @@ export function Composer({
   onSubmit,
   onTyping,
   onCancel,
+  uploadSlug,
 }: {
   placeholder: string;
   members: MemberSummary[];
   initial?: string;
   /** Return false to keep the text (e.g. not connected). */
-  onSubmit: (body: string) => boolean | void;
+  onSubmit: (body: string, files: FileInfo[]) => boolean | void;
   onTyping?: () => void;
   onCancel?: () => void;
+  /** Enables attachments (attach button, paste, drop). Edit composers omit it. */
+  uploadSlug?: string;
 }) {
   // P2-R25: per-instance ids so two composers (channel + thread) can coexist.
   const uid = useId();
@@ -42,6 +46,9 @@ export function Composer({
   const [dismissed, setDismissed] = useState(false);
   const [pickerOpen, setPickerOpen] = useState(false);
   const emoji = useEmoji();
+  const uploads = useUploads(uploadSlug ?? '');
+  const fileInput = useRef<HTMLInputElement>(null);
+  const attach = uploadSlug !== undefined;
 
   const encoded = encodeMentions(text, picked.current);
   const tooLong = encoded.length > MAX_BODY;
@@ -106,8 +113,16 @@ export function Composer({
 
   function submit() {
     const body = encoded.trimEnd();
-    if (body === '' || body.length > MAX_BODY) return;
-    if (onSubmit(body) === false) return;
+    if (body.length > MAX_BODY) return;
+    if (attach) {
+      if (uploads.busy || (body === '' && uploads.ready.length === 0)) return;
+      if (onSubmit(body, uploads.ready) === false) return;
+      uploads.clear();
+    } else {
+      if (body === '') return;
+      // Edit-mode composers take no files; keep the single-argument call.
+      if ((onSubmit as (b: string) => boolean | void)(body) === false) return;
+    }
     setText('');
     setCaret(0);
     picked.current = new Map();
@@ -167,8 +182,27 @@ export function Composer({
     }
   }
 
+  function onPaste(e: ClipboardEvent<HTMLTextAreaElement>) {
+    const files = Array.from(e.clipboardData?.files ?? []);
+    if (!attach || files.length === 0) return;
+    e.preventDefault();
+    uploads.add(files);
+  }
+
+  function onDragOver(e: DragEvent<HTMLDivElement>) {
+    if (attach && Array.from(e.dataTransfer?.types ?? []).includes('Files')) e.preventDefault();
+  }
+
+  function onDrop(e: DragEvent<HTMLDivElement>) {
+    if (!attach) return;
+    const files = Array.from(e.dataTransfer?.files ?? []);
+    if (files.length === 0) return;
+    e.preventDefault();
+    uploads.add(files);
+  }
+
   return (
-    <div className="composer">
+    <div className="composer" onDragOver={attach ? onDragOver : undefined} onDrop={attach ? onDrop : undefined}>
       {emojiOpen && (
         <ul id={listboxId} role="listbox" aria-label="Emoji suggestions" className="mention-list">
           {emojiMatches.map((m, i) => {
@@ -238,6 +272,7 @@ export function Composer({
           }}
           onSelect={(e) => setCaret(e.currentTarget.selectionStart ?? text.length)}
           onKeyDown={onKeyDown}
+          onPaste={attach ? onPaste : undefined}
         />
         <button
           type="button"
@@ -252,6 +287,48 @@ export function Composer({
           ☺
         </button>
       </div>
+      {attach && (
+        <>
+          <button type="button" aria-label="Attach files" onClick={() => fileInput.current?.click()}>
+            Attach
+          </button>
+          <input
+            ref={fileInput}
+            type="file"
+            multiple
+            hidden
+            data-testid="file-input"
+            onChange={(e) => {
+              uploads.add(Array.from(e.target.files ?? []));
+              e.target.value = '';
+            }}
+          />
+        </>
+      )}
+      {attach && uploads.items.length > 0 && (
+        <ul className="upload-list">
+          {uploads.items.map((it) => (
+            <li key={it.key}>
+              <span>{it.file.name}</span>{' '}
+              {it.status === 'uploading' && (
+                <progress aria-label={`Uploading ${it.file.name}`} max={it.file.size} value={it.loaded} />
+              )}
+              {it.status === 'failed' && (
+                <>
+                  <span>{it.error}</span>{' '}
+                  <button type="button" onClick={() => uploads.retry(it.key)}>
+                    Retry
+                  </button>
+                </>
+              )}{' '}
+              <button type="button" aria-label={`Remove ${it.file.name}`} onClick={() => uploads.remove(it.key)}>
+                ×
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      {attach && uploads.notice && <p role="alert">{uploads.notice}</p>}
       {pickerOpen && <EmojiPicker label="Insert emoji" trigger={trigger} onPick={insertPicked} onClose={() => setPickerOpen(false)} />}
       {tooLong && <p role="alert">Message is too long (max 40,000 characters).</p>}
     </div>

@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState } from 'react';
-import type { MemberSummary, Role, ThreadPage } from '@backroom/protocol';
+import type { FileInfo, MemberSummary, Role, ThreadPage } from '@backroom/protocol';
 import type { PendingSend } from '../realtime/outbox';
 import { Composer } from './Composer';
 import { MessageRow, PendingRow, startsGroup } from './MessageList';
@@ -17,6 +17,7 @@ export function ThreadPanel({
   connected,
   typingUserIds,
   onSend,
+  uploadSlug,
   onTyping,
   onMarkRead,
   onEdit,
@@ -38,7 +39,8 @@ export function ThreadPanel({
   isDm: boolean;
   connected: boolean;
   typingUserIds: string[];
-  onSend: (body: string, alsoInChannel: boolean) => boolean | void;
+  onSend: (body: string, alsoInChannel: boolean, files: FileInfo[]) => boolean | void;
+  uploadSlug?: string;
   onTyping?: () => void;
   /** Returns false when the frame could not be sent. */
   onMarkRead: (seq: number) => boolean;
@@ -139,8 +141,9 @@ export function ThreadPanel({
           <Composer
             placeholder="Reply…"
             members={members}
-            onSubmit={(body) => {
-              const sent = onSend(body, also);
+            uploadSlug={uploadSlug}
+            onSubmit={(body, files) => {
+              const sent = onSend(body, also, files);
               if (sent !== false) setAlso(false);
               return sent;
             }}

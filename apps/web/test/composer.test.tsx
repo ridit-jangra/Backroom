@@ -3,6 +3,7 @@ import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { Composer } from '../src/components/Composer';
 import { EmojiProvider } from '../src/emoji/EmojiContext';
 
+vi.mock('../src/files/upload');
 afterEach(() => {
   cleanup();
   vi.useRealTimers();
@@ -251,5 +252,92 @@ describe('Composer emoji', () => {
     expect(screen.getAllByRole('dialog')).toHaveLength(1);
     expect(b.getAttribute('aria-expanded')).toBe('true');
     expect(a.getAttribute('aria-expanded')).toBe('false');
+  });
+});
+
+describe('Composer attachments', () => {
+  const info = (id: string, name: string) => ({ id, name, mime: 'image/png', size: 1, width: null, height: null, hasThumb: false });
+  type Call = { file: File; signal?: AbortSignal; resolve: (v: ReturnType<typeof info>) => void; reject: (e: Error) => void };
+
+  async function attachSetup() {
+    const up = await import('../src/files/upload');
+    const calls: Call[] = [];
+    vi.mocked(up.uploadFile).mockImplementation(
+      (_slug, file, opts) =>
+        new Promise((resolve, reject) => {
+          calls.push({ file, signal: opts?.signal, resolve: resolve as Call['resolve'], reject });
+        }),
+    );
+    vi.mocked(up.makeThumbnail).mockResolvedValue(null);
+    const r = setup({ uploadSlug: 'w' });
+    return { ...r, calls, up };
+  }
+  const file = (name: string, size = 1) => {
+    const f = new File(['x'], name, { type: 'image/png' });
+    if (size !== 1) Object.defineProperty(f, 'size', { value: size });
+    return f;
+  };
+  const choose = (files: File[]) => fireEvent.change(screen.getByTestId('file-input'), { target: { files } });
+
+  it('attach, upload, then send files with or without text', async () => {
+    const { onSubmit, ta, calls } = await attachSetup();
+    choose([file('a.png'), file('b.png')]);
+    expect(document.querySelectorAll('.upload-list li')).toHaveLength(2);
+    expect(screen.getByLabelText('Uploading a.png')).toBeTruthy();
+    await act(async () => {
+      calls[0]!.resolve(info('A', 'a.png'));
+      calls[1]!.resolve(info('B', 'b.png'));
+    });
+    fireEvent.keyDown(ta, { key: 'Enter' });
+    expect(onSubmit).toHaveBeenCalledWith('', [info('A', 'a.png'), info('B', 'b.png')]);
+    expect(document.querySelectorAll('.upload-list li')).toHaveLength(0);
+  });
+
+  it('paste and drop add files', async () => {
+    const { ta, calls, container } = await attachSetup().then((r) => ({ ...r, container: document.body }));
+    fireEvent.paste(ta, { clipboardData: { files: [file('p.png')] } });
+    fireEvent.drop(container.querySelector('.composer')!, { dataTransfer: { files: [file('g.png')], types: ['Files'] } });
+    expect(calls).toHaveLength(2);
+  });
+
+  it('cancel, failure and limits never block or corrupt the send', async () => {
+    const { onSubmit, ta, calls, up } = await attachSetup();
+    choose(Array.from({ length: 12 }, (_, i) => file(`f${i}.png`)));
+    expect(calls).toHaveLength(10);
+    expect(screen.getByRole('alert').textContent).toBe('You can attach up to 10 files.');
+    cleanup();
+
+    const s2 = await attachSetup();
+    choose([file('big.bin', 30 * 1024 * 1024)]);
+    expect(screen.getByRole('alert').textContent).toBe('"big.bin" is larger than 25 MB.');
+    expect(s2.calls).toHaveLength(0);
+    cleanup();
+
+    const s3 = await attachSetup();
+    choose([file('a.png'), file('c.png')]);
+    type(s3.ta, 'hi');
+    fireEvent.keyDown(s3.ta, { key: 'Enter' });
+    expect(s3.onSubmit).not.toHaveBeenCalled();
+    expect(s3.ta.value).toBe('hi');
+    fireEvent.click(screen.getByLabelText('Remove a.png'));
+    expect(s3.calls[0]!.signal!.aborted).toBe(true);
+    expect(screen.queryByLabelText('Remove a.png')).toBeNull();
+    await act(async () => {
+      s3.calls[1]!.reject(new Error('boom'));
+    });
+    expect(screen.getByText('boom')).toBeTruthy();
+    fireEvent.click(screen.getByText('Retry'));
+    expect(s3.calls).toHaveLength(3);
+    await act(async () => {
+      s3.calls[2]!.resolve(info('C', 'c.png'));
+    });
+    fireEvent.keyDown(s3.ta, { key: 'Enter' });
+    expect(s3.onSubmit).toHaveBeenCalledWith('hi', [info('C', 'c.png')]);
+    void onSubmit; void ta; void up;
+  });
+
+  it('no attach button without uploadSlug', () => {
+    setup();
+    expect(screen.queryByLabelText('Attach files')).toBeNull();
   });
 });

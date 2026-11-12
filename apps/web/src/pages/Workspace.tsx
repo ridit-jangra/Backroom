@@ -163,7 +163,8 @@ export function Workspace({ slug, channelId }: { slug: string; channelId?: strin
                   key={channel.id}
                   placeholder={`Message ${label}`}
                   members={members}
-                  onSubmit={(body) => actions.send(channel.id, body)}
+                  uploadSlug={slug}
+                  onSubmit={(body, files) => actions.send(channel.id, body, null, false, files)}
                   onTyping={() => actions.typing(channel.id)}
                 />
               </div>
@@ -207,7 +208,8 @@ export function Workspace({ slug, channelId }: { slug: string; channelId?: strin
             isDm={isDm}
             connected={state.connection === 'open'}
             typingUserIds={threadTyping}
-            onSend={(body, also) => actions.send(channel.id, body, threadId, also)}
+            uploadSlug={slug}
+            onSend={(body, also, files) => actions.send(channel.id, body, threadId, also, files)}
             onTyping={() => actions.typing(channel.id, threadId)}
             onMarkRead={(seq) => actions.markThreadRead(threadId, seq)}
             loadFailed={threadError === threadId}
