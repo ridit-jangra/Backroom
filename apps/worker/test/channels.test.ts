@@ -1,13 +1,18 @@
 import { env, runDurableObjectAlarm, runInDurableObject } from 'cloudflare:test';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ChannelInfo, ChannelListing, ChannelSummary } from '@backroom/protocol';
 import { createApp } from '../src/app';
+import { WorkspaceHub } from '../src/hub/WorkspaceHub';
 import { GENERAL, captureMailer, insertChannel, resetDb, seedUsers, send, testDeps } from './helpers';
 import { closeAll, connect, hubStub } from './ws';
 
 beforeEach(resetDb);
 afterEach(async () => {
+  vi.restoreAllMocks();
   await closeAll();
+  await runInDurableObject(hubStub(), (hub) => {
+    hub.beforeChannelRead = undefined;
+  });
   await runInDurableObject(hubStub(), (hub) => {
     hub.now = () => Date.now();
   });
@@ -125,9 +130,10 @@ describe('channels REST', () => {
     const m = await bob.next('membership');
     expect(m).toMatchObject({ action: 'added', channel: { id: RANDOM } });
 
-    // Idempotent: a second join is fine and pushes nothing.
+    // Idempotent: a second join is fine; the hub update is repeated (harmless) so retries repair sockets.
     expect((await send(s.app, 'POST', `/channels/${RANDOM}/join`, undefined, s.bob.cookie)).status).toBe(200);
-    await bob.none('membership', 150);
+    expect(await bob.next('membership')).toMatchObject({ action: 'added', channel: { id: RANDOM } });
+    expect(await memberCount(RANDOM)).toBe(1);
 
     // The socket now carries the channel: sends are accepted.
     bob.send({ t: 'send', clientId: 'c-join-000001', channelId: RANDOM, body: 'hi' });
@@ -318,7 +324,8 @@ describe('channels REST', () => {
     const again = await send(s.app, 'POST', '/w/clubhack/dms', { userIds: [s.bob.userId, s.bob.userId] }, s.alice.cookie);
     expect(again.status).toBe(200);
     expect((await json<{ channel: ChannelSummary }>(again)).channel.id).toBe(ac.id);
-    await bobSock.none('membership', 100);
+    // Re-opening repeats the (idempotent) hub update for every participant.
+    expect((await bobSock.next('membership')).action).toBe('added');
     expect(await memberCount(ac.id)).toBe(2);
   });
 
@@ -357,13 +364,76 @@ describe('channels REST', () => {
     const s = await setup();
     const bob = await connect(s.app, s.bob.cookie);
     const alice = await connect(s.app, s.alice.cookie);
+    bob.send({ t: 'activity' });
+    expect(await alice.next('presence')).toEqual({ t: 'presence', userId: s.bob.userId, state: 'active' });
     const res = await send(s.app, 'PATCH', `/w/clubhack/members/${s.bob.userId}`, { deactivated: true }, s.owner.cookie);
     expect(res.status).toBe(200);
-    expect((await bob.closed()).code).toBe(4001);
+    expect(await bob.closed()).toEqual({ code: 4001, reason: 'deactivated' });
+    expect(await alice.next('presence')).toEqual({ t: 'presence', userId: s.bob.userId, state: 'away' });
+    await alice.none('presence', 150);
     // Other users' sockets stay open.
     alice.send({ t: 'send', clientId: 'c-deact-00001', channelId: GENERAL, body: 'still here' });
     await alice.next('ack');
     const sessions = await env.DB.prepare('SELECT COUNT(*) AS n FROM sessions WHERE user_id = ?').bind(s.bob.userId).first<{ n: number }>();
     expect(sessions!.n).toBe(0);
+  });
+
+  it('a retried leave after a failed hub call still stops delivery to the leaver', async () => {
+    const s = await setup();
+    const p = await insertChannel({ name: 'p', kind: 'private', memberIds: [s.alice.userId, s.bob.userId] });
+    const alice = await connect(s.app, s.alice.cookie);
+    const bob = await connect(s.app, s.bob.cookie);
+    const spy = vi.spyOn(WorkspaceHub.prototype, 'membershipChanged').mockImplementationOnce(async () => {
+      throw new Error('hub down');
+    });
+
+    const first = await send(s.app, 'POST', `/channels/${p}/leave`, undefined, s.bob.cookie);
+    expect(first.status).toBe(500);
+    expect(await isMember(p, s.bob.userId)).toBe(true); // hub first: nothing changed, so the retry can see the channel
+    const retry = await send(s.app, 'POST', `/channels/${p}/leave`, undefined, s.bob.cookie);
+    expect(retry.status).toBe(200);
+    expect(await isMember(p, s.bob.userId)).toBe(false);
+    expect(spy).toHaveBeenCalledTimes(3); // failed call, then before and after the delete
+    expect(await bob.next('membership')).toEqual({ t: 'membership', action: 'removed', channelId: p });
+
+    alice.send({ t: 'send', clientId: 'c-retry-00001', channelId: p, body: 'secret' });
+    await alice.next('ack');
+    await bob.none('message.new', 200);
+  });
+
+  it('a membership removal during connect is not lost', async () => {
+    const s = await setup();
+    const p = await insertChannel({ name: 'p', kind: 'private', memberIds: [s.alice.userId, s.bob.userId] });
+    const alice = await connect(s.app, s.alice.cookie);
+    // The removal's RPC lands while bob's connect is reading his channels, and that read still sees
+    // the old membership (D1 is left unchanged here to model a read that predates the commit).
+    await runInDurableObject(hubStub(), (hub) => {
+      hub.beforeChannelRead = async () => {
+        hub.beforeChannelRead = undefined;
+        await hub.membershipChanged({ action: 'removed', userIds: [s.bob.userId], channelId: p });
+      };
+    });
+    const bob = await connect(s.app, s.bob.cookie);
+    alice.send({ t: 'send', clientId: 'c-race-000001', channelId: p, body: 'secret' });
+    await alice.next('ack');
+    await bob.none('message.new', 200);
+    bob.send({ t: 'send', clientId: 'c-race-000002', channelId: p, body: 'hi' });
+    expect((await bob.next('nack')).code).toBe('not_found');
+  });
+
+  it('unarchive gives the channel back to sockets that connected while it was archived', async () => {
+    const s = await setup();
+    const { channel } = await json<{ channel: ChannelSummary }>(
+      await send(s.app, 'POST', '/w/clubhack/channels', { name: 'later' }, s.alice.cookie),
+    );
+    await send(s.app, 'POST', `/channels/${channel.id}/join`, undefined, s.bob.cookie);
+    expect((await send(s.app, 'PATCH', `/channels/${channel.id}`, { archived: true }, s.alice.cookie)).status).toBe(200);
+    const bob = await connect(s.app, s.bob.cookie); // archived channels are not in a new socket's set
+    const un = await send(s.app, 'PATCH', `/channels/${channel.id}`, { archived: false }, s.alice.cookie);
+    expect(un.status).toBe(200);
+    expect((await bob.next('channel.update')).channel.archivedAt).toBeNull();
+    expect(await bob.next('membership')).toMatchObject({ action: 'added', channel: { id: channel.id } });
+    bob.send({ t: 'send', clientId: 'c-unarch-0001', channelId: channel.id, body: 'back' });
+    expect((await bob.next('ack')).message.channelId).toBe(channel.id);
   });
 });

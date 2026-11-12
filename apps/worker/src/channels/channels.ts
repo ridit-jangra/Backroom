@@ -31,8 +31,9 @@ const forbidden = (message: string) => new ApiError(403, 'forbidden', message);
 const nameTaken = () => new ApiError(409, 'name_taken', 'That channel name is taken.');
 const invalidUser = () => new ApiError(400, 'invalid_user', 'Every user must be an active member of this workspace.');
 
-function isUniqueViolation(e: unknown): boolean {
-  return e instanceof Error && /UNIQUE constraint failed/i.test(e.message);
+/** Only the UNIQUE(workspace_id, name) constraint on channels means "name taken". */
+function isNameTaken(e: unknown): boolean {
+  return e instanceof Error && /UNIQUE constraint failed: channels\.workspace_id, channels\.name/.test(e.message);
 }
 
 function isGeneral(ch: { kind: ChannelKind; name: string | null }): boolean {
@@ -68,6 +69,20 @@ export async function memberSummaryFor(db: D1Database, channelId: string, userId
 
 function toInfo(ch: { id: string; name: string | null; kind: ChannelKind; topic: string | null; archivedAt: number | null }): ChannelInfo {
   return { id: ch.id, name: ch.name, kind: ch.kind, topic: ch.topic, archivedAt: ch.archivedAt };
+}
+
+/** Active workspace members of a channel. */
+export async function activeMemberIds(db: D1Database, channelId: string): Promise<string[]> {
+  const { results } = await db
+    .prepare(
+      `SELECT cm.user_id AS id FROM channel_members cm
+       JOIN channels c ON c.id = cm.channel_id
+       JOIN workspace_members wm ON wm.workspace_id = c.workspace_id AND wm.user_id = cm.user_id AND wm.deactivated_at IS NULL
+       WHERE cm.channel_id = ?`,
+    )
+    .bind(channelId)
+    .all<{ id: string }>();
+  return results.map((r) => r.id);
 }
 
 /** Throws `400 invalid_user` unless every ID is an active member of the workspace. */
@@ -131,7 +146,7 @@ export async function createChannel(
     ]);
   } catch (e) {
     // UNIQUE(workspace_id, name) covers archived channels too.
-    if (isUniqueViolation(e)) throw nameTaken();
+    if (isNameTaken(e)) throw nameTaken();
     throw e;
   }
   return channelSummaryFor(db, id);
@@ -182,7 +197,7 @@ export async function patchChannel(
       .bind(...binds, channelId)
       .first<ChannelInfo>();
   } catch (e) {
-    if (isUniqueViolation(e)) throw nameTaken();
+    if (isNameTaken(e)) throw nameTaken();
     throw e;
   }
   if (!row) throw notFound();
@@ -213,16 +228,21 @@ export async function joinChannel(
   return { channel: await channelSummaryFor(db, channelId), joined: true, workspaceId: ch.workspaceId };
 }
 
-/** Leaves a channel. `left` is false when the caller was not a member. */
+/**
+ * Leaves a channel. `beforeDelete` runs after the checks and before the row is deleted (the route
+ * updates the hub there). `left` is false when the caller was not a member.
+ */
 export async function leaveChannel(
   db: D1Database,
   channelId: string,
   userId: string,
+  beforeDelete: (workspaceId: string) => Promise<void> = async () => {},
 ): Promise<{ left: boolean; workspaceId: string }> {
   const ch = await requireChannelRead(db, channelId, userId);
   if (ch.kind === 'dm' || isGeneral(ch)) {
     throw new ApiError(403, 'cannot_leave', ch.kind === 'dm' ? 'You cannot leave a direct message.' : 'Everyone stays in #general.');
   }
+  await beforeDelete(ch.workspaceId);
   const r = await db.prepare('DELETE FROM channel_members WHERE channel_id = ? AND user_id = ?').bind(channelId, userId).run();
   return { left: r.meta.changes > 0, workspaceId: ch.workspaceId };
 }
@@ -234,7 +254,7 @@ export async function addMembers(
   actorId: string,
   userIds: string[],
   now: number,
-): Promise<{ added: string[]; workspaceId: string }> {
+): Promise<{ added: string[]; members: string[]; workspaceId: string }> {
   const ch = await requireChannelMember(db, channelId, actorId);
   if (ch.kind === 'dm') throw forbidden('Direct messages cannot take new members.');
   if (ch.archivedAt !== null) throw forbidden('This channel is archived.');
@@ -253,5 +273,6 @@ export async function addMembers(
         .bind(channelId, u, now),
     ),
   );
-  return { added: ids.filter((_, i) => results[i]!.meta.changes > 0), workspaceId: ch.workspaceId };
+  // `members`: every requested ID (all are members now); `added`: those this request inserted.
+  return { added: ids.filter((_, i) => results[i]!.meta.changes > 0), members: ids, workspaceId: ch.workspaceId };
 }

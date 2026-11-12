@@ -14,7 +14,7 @@ export type TestSocket = {
   next<T extends HubFrame['t']>(t: T, timeoutMs?: number): Promise<Extract<HubFrame, { t: T }>>;
   /** Fails if an unconsumed frame of type `t` is queued or arrives within `ms`. */
   none(t: HubFrame['t'], ms?: number): Promise<void>;
-  closed(): Promise<{ code: number }>;
+  closed(): Promise<{ code: number; reason: string }>;
   close(): void;
 };
 
@@ -29,8 +29,8 @@ function wrap(ws: WebSocket): TestSocket {
   const frames: HubFrame[] = [];
   const queue: HubFrame[] = [];
   const waiters: { t: HubFrame['t']; resolve: (f: HubFrame) => void }[] = [];
-  let closeInfo: { code: number } | null = null;
-  const closeWaiters: ((c: { code: number }) => void)[] = [];
+  let closeInfo: { code: number; reason: string } | null = null;
+  const closeWaiters: ((c: { code: number; reason: string }) => void)[] = [];
 
   ws.addEventListener('message', (ev) => {
     if (typeof ev.data !== 'string') return;
@@ -42,7 +42,7 @@ function wrap(ws: WebSocket): TestSocket {
     else queue.push(f);
   });
   ws.addEventListener('close', (ev) => {
-    closeInfo = { code: ev.code };
+    closeInfo = { code: ev.code, reason: ev.reason };
     for (const w of closeWaiters.splice(0)) w(closeInfo);
   });
 

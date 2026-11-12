@@ -91,6 +91,10 @@ export class WorkspaceHub extends DurableObject<Env> {
   private queues = new Map<string, Promise<unknown>>();
   /** Recent sends keyed `${userId}:${clientId}` (insertion order = age); a nack deletes its entry. */
   private recent = new Map<string, { at: number; result: Promise<SendOutcome> }>();
+  /** Sockets whose channel set is still being read on connect, with the membership changes seen meanwhile. */
+  private connecting = new Map<WebSocket, MembershipChange[]>();
+  /** Test seam: runs on connect after accept, before the channel-set read. */
+  beforeChannelRead?: () => Promise<void>;
   /** Per-socket mark_read / mark_thread_read throttle state, keyed by channel or `thread:<id>`. */
   private readState = new WeakMap<WebSocket, Map<string, ReadState>>();
 
@@ -108,21 +112,42 @@ export class WorkspaceHub extends DurableObject<Env> {
     const workspaceId = req.headers.get('X-Backroom-Workspace');
     if (!userId || !workspaceId) return errorResponse(400, 'invalid_request', 'Invalid request');
 
-    const { results } = await this.env.DB.prepare(
-      `SELECT c.id AS id FROM channel_members cm JOIN channels c ON c.id = cm.channel_id
-       WHERE cm.user_id = ? AND c.workspace_id = ? AND c.archived_at IS NULL`,
-    )
-      .bind(userId, workspaceId)
-      .all<{ id: string }>();
-
     const announced: PresenceState = this.isActive(userId) ? 'active' : 'away';
     // A new tab of a user who is already active inherits their latest activity, so the alarm keeps
     // treating them consistently.
     const lastActivityAt = Math.max(0, ...this.socketsForUser(userId).map((ws) => getAtt(ws).lastActivityAt));
     const pair = new WebSocketPair();
     const [client, server] = [pair[0], pair[1]];
+    // Accept before reading the channel set, and log membership changes that arrive during the read:
+    // the read may predate a change whose RPC lands meanwhile, so the log is replayed on top of it.
     this.ctx.acceptWebSocket(server, [userId]);
-    setAtt(server, { userId, workspaceId, channelIds: results.map((r) => r.id), lastActivityAt, announced });
+    setAtt(server, { userId, workspaceId, channelIds: [], lastActivityAt, announced });
+    const log: MembershipChange[] = [];
+    this.connecting.set(server, log);
+    try {
+      await this.beforeChannelRead?.();
+      const { results } = await this.env.DB.prepare(
+        `SELECT c.id AS id FROM channel_members cm JOIN channels c ON c.id = cm.channel_id
+         WHERE cm.user_id = ? AND c.workspace_id = ? AND c.archived_at IS NULL`,
+      )
+        .bind(userId, workspaceId)
+        .all<{ id: string }>();
+      const ids = new Set(results.map((r) => r.id));
+      for (const change of log) {
+        if (change.action === 'added') ids.add(change.channel.id);
+        else ids.delete(change.channelId);
+      }
+      setAtt(server, { ...getAtt(server), channelIds: [...ids] });
+    } catch (e) {
+      try {
+        server.close(1011, 'connect failed');
+      } catch {
+        // already closed
+      }
+      throw e;
+    } finally {
+      this.connecting.delete(server);
+    }
     return new Response(null, { status: 101, webSocket: client });
   }
 
@@ -437,6 +462,7 @@ export class WorkspaceHub extends DurableObject<Env> {
   async membershipChanged(change: MembershipChange): Promise<void> {
     for (const userId of new Set(change.userIds)) {
       for (const ws of this.socketsForUser(userId)) {
+        this.connecting.get(ws)?.push(change);
         if (change.action === 'added') {
           addChannel(ws, change.channel.id);
           this.sendFrame(ws, { t: 'membership', action: 'added', channel: change.channel });
