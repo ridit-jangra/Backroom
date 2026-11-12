@@ -156,6 +156,8 @@ export function Workspace({ slug, channelId }: { slug: string; channelId?: strin
                 onReact={actions.react}
                 onRetry={actions.retry}
                 onDiscard={actions.discard}
+                highlightId={state.highlightId}
+                highlightNonce={state.highlightNonce}
               />
               <TypingIndicator userIds={typingIds} members={members} />
               <div className="composer-wrap">
@@ -220,6 +222,8 @@ export function Workspace({ slug, channelId }: { slug: string; channelId?: strin
             onRetry={actions.retry}
             onDiscard={actions.discard}
             onClose={() => actions.openThread(null)}
+            highlightId={state.highlightId}
+            highlightNonce={state.highlightNonce}
           />
         )}
         {dialog === 'browse' && <ChannelBrowser slug={slug} onJoined={showChannel} onClose={() => setDialog(null)} />}

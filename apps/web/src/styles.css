@@ -113,3 +113,10 @@ button.link:hover { text-decoration: underline; }
 .reaction-add { position: relative; display: inline-block; }
 .reaction-add .emoji-picker { bottom: auto; top: 100%; right: auto; left: 0; margin: 0.25rem 0 0; }
 .upload-list { list-style: none; margin: 0.25rem 0 0; padding: 0; font-size: 0.85rem; }
+.msg-files { display: flex; flex-direction: column; gap: 0.4rem; margin: 0.25rem 0; align-items: flex-start; }
+.file-image { max-width: 100%; height: auto; border-radius: 4px; display: block; }
+.msg-files video { max-width: 360px; width: 100%; }
+.file-card { border: 1px solid var(--border, #ccc); border-radius: 4px; padding: 0.3rem 0.6rem; font-size: 0.85rem; }
+.file-name { overflow-wrap: anywhere; }
+.msg.highlighted { animation: msg-flash 2s ease-out; }
+@keyframes msg-flash { from { background: rgba(255, 213, 79, 0.5); } to { background: transparent; } }

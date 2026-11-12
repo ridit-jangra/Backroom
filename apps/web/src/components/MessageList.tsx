@@ -8,6 +8,7 @@ import { EmojiPicker } from '../emoji/EmojiPicker';
 import { ReactionBar } from '../emoji/ReactionBar';
 import { Composer } from './Composer';
 import { MessageText } from './MessageText';
+import { MessageFiles } from '../files/MessageFiles';
 
 export const GROUP_WINDOW_MS = 300_000;
 const BOTTOM_SLACK_PX = 40;
@@ -36,6 +37,8 @@ export function MessageRow({
   onEdit,
   onDelete,
   onReact,
+  highlighted = false,
+  highlightNonce = 0,
 }: {
   message: Message;
   members: MemberSummary[];
@@ -50,7 +53,20 @@ export function MessageRow({
   onDelete: (messageId: string) => boolean;
   /** Returns false when the reaction could not be sent. */
   onReact?: (messageId: string, emoji: string, on: boolean) => boolean;
+  highlighted?: boolean;
+  /** Changes on every jump, so jumping to the same message again re-flashes it. */
+  highlightNonce?: number;
 }) {
+  const rowRef = useRef<HTMLLIElement>(null);
+  useEffect(() => {
+    const el = rowRef.current;
+    if (!highlighted || !el) return;
+    // Restart the flash animation on a repeat jump.
+    el.classList.remove('highlighted');
+    void el.offsetWidth;
+    el.classList.add('highlighted');
+    el.scrollIntoView?.({ block: 'center' });
+  }, [highlighted, highlightNonce]);
   const [editing, setEditing] = useState(false);
   const [pickerOpen, setPickerOpen] = useState(false);
   const addRef = useRef<HTMLButtonElement>(null);
@@ -85,7 +101,7 @@ export function MessageRow({
   }
 
   return (
-    <li className={`msg${showHeader ? ' msg-first' : ''}`}>
+    <li ref={rowRef} className={`msg${showHeader ? ' msg-first' : ''}${highlighted ? ' highlighted' : ''}`}>
       {showHeader && (
         <div className="msg-head">
           <strong className="msg-author">{nameOf(members, message.userId)}</strong>{' '}
@@ -122,6 +138,7 @@ export function MessageRow({
           {message.editedAt !== null && <span className="muted"> (edited)</span>}
         </p>
       )}
+      {!deleted && !!message.files?.length && <MessageFiles files={message.files} />}
       {showReactions && (
         <ReactionBar
           reactions={reactions}
@@ -213,6 +230,7 @@ export function PendingRow({
       <p className="msg-body">
         <MessageText body={p.body} members={members} me={me} />
       </p>
+      {p.files.length > 0 && <MessageFiles files={p.files} />}
       {p.status === 'sending' ? (
         <span className="muted">Sending…</span>
       ) : (
@@ -244,6 +262,8 @@ export function MessageList({
   onReact,
   onRetry,
   onDiscard,
+  highlightId = null,
+  highlightNonce = 0,
 }: {
   channelWindow: ChannelWindow | undefined;
   pending: PendingSend[];
@@ -258,6 +278,8 @@ export function MessageList({
   onReact?: (messageId: string, emoji: string, on: boolean) => boolean;
   onRetry: (clientId: string) => void;
   onDiscard: (clientId: string) => void;
+  highlightId?: string | null;
+  highlightNonce?: number;
 }) {
   const messages = channelWindow?.messages ?? [];
   const box = useRef<HTMLDivElement>(null);
@@ -312,6 +334,8 @@ export function MessageList({
             onEdit={onEdit}
             onDelete={onDelete}
             onReact={onReact}
+            highlighted={m.id === highlightId}
+            highlightNonce={highlightNonce}
           />
         ))}
         {pending.map((p, i) => (

@@ -28,6 +28,8 @@ export function ThreadPanel({
   loadFailed = false,
   onReload,
   onClose,
+  highlightId = null,
+  highlightNonce = 0,
 }: {
   /** Undefined while the thread is still loading. */
   page: ThreadPage | undefined;
@@ -53,6 +55,8 @@ export function ThreadPanel({
   loadFailed?: boolean;
   onReload?: () => void;
   onClose: () => void;
+  highlightId?: string | null;
+  highlightNonce?: number;
 }) {
   const [also, setAlso] = useState(false);
   const alsoId = useId();
@@ -103,6 +107,8 @@ export function ThreadPanel({
               onEdit={onEdit}
               onDelete={onDelete}
               onReact={onReact}
+              highlighted={page.parent.id === highlightId}
+              highlightNonce={highlightNonce}
             />
           </ul>
           <p className="muted thread-count">{replies.length === 1 ? '1 reply' : `${replies.length} replies`}</p>
@@ -118,7 +124,9 @@ export function ThreadPanel({
                 connected={connected}
                 onEdit={onEdit}
                 onDelete={onDelete}
-              onReact={onReact}
+                onReact={onReact}
+                highlighted={m.id === highlightId}
+                highlightNonce={highlightNonce}
               />
             ))}
             {pending.map((p, i) => (
