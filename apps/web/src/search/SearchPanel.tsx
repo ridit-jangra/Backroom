@@ -50,7 +50,7 @@ export function SearchPanel({
     setLoading(true);
     setError('');
     try {
-      const url = `/w/${slug}/search?q=${encodeURIComponent(query)}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`;
+      const url = `/w/${encodeURIComponent(slug)}/search?q=${encodeURIComponent(query)}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`;
       const page = await api<SearchPage>(url, { signal: c.signal });
       if (c.signal.aborted) return;
       setHits((h) => {

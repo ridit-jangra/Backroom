@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { ApiClientError } from '../src/api';
-import { makeThumbnail, uploadFile, type ThumbDeps } from '../src/files/upload';
+import { FileInfoSchema } from '@backroom/protocol';
+import { makeThumbnail, uploadFile, uploadThumbnail, type ThumbDeps } from '../src/files/upload';
 
 class FakeXhr {
   method = '';
@@ -55,7 +56,7 @@ describe('uploadFile', () => {
     expect(x.body).toBe(file);
     x.progress(50, 100);
     expect(onProgress).toHaveBeenCalledWith(50, 100);
-    x.respond(201, info);
+    x.respond(201, { file: info });
     await expect(p).resolves.toEqual(info);
   });
 
@@ -80,6 +81,31 @@ describe('uploadFile', () => {
     ctl.abort();
     expect(x.abort).toHaveBeenCalled();
     expect(await p.catch((err) => err)).toMatchObject({ name: 'AbortError' });
+  });
+});
+
+describe('server response shape ({ file: FileInfo })', () => {
+  const wire = { file: info };
+  it('the wrapped fixture is a valid FileInfo under the protocol schema', () => {
+    expect(FileInfoSchema.safeParse(wire.file).success).toBe(true);
+    expect(FileInfoSchema.safeParse(wire).success).toBe(false);
+  });
+  it('uploadFile rejects a bare FileInfo or garbage on 2xx instead of resolving', async () => {
+    for (const body of [info, {}, { file: { id: 1 } }, null]) {
+      const { x, makeXhr } = mk();
+      const p = uploadFile('w', new File(['a'], 'a.pdf'), { makeXhr });
+      x.respond(201, body);
+      expect(await p.catch((e) => e)).toMatchObject({ code: 'bad_response' });
+    }
+  });
+  it('uploadThumbnail unwraps { file } and rejects a bare shape', async () => {
+    const f = vi.fn();
+    vi.stubGlobal('fetch', f);
+    f.mockResolvedValueOnce(new Response(JSON.stringify({ file: { ...info, hasThumb: true } }), { status: 200 }));
+    await expect(uploadThumbnail('F', new Blob(['x']))).resolves.toEqual({ ...info, hasThumb: true });
+    f.mockResolvedValueOnce(new Response(JSON.stringify(info), { status: 200 }));
+    await expect(uploadThumbnail('F', new Blob(['x']))).rejects.toMatchObject({ code: 'bad_response' });
+    vi.unstubAllGlobals();
   });
 });
 

@@ -1,4 +1,4 @@
-import { THUMB_MAX_BYTES, THUMB_MAX_SIDE, isRasterImage, type FileInfo } from '@backroom/protocol';
+import { FileInfoSchema, THUMB_MAX_BYTES, THUMB_MAX_SIDE, isRasterImage, type FileInfo } from '@backroom/protocol';
 import { ApiClientError } from '../api';
 
 export type UploadOpts = {
@@ -6,6 +6,13 @@ export type UploadOpts = {
   signal?: AbortSignal;
   makeXhr?: () => XMLHttpRequest;
 };
+
+/** The server answers `{ file: FileInfo }`; anything else on a 2xx is a failure. */
+export function parseFileResponse(data: unknown): FileInfo {
+  const parsed = FileInfoSchema.safeParse((data as { file?: unknown } | null)?.file);
+  if (!parsed.success) throw new ApiClientError(502, 'bad_response', 'Unexpected response from the server.');
+  return parsed.data;
+}
 
 function abortError(): DOMException {
   return new DOMException('Aborted', 'AbortError');
@@ -24,7 +31,7 @@ export function uploadFile(slug: string, file: File, opts: UploadOpts = {}): Pro
       reject(abortError());
     };
     const done = () => signal?.removeEventListener('abort', onAbort);
-    xhr.open('POST', `/w/${slug}/files?name=${encodeURIComponent(file.name)}`);
+    xhr.open('POST', `/w/${encodeURIComponent(slug)}/files?name=${encodeURIComponent(file.name)}`);
     xhr.withCredentials = true;
     xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream');
     xhr.upload.onprogress = (e) => opts.onProgress?.(e.loaded, e.total);
@@ -37,7 +44,11 @@ export function uploadFile(slug: string, file: File, opts: UploadOpts = {}): Pro
         /* empty or non-JSON body */
       }
       if (xhr.status >= 200 && xhr.status < 300) {
-        resolve(data as FileInfo);
+        try {
+          resolve(parseFileResponse(data));
+        } catch (e) {
+          reject(e);
+        }
         return;
       }
       const err = (data as { error?: { code?: string; message?: string } } | null)?.error;
@@ -69,7 +80,7 @@ export async function uploadThumbnail(fileId: string, blob: Blob): Promise<FileI
     const err = (data as { error?: { code?: string; message?: string } } | null)?.error;
     throw new ApiClientError(res.status, err?.code ?? 'unknown', err?.message ?? 'Thumbnail failed');
   }
-  return data as FileInfo;
+  return parseFileResponse(data);
 }
 
 export type ThumbDeps = {
