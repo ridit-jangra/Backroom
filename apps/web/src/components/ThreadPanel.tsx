@@ -21,6 +21,7 @@ export function ThreadPanel({
   onMarkRead,
   onEdit,
   onDelete,
+  onReact,
   onRetry,
   onDiscard,
   loadFailed = false,
@@ -43,6 +44,7 @@ export function ThreadPanel({
   onMarkRead: (seq: number) => boolean;
   onEdit: (messageId: string, body: string) => boolean;
   onDelete: (messageId: string) => boolean;
+  onReact?: (messageId: string, emoji: string, on: boolean) => boolean;
   onRetry: (clientId: string) => void;
   onDiscard: (clientId: string) => void;
   /** The thread fetch failed. */
@@ -98,6 +100,7 @@ export function ThreadPanel({
               connected={connected}
               onEdit={onEdit}
               onDelete={onDelete}
+              onReact={onReact}
             />
           </ul>
           <p className="muted thread-count">{replies.length === 1 ? '1 reply' : `${replies.length} replies`}</p>
@@ -113,6 +116,7 @@ export function ThreadPanel({
                 connected={connected}
                 onEdit={onEdit}
                 onDelete={onDelete}
+              onReact={onReact}
               />
             ))}
             {pending.map((p, i) => (

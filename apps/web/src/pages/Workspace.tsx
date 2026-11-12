@@ -151,6 +151,7 @@ export function Workspace({ slug, channelId }: { slug: string; channelId?: strin
                 onOpenThread={(id) => actions.openThread(id)}
                 onEdit={actions.edit}
                 onDelete={actions.remove}
+                onReact={actions.react}
                 onRetry={actions.retry}
                 onDiscard={actions.discard}
               />
@@ -211,6 +212,7 @@ export function Workspace({ slug, channelId }: { slug: string; channelId?: strin
             onReload={() => actions.openThread(threadId)}
             onEdit={actions.edit}
             onDelete={actions.remove}
+            onReact={actions.react}
             onRetry={actions.retry}
             onDiscard={actions.discard}
             onClose={() => actions.openThread(null)}

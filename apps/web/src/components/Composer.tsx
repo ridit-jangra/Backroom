@@ -36,6 +36,7 @@ export function Composer({
   const picked = useRef<Map<string, string>>(init.picked);
   const lastTyping = useRef<number | null>(null);
   const area = useRef<HTMLTextAreaElement>(null);
+  const trigger = useRef<HTMLButtonElement>(null);
   const [caret, setCaret] = useState(init.text.length);
   const [active, setActive] = useState(0);
   const [dismissed, setDismissed] = useState(false);
@@ -79,7 +80,8 @@ export function Composer({
     const code = emojiCode(m);
     const start = caret - (emojiQuery?.length ?? 0) - 1;
     const ins = `:${code}: `;
-    emoji.recordUse(code);
+    // The frequent list tracks the primary name, not the alias the user typed.
+    emoji.recordUse(emoji.canonical(m.name, m.kind === 'builtin' && m.record.skins ? emoji.skinTone : null) ?? code);
     place(`${text.slice(0, start)}${ins}${text.slice(caret)}`, start + ins.length);
   }
 
@@ -241,13 +243,14 @@ export function Composer({
         aria-label="Emoji"
         aria-haspopup="dialog"
         aria-expanded={pickerOpen}
+        ref={trigger}
         data-emoji-trigger
         className="emoji-trigger"
         onClick={() => setPickerOpen((o) => !o)}
       >
         ☺
       </button>
-      {pickerOpen && <EmojiPicker label="Insert emoji" onPick={insertPicked} onClose={() => setPickerOpen(false)} />}
+      {pickerOpen && <EmojiPicker label="Insert emoji" trigger={trigger} onPick={insertPicked} onClose={() => setPickerOpen(false)} />}
       {tooLong && <p role="alert">Message is too long (max 40,000 characters).</p>}
     </div>
   );

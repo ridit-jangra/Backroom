@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
+import { useEffect, useMemo, useRef, useState, type FocusEvent, type KeyboardEvent, type RefObject } from 'react';
 import {
   PICKER_CATEGORIES,
   emojiInCategory,
@@ -36,7 +36,18 @@ const TAB_ICON: Record<TabId, string> = {
 };
 const TAB_LABEL = (t: TabId) => (t === 'frequent' ? 'Frequently used' : t === 'custom' ? 'Custom' : t);
 
-export function EmojiPicker({ label, onPick, onClose }: { label: string; onPick: (code: string) => void; onClose: () => void }) {
+export function EmojiPicker({
+  label,
+  onPick,
+  onClose,
+  trigger,
+}: {
+  label: string;
+  onPick: (code: string) => void;
+  onClose: () => void;
+  /** The owning trigger: only its clicks are left to its own toggle (P3-R18c). */
+  trigger?: RefObject<HTMLElement | null>;
+}) {
   const emoji = useEmoji();
   const { skinTone } = emoji;
   const root = useRef<HTMLDivElement>(null);
@@ -47,6 +58,8 @@ export function EmojiPicker({ label, onPick, onClose }: { label: string; onPick:
   const [focusIdx, setFocusIdx] = useState(0);
   const close = useRef(onClose);
   close.current = onClose;
+  const owner = useRef(trigger);
+  owner.current = trigger;
 
   const hasCustom = emoji.custom.size > 0;
   const tabs: TabId[] = useMemo(
@@ -109,27 +122,34 @@ export function EmojiPicker({ label, onPick, onClose }: { label: string; onPick:
   useEffect(() => {
     const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     search.current?.focus();
-    const onKey = (e: globalThis.KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        e.preventDefault();
-        close.current();
-      }
-    };
     const onDown = (e: MouseEvent) => {
       const t = e.target;
       if (!(t instanceof Node) || root.current?.contains(t)) return;
-      // The opener's own toggle handles its click.
-      if (t instanceof Element && t.closest('[data-emoji-trigger]')) return;
+      // Only the owning trigger's click is left to its own toggle; any other picker's trigger closes this one.
+      if (owner.current?.current?.contains(t)) return;
       close.current();
     };
-    document.addEventListener('keydown', onKey);
     document.addEventListener('mousedown', onDown);
     return () => {
-      document.removeEventListener('keydown', onKey);
       document.removeEventListener('mousedown', onDown);
       if (opener?.isConnected) opener.focus();
     };
   }, []);
+
+  // P3-R18b: Escape is scoped to the picker, so it never reaches an edit composer's cancel.
+  function onRootKey(e: KeyboardEvent<HTMLDivElement>) {
+    if (e.key !== 'Escape') return;
+    e.preventDefault();
+    e.stopPropagation();
+    close.current();
+  }
+
+  function onRootBlur(e: FocusEvent<HTMLDivElement>) {
+    const to = e.relatedTarget;
+    if (!(to instanceof Node) || root.current?.contains(to)) return;
+    if (owner.current?.current?.contains(to)) return;
+    close.current();
+  }
 
   function onGridKey(e: KeyboardEvent<HTMLDivElement>) {
     const el = (e.target as HTMLElement).closest<HTMLElement>('[data-index]');
@@ -143,12 +163,7 @@ export function EmojiPicker({ label, onPick, onClose }: { label: string; onPick:
     else if (e.key === 'ArrowUp') next = Math.max(i - PICKER_COLUMNS, 0);
     else if (e.key === 'Home') next = 0;
     else if (e.key === 'End') next = last;
-    else if (e.key === 'Enter' || e.key === ' ') {
-      e.preventDefault();
-      const c = cells[i];
-      if (c) pick(c);
-      return;
-    }
+    // Enter and Space activate the focused cell's native click; picking here too would double-pick.
     if (next !== null) {
       e.preventDefault();
       focusCell(next);
@@ -160,7 +175,7 @@ export function EmojiPicker({ label, onPick, onClose }: { label: string; onPick:
   const searching = query.trim() !== '';
 
   return (
-    <div ref={root} className="emoji-picker" role="dialog" aria-label={label}>
+    <div ref={root} className="emoji-picker" role="dialog" aria-label={label} onKeyDown={onRootKey} onBlur={onRootBlur}>
       <input
         ref={search}
         type="search"

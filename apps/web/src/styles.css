@@ -103,3 +103,10 @@ button.link:hover { text-decoration: underline; }
 .emoji-row [role="gridcell"] { display: contents; }
 .emoji-grid button:hover, .emoji-grid button:focus-visible { background: var(--line); }
 .emoji-empty { margin: 0.75rem 0; text-align: center; }
+.reactions { display: flex; flex-wrap: wrap; gap: 0.25rem; margin: 0.2rem 0; }
+.reaction { display: inline-flex; align-items: center; gap: 0.25rem; padding: 0.05rem 0.45rem; border: 1px solid var(--line); border-radius: 999px; background: transparent; color: inherit; font-size: 0.8rem; cursor: pointer; }
+.reaction[aria-pressed="true"] { border-color: currentColor; font-weight: 600; }
+.reaction:disabled { opacity: 0.5; cursor: default; }
+.reaction .emoji { width: 1em; height: 1em; }
+.reaction-add { position: relative; display: inline-block; }
+.reaction-add .emoji-picker { bottom: auto; top: 100%; right: auto; left: 0; margin: 0.25rem 0 0; }

@@ -128,9 +128,70 @@ describe('EmojiPicker', () => {
     t.focus();
     fireEvent.click(t);
     expect(screen.getByRole('dialog', { name: 'Insert emoji' })).toBeTruthy();
-    fireEvent.keyDown(document, { key: 'Escape' });
+    fireEvent.keyDown(screen.getByLabelText('Search emoji'), { key: 'Escape' });
     expect(screen.queryByRole('dialog')).toBeNull();
     expect(document.activeElement).toBe(t);
+  });
+
+  it('Enter and Space on a grid cell do not pick by keydown (the native click does, once)', () => {
+    const { onPick } = mount();
+    search('tada');
+    const cell = cells()[0]!;
+    cell.focus();
+    fireEvent.keyDown(cell, { key: 'Enter' });
+    fireEvent.keyDown(cell, { key: ' ' });
+    expect(onPick).not.toHaveBeenCalled();
+    fireEvent.click(cell);
+    expect(onPick).toHaveBeenCalledTimes(1);
+  });
+
+  it('Escape is scoped to the picker: it stops propagating and closes', () => {
+    const outer = vi.fn();
+    const onClose = vi.fn();
+    render(
+      <div onKeyDown={outer}>
+        <EmojiProvider userId={ME} custom={[]}>
+          <EmojiPicker label="Insert emoji" onPick={() => undefined} onClose={onClose} />
+        </EmojiProvider>
+      </div>,
+    );
+    fireEvent.keyDown(screen.getByLabelText('Search emoji'), { key: 'Escape' });
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(outer).not.toHaveBeenCalled();
+  });
+
+  it('closes when focus leaves the picker, but not for focus moving inside it', () => {
+    const { onClose } = mount();
+    const input = screen.getByLabelText('Search emoji');
+    fireEvent.blur(input, { relatedTarget: screen.getByRole('radio', { name: 'Skin tone 2' }) });
+    expect(onClose).not.toHaveBeenCalled();
+    fireEvent.blur(input, { relatedTarget: null });
+    expect(onClose).not.toHaveBeenCalled();
+    const elsewhere = document.body.appendChild(document.createElement('button'));
+    fireEvent.blur(input, { relatedTarget: elsewhere });
+    expect(onClose).toHaveBeenCalledTimes(1);
+    elsewhere.remove();
+  });
+
+  it('a click on a trigger other than the owner closes the picker', () => {
+    const onClose = vi.fn();
+    const trigger: { current: HTMLElement | null } = { current: null };
+    render(
+      <EmojiProvider userId={ME} custom={[]}>
+        <button data-emoji-trigger ref={(el) => void (trigger.current = el)}>mine</button>
+        <button data-emoji-trigger>other</button>
+        <EmojiPicker
+          label="Insert emoji"
+          onPick={() => undefined}
+          onClose={onClose}
+          trigger={trigger}
+        />
+      </EmojiProvider>,
+    );
+    fireEvent.mouseDown(screen.getByText('mine'));
+    expect(onClose).not.toHaveBeenCalled();
+    fireEvent.mouseDown(screen.getByText('other'));
+    expect(onClose).toHaveBeenCalledTimes(1);
   });
 
   it('click outside closes', () => {

@@ -2,6 +2,10 @@ import { useLayoutEffect, useRef, useState } from 'react';
 import type { MemberSummary, Message, Role } from '@backroom/protocol';
 import type { PendingSend } from '../realtime/outbox';
 import type { ChannelWindow } from '../state/chat';
+import { parseReactionCode } from '@backroom/emoji';
+import { useEmoji } from '../emoji/EmojiContext';
+import { EmojiPicker } from '../emoji/EmojiPicker';
+import { ReactionBar } from '../emoji/ReactionBar';
 import { Composer } from './Composer';
 import { MessageText } from './MessageText';
 
@@ -31,6 +35,7 @@ export function MessageRow({
   onOpenThread,
   onEdit,
   onDelete,
+  onReact,
 }: {
   message: Message;
   members: MemberSummary[];
@@ -43,8 +48,13 @@ export function MessageRow({
   /** Returns false when the edit could not be sent. */
   onEdit: (messageId: string, body: string) => boolean;
   onDelete: (messageId: string) => boolean;
+  /** Returns false when the reaction could not be sent. */
+  onReact?: (messageId: string, emoji: string, on: boolean) => boolean;
 }) {
   const [editing, setEditing] = useState(false);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const addRef = useRef<HTMLButtonElement>(null);
+  const emoji = useEmoji();
   const [sendError, setSendError] = useState(false);
   const offlineTitle = connected ? undefined : 'Reconnecting…';
   const deleted = message.deletedAt !== null;
@@ -52,6 +62,21 @@ export function MessageRow({
   const canEdit = own && !deleted;
   const canDelete = !deleted && (own || myRole === 'owner' || myRole === 'admin');
   const replies = message.replyCount;
+  const reactions = message.reactions ?? [];
+  const canReact = !!onReact && !deleted;
+
+  // P3-R9: compare against the canonical code, so an alias pick toggles the reaction it names.
+  function react(emojiCode: string, on: boolean) {
+    setSendError(!onReact!(message.id, emojiCode, on));
+  }
+  function pickReaction(code: string) {
+    setPickerOpen(false);
+    const p = parseReactionCode(code);
+    const canon = p ? emoji.canonical(p.name, p.tone) : null;
+    if (canon === null) return react(code, true);
+    const mine = reactions.find((r) => r.emoji === canon)?.userIds.includes(me) ?? false;
+    react(canon, !mine);
+  }
 
   return (
     <li className={`msg${showHeader ? ' msg-first' : ''}`}>
@@ -91,14 +116,38 @@ export function MessageRow({
           {message.editedAt !== null && <span className="muted"> (edited)</span>}
         </p>
       )}
+      {canReact && (
+        <ReactionBar reactions={reactions} me={me} members={members} connected={connected} onToggle={(e, on) => onReact!(message.id, e, on)} />
+      )}
       {replies > 0 && onOpenThread && (
         <button type="button" className="link replies" onClick={() => onOpenThread(message.id)}>
           {replies === 1 ? '1 reply' : `${replies} replies`}
         </button>
       )}
       {sendError && <p role="alert" className="msg-error">Not connected — try again.</p>}
-      {(canEdit || canDelete) && !editing && (
+      {(canEdit || canDelete || canReact) && !editing && (
         <div className="msg-actions">
+          {canReact && (
+            <span className="reaction-add">
+              <button
+                ref={addRef}
+                type="button"
+                className="link"
+                aria-label="Add reaction"
+                aria-haspopup="dialog"
+                aria-expanded={pickerOpen}
+                data-emoji-trigger
+                disabled={!connected}
+                title={offlineTitle}
+                onClick={() => setPickerOpen((o) => !o)}
+              >
+                ☺+
+              </button>
+              {pickerOpen && connected && (
+                <EmojiPicker label="Add reaction" trigger={addRef} onPick={pickReaction} onClose={() => setPickerOpen(false)} />
+              )}
+            </span>
+          )}
           {canEdit && (
             <button type="button" className="link" disabled={!connected} title={offlineTitle} onClick={() => setEditing(true)}>
               Edit
@@ -176,6 +225,7 @@ export function MessageList({
   onOpenThread,
   onEdit,
   onDelete,
+  onReact,
   onRetry,
   onDiscard,
 }: {
@@ -189,6 +239,7 @@ export function MessageList({
   onOpenThread: (messageId: string) => void;
   onEdit: (messageId: string, body: string) => boolean;
   onDelete: (messageId: string) => boolean;
+  onReact?: (messageId: string, emoji: string, on: boolean) => boolean;
   onRetry: (clientId: string) => void;
   onDiscard: (clientId: string) => void;
 }) {
@@ -244,6 +295,7 @@ export function MessageList({
             onOpenThread={onOpenThread}
             onEdit={onEdit}
             onDelete={onDelete}
+            onReact={onReact}
           />
         ))}
         {pending.map((p, i) => (

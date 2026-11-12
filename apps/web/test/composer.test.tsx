@@ -211,4 +211,45 @@ describe('Composer emoji', () => {
     fireEvent.keyDown(ta, { key: 'Tab' });
     expect(ta.value).toBe(':wave::skin-tone-3: ');
   });
+
+  it('picked and suggested emoji record the primary name, not the typed alias', () => {
+    const { ta } = emojiSetup();
+    type(ta, ':thumbsup');
+    fireEvent.keyDown(ta, { key: 'Tab' });
+    expect(ta.value).toBe(':thumbsup: ');
+    const uses = Object.keys(JSON.parse(localStorage.getItem(`backroom:emoji:${ME}`)!).uses);
+    expect(uses).toEqual(['+1']);
+  });
+
+  it('Escape in the picker closes it without cancelling an edit composer', () => {
+    const onCancel = vi.fn();
+    localStorage.clear();
+    render(
+      <EmojiProvider userId={ME} custom={[]}>
+        <Composer placeholder="Edit message" members={members} onSubmit={vi.fn()} onCancel={onCancel} />
+      </EmojiProvider>,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Emoji' }));
+    fireEvent.keyDown(screen.getByLabelText('Search emoji'), { key: 'Escape' });
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(onCancel).not.toHaveBeenCalled();
+  });
+
+  it('opening one composer picker and clicking another trigger never leaves two pickers open', () => {
+    localStorage.clear();
+    render(
+      <EmojiProvider userId={ME} custom={[]}>
+        <Composer placeholder="First" members={members} onSubmit={vi.fn()} />
+        <Composer placeholder="Second" members={members} onSubmit={vi.fn()} />
+      </EmojiProvider>,
+    );
+    const [a, b] = screen.getAllByRole('button', { name: 'Emoji' }) as [HTMLElement, HTMLElement];
+    fireEvent.click(a);
+    expect(screen.getAllByRole('dialog')).toHaveLength(1);
+    fireEvent.mouseDown(b);
+    fireEvent.click(b);
+    expect(screen.getAllByRole('dialog')).toHaveLength(1);
+    expect(b.getAttribute('aria-expanded')).toBe('true');
+    expect(a.getAttribute('aria-expanded')).toBe('false');
+  });
 });
