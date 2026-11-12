@@ -88,15 +88,30 @@ describe('hub read state', () => {
 
   it('mark_read for a channel the socket is not in is ignored', async () => {
     const s = await setup();
-    const priv = await insertChannel({ name: 'secret', kind: 'private', memberIds: [s.bob.userId] });
-    await env.DB.prepare('UPDATE channels SET last_seq = 5 WHERE id = ?').bind(priv).run();
     const a1 = await connect(s.app, s.alice.cookie);
+    const a2 = await connect(s.app, s.alice.cookie);
+    // Alice joins after connecting, so her sockets' attachments do not list this channel.
+    const priv = await insertChannel({ name: 'secret', kind: 'private', memberIds: [s.alice.userId] });
+    await env.DB.prepare('UPDATE channels SET last_seq = 5 WHERE id = ?').bind(priv).run();
     a1.send({ t: 'mark_read', channelId: priv, seq: 2 });
-    await new Promise((r) => setTimeout(r, 150));
+    await a2.none('read', 300);
     const v = await env.DB.prepare('SELECT last_read_seq AS v FROM channel_members WHERE channel_id=? AND user_id=?')
-      .bind(priv, s.bob.userId)
+      .bind(priv, s.alice.userId)
       .first<{ v: number }>();
     expect(v!.v).toBe(0);
+  });
+
+  it('repeated mark_read beyond last_seq emits no further frame', async () => {
+    const s = await setup();
+    await seedMessages(s.owner.userId);
+    const a1 = await connect(s.app, s.alice.cookie);
+    const a2 = await connect(s.app, s.alice.cookie);
+    a1.send({ t: 'mark_read', channelId: GENERAL, seq: 99 });
+    expect((await a2.next('read')).seq).toBe(3);
+    await new Promise((r) => setTimeout(r, 1_100));
+    a1.send({ t: 'mark_read', channelId: GENERAL, seq: 100 });
+    await a2.none('read', 300);
+    expect(await readSeq(s.alice.userId)).toBe(3);
   });
 
   it('mark_thread_read advances last_read_reply_seq', async () => {
@@ -190,6 +205,21 @@ describe('hub notifications', () => {
     expect(n.preview.length).toBe(140);
   });
 
+  it('the preview never splits a surrogate pair', async () => {
+    const s = await setup();
+    const alice = await connect(s.app, s.alice.cookie);
+    const bob = await connect(s.app, s.bob.cookie);
+    alice.send({ t: 'send', clientId: 'sp-1-xxxxxxx', channelId: GENERAL, body: `<@${s.bob.userId}> ${'a'.repeat(100)}` });
+    await alice.next('ack');
+    await bob.next('notify');
+    const body = `<@${s.bob.userId}>`.padEnd(139, 'a') + '😀tail';
+    alice.send({ t: 'send', clientId: 'sp-2-xxxxxxx', channelId: GENERAL, body });
+    await alice.next('ack');
+    const n = await bob.next('notify');
+    expect(Array.from(n.preview).length).toBe(140);
+    expect(n.preview.endsWith('😀')).toBe(true);
+  });
+
   it('a throwing notify still acks the sender and broadcasts', async () => {
     const s = await setup();
     await runInDurableObject(hubStub(), (hub) => {
@@ -197,17 +227,20 @@ describe('hub notifications', () => {
         throw new Error('boom');
       };
     });
-    const alice = await connect(s.app, s.alice.cookie);
-    const bob = await connect(s.app, s.bob.cookie);
-    const frame = { t: 'send', clientId: 'nt-1-xxxxxxx', channelId: GENERAL, body: 'hello' } as const;
-    alice.send(frame);
-    const ack = await alice.next('ack');
-    expect((await bob.next('message.new')).message.id).toBe(ack.message.id);
-    // A retry of the same clientId replays the ack (reloaded from D1), not a stuck rejection.
-    alice.send(frame);
-    expect((await alice.next('ack')).message.id).toBe(ack.message.id);
-    await runInDurableObject(hubStub(), (hub) => {
-      delete (hub as unknown as { notify?: () => void }).notify;
-    });
+    try {
+      const alice = await connect(s.app, s.alice.cookie);
+      const bob = await connect(s.app, s.bob.cookie);
+      const frame = { t: 'send', clientId: 'nt-1-xxxxxxx', channelId: GENERAL, body: 'hello' } as const;
+      alice.send(frame);
+      const ack = await alice.next('ack');
+      expect((await bob.next('message.new')).message.id).toBe(ack.message.id);
+      // A retry of the same clientId replays the ack (reloaded from D1), not a stuck rejection.
+      alice.send(frame);
+      expect((await alice.next('ack')).message.id).toBe(ack.message.id);
+    } finally {
+      await runInDurableObject(hubStub(), (hub) => {
+        delete (hub as unknown as { notify?: () => void }).notify;
+      });
+    }
   });
 });

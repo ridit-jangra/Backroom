@@ -221,13 +221,17 @@ export class WorkspaceHub extends DurableObject<Env> {
         try {
           const frame: HubFrame = { t: 'message.new', message: r.message };
           for (const s of this.socketsForChannel(f.channelId)) if (s !== ws) this.sendFrame(s, frame);
+        } catch {
+          console.error(JSON.stringify({ level: 'error', code: 'broadcast_failed' }));
+        }
+        try {
           this.notify(r.message, r.audience);
         } catch {
-          console.error(JSON.stringify({ level: 'error', code: 'post_store_failed' }));
+          console.error(JSON.stringify({ level: 'error', code: 'notify_failed' }));
         }
       }
       return { messageId: r.message.id };
-    });
+    }).catch((): SendOutcome => ({ code: 'failed' }));
     this.recent.set(key, { at: now, result });
     if (this.recent.size > RECENT_MAX) this.pruneRecent(now);
     const outcome = await result;
@@ -251,7 +255,7 @@ export class WorkspaceHub extends DurableObject<Env> {
 
   /** Notification fan-out for a freshly stored message (Task 6). */
   private notify(message: Message, audience: Audience): void {
-    const preview = message.body.slice(0, 140);
+    const preview = Array.from(message.body).slice(0, 140).join('');
     for (const { userId, kind } of notifyTargets(audience, message, (u) => this.isActive(u))) {
       const frame: HubFrame = {
         t: 'notify',
@@ -283,10 +287,10 @@ export class WorkspaceHub extends DurableObject<Env> {
       state.lastSeq = value; // optimistic, so a burst is coalesced before the write returns
       write(value).then(
         (stored) => {
-          if (stored !== undefined) state.lastSeq = stored;
+          if (stored !== undefined && state.lastSeq === value) state.lastSeq = stored;
         },
         () => {
-          state.lastSeq = prev;
+          if (state.lastSeq === value) state.lastSeq = prev;
           console.error(JSON.stringify({ level: 'error', code: 'mark_read_failed' }));
         },
       );
@@ -313,7 +317,8 @@ export class WorkspaceHub extends DurableObject<Env> {
     this.throttleRead(ws, channelId, seq, async (value) => {
       const row = await this.env.DB.prepare(
         `UPDATE channel_members SET last_read_seq = MIN(?1, (SELECT last_seq FROM channels WHERE id = ?2))
-         WHERE channel_id = ?2 AND user_id = ?3 AND last_read_seq < ?1 RETURNING last_read_seq AS seq`,
+         WHERE channel_id = ?2 AND user_id = ?3 AND last_read_seq < ?1
+           AND last_read_seq < (SELECT last_seq FROM channels WHERE id = ?2) RETURNING last_read_seq AS seq`,
       )
         .bind(value, channelId, userId)
         .first<{ seq: number }>();
