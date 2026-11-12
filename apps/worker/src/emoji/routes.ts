@@ -5,7 +5,9 @@ import {
   CUSTOM_EMOJI_MAX_SIDE,
   CUSTOM_EMOJI_MIN_SIDE,
   CUSTOM_EMOJI_UPLOAD_MAX_BYTES,
+  CustomEmojiAliasBody,
   EmojiName,
+  type CustomEmoji,
   canAddCustomEmoji,
 } from '@backroom/protocol';
 import { lookupEmoji } from '@backroom/emoji';
@@ -14,7 +16,8 @@ import { hubFor } from '../hub/client';
 import { ApiError } from '../lib/errors';
 import { requireSession } from '../middleware/session';
 import { requireMember } from '../workspace/access';
-import { createCustomEmoji, limitReached, listCustomEmoji, readSettings } from './custom';
+import { readJson } from '../lib/http';
+import { createCustomAlias, createCustomEmoji, deleteCustomEmoji, limitReached, listCustomEmoji, readSettings } from './custom';
 import { sniffImage } from './image';
 
 export const emojiRoutes = new Hono<AppEnv>();
@@ -49,6 +52,14 @@ async function readCappedBody(req: Request, max: number): Promise<Uint8Array> {
   return out;
 }
 
+async function broadcast(env: AppEnv['Bindings'], workspaceId: string, change: { added: CustomEmoji[]; removed: string[] }) {
+  try {
+    await hubFor(env, workspaceId).emojiChanged(change);
+  } catch {
+    console.error(JSON.stringify({ level: 'error', code: 'emoji_broadcast_failed' }));
+  }
+}
+
 const hasBody = (o: R2Object | R2ObjectBody): o is R2ObjectBody => 'body' in o;
 
 emojiRoutes.get('/w/:slug/emoji', requireSession, async (c) => {
@@ -68,11 +79,19 @@ emojiRoutes.post('/w/:slug/emoji', requireSession, async (c) => {
     throw new ApiError(403, 'forbidden', 'Only admins can add custom emoji in this workspace.');
   }
 
+  const contentType = c.req.header('Content-Type') ?? '';
+  if (/^application\/json\s*(;|$)/i.test(contentType)) {
+    const body = CustomEmojiAliasBody.parse(await readJson(c));
+    if (lookupEmoji(body.name)) throw new ApiError(409, 'name_taken', 'That name is used by a built-in emoji.');
+    const alias = await createCustomAlias(db, { workspaceId, userId, name: body.name, aliasFor: body.aliasFor, now: c.var.deps.now() });
+    await broadcast(c.env, workspaceId, { added: [alias], removed: [] });
+    return c.json({ emoji: alias }, 201);
+  }
+
   const declared = Number(c.req.header('Content-Length'));
   if (Number.isFinite(declared) && declared > CUSTOM_EMOJI_UPLOAD_MAX_BYTES) throw tooLarge();
 
   // The client's Content-Type header is only used to find the multipart boundary.
-  const contentType = c.req.header('Content-Type') ?? '';
   if (!/^multipart\/form-data\s*;/i.test(contentType)) throw invalidRequest();
   const body = await readCappedBody(c.req.raw, CUSTOM_EMOJI_UPLOAD_MAX_BYTES);
   let form: FormData;
@@ -108,11 +127,7 @@ emojiRoutes.post('/w/:slug/emoji', requireSession, async (c) => {
 
   const emoji = await createCustomEmoji(c.env, { workspaceId, userId, name, bytes, mime: sniffed.mime, now: c.var.deps.now() });
 
-  try {
-    await hubFor(c.env, workspaceId).emojiChanged({ added: [emoji], removed: [] });
-  } catch {
-    console.error(JSON.stringify({ level: 'error', code: 'emoji_broadcast_failed' }));
-  }
+  await broadcast(c.env, workspaceId, { added: [emoji], removed: [] });
   return c.json({ emoji }, 201);
 });
 
@@ -130,9 +145,17 @@ emojiRoutes.get('/emoji/:id', requireSession, async (c) => {
   if (!row) throw notFound;
 
   const ifNoneMatch = c.req.header('If-None-Match');
-  const obj = ifNoneMatch
-    ? await c.env.BUCKET.get(row.key, { onlyIf: new Headers({ 'If-None-Match': ifNoneMatch }) })
-    : await c.env.BUCKET.get(row.key);
+  let obj: R2Object | R2ObjectBody | null;
+  if (ifNoneMatch) {
+    try {
+      obj = await c.env.BUCKET.get(row.key, { onlyIf: new Headers({ 'If-None-Match': ifNoneMatch }) });
+    } catch {
+      // A malformed If-None-Match must not 500 (P3-R16): serve the object unconditionally.
+      obj = await c.env.BUCKET.get(row.key);
+    }
+  } else {
+    obj = await c.env.BUCKET.get(row.key);
+  }
   if (!obj) throw notFound;
 
   const stored = obj.httpMetadata?.contentType ?? '';
@@ -147,4 +170,12 @@ emojiRoutes.get('/emoji/:id', requireSession, async (c) => {
   if (!hasBody(obj)) return new Response(null, { status: 304, headers });
   headers.set('Content-Length', String(obj.size));
   return new Response(obj.body, { status: 200, headers });
+});
+
+emojiRoutes.delete('/emoji/:id', requireSession, async (c) => {
+  const id = c.req.param('id');
+  if (!ID_RE.test(id)) throw new ApiError(404, 'not_found', 'Emoji not found.');
+  const { removed, workspaceId } = await deleteCustomEmoji(c.env, { id, userId: c.var.session!.userId });
+  await broadcast(c.env, workspaceId, { added: [], removed });
+  return c.json({ ok: true });
 });

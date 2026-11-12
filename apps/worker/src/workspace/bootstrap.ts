@@ -1,5 +1,6 @@
 import type { Bootstrap, MemberSummary, Me, Role } from '@backroom/protocol';
 import { SUMMARY_COLUMNS, rowToSummary, type SummaryRow } from '../channels/channels';
+import { customEmojiStatement, readSettings, rowToCustomEmoji, type CustomEmojiRow } from '../emoji/custom';
 import { requireMember } from './access';
 
 const DISPLAY = "COALESCE(u.display_name, substr(u.email, 1, instr(u.email, '@') - 1))";
@@ -16,8 +17,8 @@ export async function getMe(db: D1Database, userId: string): Promise<Me> {
 export async function getBootstrap(db: D1Database, slug: string, userId: string): Promise<Bootstrap> {
   const { workspaceId, role } = await requireMember(db, slug, userId);
 
-  const [ws, me, channels, members] = await db.batch([
-    db.prepare('SELECT id, slug, name FROM workspaces WHERE id = ?').bind(workspaceId),
+  const [ws, me, channels, members, emoji] = await db.batch([
+    db.prepare('SELECT id, slug, name, settings_json AS settingsJson FROM workspaces WHERE id = ?').bind(workspaceId),
     db.prepare(`SELECT u.id AS id, u.email AS email, ${DISPLAY} AS displayName FROM users u WHERE u.id = ?`).bind(userId),
     db
       .prepare(
@@ -37,12 +38,15 @@ export async function getBootstrap(db: D1Database, slug: string, userId: string)
          ORDER BY LOWER(${DISPLAY}), u.id`,
       )
       .bind(workspaceId),
+    customEmojiStatement(db, workspaceId),
   ]);
+  const { settingsJson, ...workspace } = ws!.results[0] as { id: string; slug: string; name: string; settingsJson: string | null };
 
   return {
-    workspace: ws!.results[0] as { id: string; slug: string; name: string },
+    workspace: { ...workspace, settings: readSettings(settingsJson) },
     me: { ...(me!.results[0] as Me), role: role as Role },
     channels: (channels!.results as SummaryRow[]).map(rowToSummary),
+    customEmoji: (emoji!.results as CustomEmojiRow[]).map(rowToCustomEmoji),
     // P2-R28: deactivated members stay listed (flagged) so their old messages keep a name.
     members: (members!.results as (Omit<MemberSummary, 'deactivated'> & { deactivated: number })[]).map(({ deactivated, ...m }) =>
       deactivated ? { ...m, deactivated: true } : m,

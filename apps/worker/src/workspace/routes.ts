@@ -1,9 +1,11 @@
 import { Hono } from 'hono';
-import { InviteCreateBody, MemberPatchBody, MePatchBody } from '@backroom/protocol';
+import { InviteCreateBody, MemberPatchBody, MePatchBody, WorkspaceSettingsPatchBody } from '@backroom/protocol';
 import type { AppEnv } from '../app';
 import { readJson } from '../lib/http';
 import { requireSession } from '../middleware/session';
 import { hubFor } from '../hub/client';
+import { ApiError } from '../lib/errors';
+import { readSettings } from '../emoji/custom';
 import { requireAdmin, requireMember } from './access';
 import { createInvite, listInvites, listMembers, patchMember, revokeInvite } from './invites';
 import { getBootstrap, getMe } from './bootstrap';
@@ -56,4 +58,16 @@ workspaceRoutes.patch('/w/:slug/members/:userId', requireSession, async (c) => {
   const member = await patchMember(c.env.DB, slug, actorId, targetId, patch, c.var.deps.now());
   if (patch.deactivated === true) await hubFor(c.env, workspaceId).disconnectUser(targetId);
   return c.json(member);
+});
+
+workspaceRoutes.patch('/w/:slug/settings', requireSession, async (c) => {
+  const { workspaceId, role } = await requireMember(c.env.DB, c.req.param('slug'), c.var.session!.userId);
+  if (role !== 'owner') throw new ApiError(403, 'forbidden', 'Only the owner can change workspace settings.');
+  const { customEmojiPolicy } = WorkspaceSettingsPatchBody.parse(await readJson(c));
+  const row = await c.env.DB.prepare(
+    `UPDATE workspaces SET settings_json = json_set(COALESCE(settings_json, '{}'), '$.customEmojiPolicy', ?) WHERE id = ? RETURNING settings_json AS settingsJson`,
+  )
+    .bind(customEmojiPolicy, workspaceId)
+    .first<{ settingsJson: string | null }>();
+  return c.json({ settings: readSettings(row?.settingsJson ?? null) });
 });

@@ -288,3 +288,113 @@ describe('custom emoji', () => {
     expect(f.removed).toEqual([]);
   });
 });
+
+describe('custom emoji aliases, delete, policy', () => {
+  async function setup3() {
+    const { mailer, sent } = captureMailer();
+    const app = createApp(testDeps({ mailer }));
+    const [owner, alice, bob] = await seedUsers(app, sent, ['owner@test.dev', 'alice@test.dev', 'bob@test.dev']);
+    const r = await send(app, 'PATCH', `/w/clubhack/members/${bob!.userId}`, { role: 'admin' }, owner!.cookie);
+    expect(r.status).toBe(200);
+    return { app, owner: owner!, alice: alice!, bob: bob! };
+  }
+  const setEveryone = () =>
+    env.DB.prepare(`UPDATE workspaces SET settings_json = '{"customEmojiPolicy":"everyone"}' WHERE id = ?`).bind(CLUBHACK_WS).run();
+
+  it('alias to a built-in and to a custom emoji', async () => {
+    const s = await setup3();
+    const a = await created(await send(s.app, 'POST', '/w/clubhack/emoji', { name: 'yay', aliasFor: 'tada' }, s.owner.cookie));
+    expect(a).toMatchObject({ name: 'yay', url: null, aliasFor: 'tada' });
+    const b = await created(await send(s.app, 'POST', '/w/clubhack/emoji', { name: 'likes', aliasFor: 'thumbsup' }, s.owner.cookie));
+    expect(b.aliasFor).toBe('+1');
+    await created(await uploadEmoji(s.app, s.owner.cookie, 'partyparrot', png(32, 32)));
+    const c = await created(await send(s.app, 'POST', '/w/clubhack/emoji', { name: 'pp', aliasFor: 'partyparrot' }, s.owner.cookie));
+    expect(c).toMatchObject({ url: null, aliasFor: 'partyparrot' });
+  });
+
+  it('alias errors', async () => {
+    const s = await setup3();
+    const post = (body: unknown) => send(s.app, 'POST', '/w/clubhack/emoji', body, s.owner.cookie);
+    const r1 = await post({ name: 'x1', aliasFor: 'nope' });
+    expect(r1.status).toBe(400);
+    expect(await errCode(r1)).toBe('invalid_alias');
+    await created(await uploadEmoji(s.app, s.owner.cookie, 'partyparrot', png(32, 32)));
+    await created(await post({ name: 'pp', aliasFor: 'partyparrot' }));
+    const r2 = await post({ name: 'x2', aliasFor: 'pp' });
+    expect(r2.status).toBe(400);
+    expect(await errCode(r2)).toBe('invalid_alias');
+    expect((await post({ name: 'smile', aliasFor: 'tada' })).status).toBe(409);
+    expect((await send(s.app, 'POST', '/w/clubhack/emoji', { name: 'zz', aliasFor: 'tada' }, s.alice.cookie)).status).toBe(403);
+  });
+
+  it('delete permissions', async () => {
+    const s = await setup3();
+    await setEveryone();
+    const a1 = await created(await uploadEmoji(s.app, s.alice.cookie, 'a1', png(32, 32)));
+    const a2 = await created(await uploadEmoji(s.app, s.alice.cookie, 'a2', png(32, 32)));
+    const o1 = await created(await uploadEmoji(s.app, s.owner.cookie, 'o1', png(32, 32)));
+    const del = (id: string, cookie: string) => send(s.app, 'DELETE', `/emoji/${id}`, undefined, cookie);
+    const bobDel = await del(a1.id, s.bob.cookie);
+    expect(bobDel.status).toBe(200);
+    expect(await bobDel.json()).toEqual({ ok: true });
+    expect((await del(a2.id, s.alice.cookie)).status).toBe(200);
+    expect((await del(o1.id, s.alice.cookie)).status).toBe(403);
+    expect((await del('01ARZ3NDEKTSV4RRFFQ69G5FAV', s.alice.cookie)).status).toBe(404);
+    expect((await del('bad', s.alice.cookie)).status).toBe(404);
+  });
+
+  it('delete cascades aliases, removes the R2 object and broadcasts removed ids', async () => {
+    const s = await setup3();
+    const pp = await created(await uploadEmoji(s.app, s.owner.cookie, 'partyparrot', png(32, 32)));
+    const alias = await created(await send(s.app, 'POST', '/w/clubhack/emoji', { name: 'pp', aliasFor: 'partyparrot' }, s.owner.cookie));
+    const keep = await created(await uploadEmoji(s.app, s.owner.cookie, 'keeper', png(32, 32)));
+    const sock = await connect(s.app, s.alice.cookie);
+    expect((await send(s.app, 'DELETE', `/emoji/${pp.id}`, undefined, s.owner.cookie)).status).toBe(200);
+    const f = await sock.next('emoji.update');
+    expect(f.added).toEqual([]);
+    expect([...f.removed].sort()).toEqual([pp.id, alias.id].sort());
+    expect(await env.BUCKET.head(PREFIX + pp.id)).toBeNull();
+    expect(await env.BUCKET.head(PREFIX + keep.id)).not.toBeNull();
+    const list = await send(s.app, 'GET', '/w/clubhack/emoji', undefined, s.owner.cookie);
+    expect(((await list.json()) as { emoji: CustomEmoji[] }).emoji.map((e) => e.name)).toEqual(['keeper']);
+  });
+
+  it('delete cascade is scoped to the emoji workspace', async () => {
+    const s = await setup3();
+    const pp = await created(await uploadEmoji(s.app, s.owner.cookie, 'partyparrot', png(32, 32)));
+    await env.DB.prepare("INSERT INTO workspaces (id, slug, name, created_at) VALUES ('01OTHERWS00000000000000000', 'other', 'Other', 1)").run();
+    const other = await insertCustomEmoji({ name: 'foreign', aliasFor: 'partyparrot', workspaceId: '01OTHERWS00000000000000000' });
+    await send(s.app, 'DELETE', `/emoji/${pp.id}`, undefined, s.owner.cookie);
+    const row = await env.DB.prepare('SELECT id FROM custom_emoji WHERE id = ?').bind(other).first();
+    expect(row).not.toBeNull();
+  });
+
+  it('policy: owner switches to everyone, then members may upload', async () => {
+    const s = await setup3();
+    const patch = (body: unknown, cookie: string) => send(s.app, 'PATCH', '/w/clubhack/settings', body, cookie);
+    expect((await patch({ customEmojiPolicy: 'everyone' }, s.alice.cookie)).status).toBe(403);
+    expect((await patch({ customEmojiPolicy: 'everyone' }, s.bob.cookie)).status).toBe(403);
+    const ok = await patch({ customEmojiPolicy: 'everyone' }, s.owner.cookie);
+    expect(ok.status).toBe(200);
+    expect(await ok.json()).toEqual({ settings: { customEmojiPolicy: 'everyone' } });
+    await created(await uploadEmoji(s.app, s.alice.cookie, 'mine', png(32, 32)));
+    expect((await patch({ customEmojiPolicy: 'all' }, s.owner.cookie)).status).toBe(400);
+  });
+
+  it('R2 cleanup failure does not mask name_taken; malformed If-None-Match is 200', async () => {
+    const s = await setup3();
+    const e = await created(await uploadEmoji(s.app, s.owner.cookie, 'dup', png(32, 32)));
+    const realDelete = env.BUCKET.delete.bind(env.BUCKET);
+    env.BUCKET.delete = (() => Promise.reject(new Error('r2 down'))) as typeof env.BUCKET.delete;
+    try {
+      const res = await uploadEmoji(s.app, s.owner.cookie, 'dup', png(32, 32));
+      expect(res.status).toBe(409);
+      expect(await errCode(res)).toBe('name_taken');
+    } finally {
+      env.BUCKET.delete = realDelete;
+    }
+    const img = await getImage(s.app, `/emoji/${e.id}`, { Cookie: s.owner.cookie, 'If-None-Match': 'abc' });
+    expect(img.status).toBe(200);
+    await img.arrayBuffer();
+  });
+});

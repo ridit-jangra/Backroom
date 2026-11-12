@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/app';
 import type { Bootstrap, Me } from '@backroom/protocol';
 import { sendMessage } from '../src/messaging/store';
-import { GENERAL, captureMailer, resetDb, seedUsers, send, signIn, testDeps } from './helpers';
+import { GENERAL, captureMailer, insertCustomEmoji, resetDb, seedUsers, send, signIn, testDeps } from './helpers';
 
 async function setup() {
   const { mailer, sent } = captureMailer();
@@ -159,6 +159,20 @@ describe('bootstrap', () => {
     const bad = await send(app, 'PATCH', '/me', { displayName: '   ' }, cookie);
     expect(bad.status).toBe(400);
     expect(((await bad.json()) as any).error.code).toBe('invalid_request');
+  });
+
+  it('bootstrap includes custom emoji and settings', async () => {
+    const { app, cookie } = await setup();
+    const get = async () => (await (await send(app, 'GET', '/w/clubhack/bootstrap', undefined, cookie)).json()) as Bootstrap;
+    const b0 = await get();
+    expect(b0.workspace.settings).toEqual({ customEmojiPolicy: 'admins' });
+    expect(b0.customEmoji).toEqual([]);
+    await insertCustomEmoji({ name: 'zeta' });
+    await insertCustomEmoji({ name: 'alpha', aliasFor: 'zeta' });
+    const b1 = await get();
+    expect(b1.customEmoji!.map((e) => e.name)).toEqual(['alpha', 'zeta']);
+    expect(b1.customEmoji![0]).toMatchObject({ url: null, aliasFor: 'zeta' });
+    expect(b1.customEmoji![1]!.url).toBe(`/emoji/${b1.customEmoji![1]!.id}`);
   });
 
   it('bootstrap without session is 401', async () => {
