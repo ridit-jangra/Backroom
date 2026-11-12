@@ -28,6 +28,8 @@ export function Workspace({ slug, channelId }: { slug: string; channelId?: strin
   // Stable while the custom set is unchanged, so messages are not re-tokenized on every render.
   const customEmoji = useMemo(() => Object.values(state.customEmoji), [state.customEmoji]);
 
+  useEffect(() => setJumpError(''), [channelId]);
+
   // With no channel in the URL, land on #general (else the first channel).
   useEffect(() => {
     if (channelId || !bootstrap) return;
@@ -117,7 +119,10 @@ export function Workspace({ slug, channelId }: { slug: string; channelId?: strin
   function submitSearch(e: React.FormEvent) {
     e.preventDefault();
     const q = searchDraft.trim();
-    if (q) setSearchQuery(q);
+    if (!q) return;
+    setJumpError('');
+    actions.openThread(null);
+    setSearchQuery(q);
   }
   const searchOpen = !!searchQuery && !threadOpen;
 
@@ -270,7 +275,10 @@ export function Workspace({ slug, channelId }: { slug: string; channelId?: strin
             query={searchQuery}
             members={members}
             onJump={onJump}
-            onClose={() => setSearchQuery('')}
+            onClose={() => {
+              setJumpError('');
+              setSearchQuery('');
+            }}
           />
         )}
         {dialog === 'browse' && <ChannelBrowser slug={slug} onJoined={showChannel} onClose={() => setDialog(null)} />}

@@ -37,7 +37,9 @@ export function SearchPanel({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [joinError, setJoinError] = useState('');
+  const [joined, setJoined] = useState<Set<string>>(new Set());
   const ctl = useRef<AbortController | null>(null);
+  const panelRef = useRef<HTMLElement | null>(null);
   const names = new Map(members.map((m) => [m.id, m.displayName]));
 
   async function load(cursor: string | null) {
@@ -50,7 +52,11 @@ export function SearchPanel({
       const url = `/w/${slug}/search?q=${encodeURIComponent(query)}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`;
       const page = await api<SearchPage>(url, { signal: c.signal });
       if (c.signal.aborted) return;
-      setHits((h) => (cursor ? [...h, ...page.results] : page.results));
+      setHits((h) => {
+        if (!cursor) return page.results;
+        const seen = new Set(h.map((x) => x.message.id));
+        return [...h, ...page.results.filter((x) => !seen.has(x.message.id))];
+      });
       setNext(page.nextCursor);
     } catch (e) {
       if (c.signal.aborted) return;
@@ -70,43 +76,47 @@ export function SearchPanel({
   }, [slug, query]);
 
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
-    };
-    document.addEventListener('keydown', onKey);
-    return () => document.removeEventListener('keydown', onKey);
-  }, [onClose]);
+    panelRef.current?.focus();
+  }, []);
+
+  function onKeyDown(e: React.KeyboardEvent) {
+    if (e.key === 'Escape' && !e.defaultPrevented) onClose();
+  }
 
   async function open(hit: SearchHit) {
     setJoinError('');
-    if (!hit.channel.isMember && hit.channel.kind === 'public') {
+    if (!hit.channel.isMember && hit.channel.kind === 'public' && !joined.has(hit.channel.id)) {
       try {
         await api(`/channels/${encodeURIComponent(hit.channel.id)}/join`, { method: 'POST', body: {} });
+        setJoined((j) => new Set(j).add(hit.channel.id));
       } catch (e) {
         setJoinError(e instanceof Error ? e.message : 'Could not join.');
         return;
       }
     }
-    await onJump(hit);
+    try {
+      await onJump({ ...hit, channel: { ...hit.channel, isMember: true } });
+    } catch (e) {
+      setJoinError(e instanceof Error ? e.message : 'Could not open that message.');
+    }
   }
 
   return (
-    <aside className="search-panel" aria-label="Search results">
+    <aside className="search-panel" aria-label="Search results" tabIndex={-1} ref={panelRef} onKeyDown={onKeyDown} aria-busy={loading}>
       <header>
-        <strong>Results</strong>
+        <strong>Results for {query}</strong>
         <button type="button" onClick={onClose}>
           Close search
         </button>
       </header>
       <p className="muted">Filters: in:#channel from:@name has:file before:YYYY-MM-DD after:YYYY-MM-DD</p>
-      {error && <p role="alert">{error}</p>}
-      {joinError && <p role="alert">{joinError}</p>}
+      {(error || joinError) && <p role="alert">{error || joinError}</p>}
       {loading && hits.length === 0 && !error && <p role="status">Searching…</p>}
       {!loading && !error && hits.length === 0 && <p>No results</p>}
       <ul>
         {hits.map((h) => {
           const label = h.channel.name ? `#${h.channel.name}` : 'Direct message';
-          const join = !h.channel.isMember && h.channel.kind === 'public';
+          const join = !h.channel.isMember && h.channel.kind === 'public' && !joined.has(h.channel.id);
           return (
             <li key={h.message.id}>
               <button type="button" className="result" aria-label={join ? `Join ${label} to view` : undefined} onClick={() => void open(h)}>
