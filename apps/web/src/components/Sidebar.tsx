@@ -76,6 +76,7 @@ export function Sidebar({
     .map((c) => ({ c, label: channelLabel(c, members, me) }))
     .sort((a, b) => a.label.localeCompare(b.label));
   const isAdmin = myRole === 'owner' || myRole === 'admin';
+  const emojiHref = `/client/${encodeURIComponent(slug)}/emoji`;
   const adminHref = `/client/${encodeURIComponent(slug)}/admin`;
 
   return (
@@ -88,6 +89,17 @@ export function Sidebar({
         <button type="button" onClick={onNewMessage} disabled={!onNewMessage}>
           New message
         </button>
+        <a
+          href={emojiHref}
+          className="button-link"
+          onClick={(e) => {
+            if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
+            e.preventDefault();
+            navigate(emojiHref);
+          }}
+        >
+          Custom emoji
+        </a>
         {isAdmin && (
           <a
             href={adminHref}

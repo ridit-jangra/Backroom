@@ -4,6 +4,7 @@ import { Login } from './pages/Login';
 import { Verify } from './pages/Verify';
 import { Invite } from './pages/Invite';
 import { Admin } from './pages/Admin';
+import { CustomEmojiPage } from './pages/CustomEmoji';
 import { Workspace } from './pages/Workspace';
 import { About } from './pages/About';
 
@@ -31,6 +32,8 @@ export function App() {
   // P2-R11: the admin route wins over the channel route, and channel segments must be wire IDs.
   const admin = /^\/client\/([^/]+)\/admin$/.exec(path);
   if (admin) return <Admin slug={decodeURIComponent(admin[1]!)} />;
+  const emoji = /^\/client\/([^/]+)\/emoji$/.exec(path);
+  if (emoji) return <CustomEmojiPage slug={decodeURIComponent(emoji[1]!)} />;
   const ws = /^\/client\/([^/]+)(?:\/([0-9A-Z]{26}))?$/.exec(path);
   if (ws) return <Workspace key={ws[1]} slug={decodeURIComponent(ws[1]!)} channelId={ws[2]} />;
   return (

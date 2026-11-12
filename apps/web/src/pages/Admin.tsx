@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { AdminMember, Bootstrap, InviteSummary } from '@backroom/protocol';
+import type { AdminMember, Bootstrap, CustomEmojiPolicy, InviteSummary } from '@backroom/protocol';
 import { api, ApiClientError } from '../api';
 
 const messageOf = (e: unknown) => (e instanceof ApiClientError ? e.message : 'Something went wrong. Try again.');
@@ -10,6 +10,7 @@ export function Admin({ slug }: { slug: string }) {
   const [me, setMe] = useState<Bootstrap['me'] | null>(null);
   const [invites, setInvites] = useState<InviteSummary[]>([]);
   const [members, setMembers] = useState<AdminMember[]>([]);
+  const [policy, setPolicy] = useState<CustomEmojiPolicy>('admins');
   const [error, setError] = useState('');
   const [loadError, setLoadError] = useState('');
   const [maxUses, setMaxUses] = useState('50');
@@ -25,6 +26,7 @@ export function Admin({ slug }: { slug: string }) {
     try {
       const b = await api<Bootstrap>(`${w}/bootstrap`);
       setMe(b.me);
+      setPolicy(b.workspace.settings?.customEmojiPolicy ?? 'admins');
       if (b.me.role === 'member') return;
       const [i, m] = await Promise.all([
         api<{ invites: InviteSummary[] }>(`${w}/invites`),
@@ -109,6 +111,19 @@ export function Admin({ slug }: { slug: string }) {
     });
   };
 
+  const changePolicy = (next: CustomEmojiPolicy) => {
+    const prev = policy;
+    setPolicy(next);
+    return run(async () => {
+      try {
+        await api(`${w}/settings`, { method: 'PATCH', body: { customEmojiPolicy: next } });
+      } catch (e) {
+        setPolicy(prev);
+        throw e;
+      }
+    });
+  };
+
   const patch = (m: AdminMember, body: { role?: 'admin' | 'member'; deactivated?: boolean }) =>
     run(async () => {
       const r = await api<{ role: AdminMember['role'] }>(`${w}/members/${m.id}`, { method: 'PATCH', body });
@@ -159,6 +174,26 @@ export function Admin({ slug }: { slug: string }) {
           ))}
         </tbody>
       </table>
+
+      <h2>Custom emoji</h2>
+      {me.role === 'owner' ? (
+        <label>
+          Who can add custom emoji
+          <select
+            aria-label="Who can add custom emoji"
+            value={policy}
+            onChange={(e) => void changePolicy(e.target.value as CustomEmojiPolicy)}
+          >
+            <option value="admins">Admins only</option>
+            <option value="everyone">Everyone</option>
+          </select>
+        </label>
+      ) : (
+        <p>Who can add custom emoji: {policy === 'everyone' ? 'Everyone' : 'Admins only'}</p>
+      )}
+      <p>
+        <a href={`${base}/emoji`}>Manage custom emoji</a>
+      </p>
 
       <h2>Members</h2>
       <table>

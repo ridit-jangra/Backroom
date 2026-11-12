@@ -11,16 +11,7 @@ export class ApiClientError extends Error {
   }
 }
 
-export async function api<T>(
-  path: string,
-  init: { method?: string; body?: unknown } = {},
-): Promise<T> {
-  const res = await fetch(path, {
-    method: init.method ?? (init.body === undefined ? 'GET' : 'POST'),
-    credentials: 'include',
-    headers: init.body === undefined ? undefined : { 'content-type': 'application/json' },
-    body: init.body === undefined ? undefined : JSON.stringify(init.body),
-  });
+async function parse<T>(res: Response): Promise<T> {
   let data: unknown = null;
   try {
     data = await res.json();
@@ -36,4 +27,23 @@ export async function api<T>(
     );
   }
   return data as T;
+}
+
+export async function api<T>(
+  path: string,
+  init: { method?: string; body?: unknown } = {},
+): Promise<T> {
+  const res = await fetch(path, {
+    method: init.method ?? (init.body === undefined ? 'GET' : 'POST'),
+    credentials: 'include',
+    headers: init.body === undefined ? undefined : { 'content-type': 'application/json' },
+    body: init.body === undefined ? undefined : JSON.stringify(init.body),
+  });
+  return parse<T>(res);
+}
+
+/** Multipart POST: no content-type header, so the browser sets the boundary. */
+export async function apiUpload<T>(path: string, form: FormData): Promise<T> {
+  const res = await fetch(path, { method: 'POST', credentials: 'include', body: form });
+  return parse<T>(res);
 }

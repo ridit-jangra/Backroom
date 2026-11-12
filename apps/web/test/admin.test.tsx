@@ -141,3 +141,26 @@ describe('Admin page', () => {
     expect(posted).toHaveLength(0);
   });
 });
+
+describe('Admin page: emoji policy', () => {
+  it('owner switches emoji policy to everyone', async () => {
+    const posted = open('owner' as 'admin');
+    const select = (await screen.findByLabelText('Who can add custom emoji')) as HTMLSelectElement;
+    expect(select.value).toBe('admins');
+    await userEvent.selectOptions(select, 'everyone');
+    await waitFor(() => expect(posted.find((p) => p.url === '/w/clubhack/settings')).toBeTruthy());
+    expect(posted.find((p) => p.url === '/w/clubhack/settings')).toMatchObject({ method: 'PATCH', body: { customEmojiPolicy: 'everyone' } });
+  });
+
+  it('admin sees the policy read-only', async () => {
+    open('admin');
+    await screen.findByText('Who can add custom emoji: Admins only');
+    expect(screen.queryByLabelText('Who can add custom emoji')).toBeNull();
+  });
+
+  it('Manage custom emoji link', async () => {
+    open('admin');
+    const a = await screen.findByRole('link', { name: 'Manage custom emoji' });
+    expect(a.getAttribute('href')).toBe('/client/clubhack/emoji');
+  });
+});
