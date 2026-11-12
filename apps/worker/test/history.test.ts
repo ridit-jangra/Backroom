@@ -156,6 +156,25 @@ describe('catchUp', () => {
     expect(b.messages).toHaveLength(200);
   });
 
+  it('handles more channels than one statement can bind (120)', async () => {
+    const { say, alice } = await setup();
+    const ids: string[] = [];
+    for (let i = 0; i < 120; i++) ids.push(await insertChannel({ name: `c-${i}`, kind: 'public', memberIds: [alice.userId] }));
+    await say({ channelId: ids[0] });
+    await say({ channelId: ids[95] });
+    await say({ channelId: ids[119] });
+    await say({ channelId: ids[119] });
+    const lastSeen = Object.fromEntries(ids.map((id) => [id, 0]));
+    lastSeen[ids[119]!] = 1;
+    const r = await catchUp(env.DB, ids, lastSeen);
+    expect(r.stale).toEqual([]);
+    expect(r.messages.map((m) => [m.channelId, m.seq])).toEqual([
+      [ids[0], 1],
+      [ids[95], 1],
+      [ids[119], 2],
+    ]);
+  });
+
   it('ignores channels the user is not in', async () => {
     const { say, owner, alice } = await setup();
     const priv = await insertChannel({ name: 'secret', kind: 'private', memberIds: [owner.userId, alice.userId] });

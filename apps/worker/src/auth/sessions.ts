@@ -4,7 +4,7 @@ export const SESSION_COOKIE = 'backroom_session';
 export const SESSION_TTL_MS = 30 * 86_400_000;
 export const SESSION_RENEW_BELOW_MS = 15 * 86_400_000;
 
-export type SessionInfo = { userId: string; token: string };
+export type SessionInfo = { userId: string; token: string; via: 'cookie' | 'bearer' };
 
 export async function createSession(
   db: D1Database,

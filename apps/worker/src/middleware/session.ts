@@ -29,13 +29,18 @@ export function clearSessionCookie(c: Context<AppEnv>): void {
 export const loadSession: MiddlewareHandler<AppEnv> = async (c, next) => {
   const cookieToken = getCookie(c, SESSION_COOKIE);
   const bearer = c.req.header('Authorization')?.match(/^Bearer\s+(\S+)$/i)?.[1];
-  const token = cookieToken ?? bearer;
-  if (token) {
-    const result = await resolveSession(c.env.DB, token, c.var.deps.now());
+  const now = c.var.deps.now();
+  // Cookie first; a missing, empty or unresolvable cookie falls back to the Bearer token.
+  if (cookieToken) {
+    const result = await resolveSession(c.env.DB, cookieToken, now);
     if (result) {
-      c.set('session', { userId: result.userId, token });
-      if (result.renewed && cookieToken) setSessionCookie(c, token);
+      c.set('session', { userId: result.userId, token: cookieToken, via: 'cookie' });
+      if (result.renewed) setSessionCookie(c, cookieToken);
     }
+  }
+  if (!c.var.session && bearer) {
+    const result = await resolveSession(c.env.DB, bearer, now);
+    if (result) c.set('session', { userId: result.userId, token: bearer, via: 'bearer' });
   }
   await next();
 };

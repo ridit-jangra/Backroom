@@ -8,6 +8,7 @@ import { requireSameOrigin } from './middleware/origin';
 import { loadSession } from './middleware/session';
 import { messagingRoutes } from './messaging/routes';
 import { workspaceRoutes } from './workspace/routes';
+import { wsRoute } from './hub/ws-route';
 
 
 export interface Deps {
@@ -34,6 +35,7 @@ export function createApp(deps: Deps): Hono<AppEnv> {
   app.route('/auth', authRoutes);
   app.route('/', workspaceRoutes);
   app.route('/', messagingRoutes);
+  app.route('/', wsRoute);
 
   return app;
 }

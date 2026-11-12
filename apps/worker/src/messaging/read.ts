@@ -75,6 +75,8 @@ export async function getThread(db: D1Database, messageId: string): Promise<Thre
   return { parent: rowToMessage(parent), replies: (r!.results as Record<string, unknown>[]).map(rowToMessage) };
 }
 
+const IN_CHUNK = 90;
+
 export async function catchUp(
   db: D1Database,
   channelIds: string[],
@@ -82,11 +84,17 @@ export async function catchUp(
 ): Promise<{ messages: Message[]; stale: string[] }> {
   const ids = [...new Set(channelIds)].filter((id) => Object.hasOwn(lastSeen, id));
   if (ids.length === 0) return { messages: [], stale: [] };
-  const { results: chans } = await db
-    .prepare(`SELECT id, last_seq AS lastSeq FROM channels WHERE id IN (${ids.map(() => '?').join(',')})`)
-    .bind(...ids)
-    .all<{ id: string; lastSeq: number }>();
-  const lastSeqOf = new Map(chans.map((c) => [c.id, c.lastSeq]));
+  // D1 caps bound parameters at 100 per statement, so the IN list is chunked.
+  const chunks: string[][] = [];
+  for (let i = 0; i < ids.length; i += IN_CHUNK) chunks.push(ids.slice(i, i + IN_CHUNK));
+  const chanSets = await db.batch(
+    chunks.map((chunk) =>
+      db.prepare(`SELECT id, last_seq AS lastSeq FROM channels WHERE id IN (${chunk.map(() => '?').join(',')})`).bind(...chunk),
+    ),
+  );
+  const lastSeqOf = new Map(
+    chanSets.flatMap((s) => (s.results as { id: string; lastSeq: number }[]).map((c) => [c.id, c.lastSeq] as const)),
+  );
   const stale: string[] = [];
   const fetch: string[] = [];
   for (const id of ids) {
