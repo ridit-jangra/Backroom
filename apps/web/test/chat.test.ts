@@ -30,6 +30,7 @@ function setup(channels: ChannelSummary[] = [chan('c1'), chan('c2')]): ChatState
   }, 0);
   return s;
 }
+const F: FileInfo = { id: 'f'.repeat(26), name: 'a.png', mime: 'image/png', size: 10, width: 1, height: 1, hasThumb: true };
 const pend = (clientId: string): PendingSend => ({
   clientId, channelId: 'c1', parentId: null, body: 'x', alsoInChannel: false, files: [], status: 'sending', attempts: 1, lastSentAt: 0,
 });
@@ -229,6 +230,7 @@ describe('chat reducer', () => {
     s = run(s, { t: 'local.thread', page: { parent: msg(1), replies: [msg(2, { parentId: 'm1' })] } });
     s = run(s, { t: 'local.pending', pending: [pend('p1')] });
     s = run(s, { t: 'typing', channelId: 'c1', userId: OTHER }, 1);
+    s = newMsg(s, msg(6, { id: 'withfiles', files: [F] }));
     deepFreeze(s);
     const snap = JSON.stringify(s);
     const events: ChatEvent[] = [
@@ -241,6 +243,12 @@ describe('chat reducer', () => {
       { t: 'membership', action: 'removed', channelId: 'c1' },
       { t: 'local.history', channelId: 'c1', page: { messages: [msg(1)], hasMore: false }, mode: 'prepend' },
       { t: 'local.tick', now: 99999 },
+      { t: 'local.highlight', messageId: 'm1' },
+      { t: 'local.highlight', messageId: null },
+      { t: 'message.new', message: msg(7, { files: [F] }) },
+      { t: 'message.new', message: msg(6, { id: 'withfiles', files: [F] }) },
+      { t: 'message.edit', message: msg(6, { id: 'withfiles', body: 'e', editedAt: 9 }) },
+      { t: 'message.delete', message: msg(6, { id: 'withfiles', body: '', editedAt: 10, deletedAt: 10 }) },
     ];
     for (const e of events) run(s, e, 5);
     expect(JSON.stringify(s)).toBe(snap);
@@ -419,7 +427,6 @@ describe('reactions and custom emoji', () => {
   });
 });
 
-const F: FileInfo = { id: 'f'.repeat(26), name: 'a.png', mime: 'image/png', size: 10, width: 1, height: 1, hasThumb: true };
 
 const withWindow = () =>
   run(setup(), { t: 'local.history', channelId: 'c1', page: { messages: [], hasMore: false }, mode: 'replace' });
@@ -446,6 +453,24 @@ describe('files and highlight', () => {
     const held = s.windows.c1!.messages[0]!;
     s = newMsg(s, { ...m });
     expect(s.windows.c1!.messages[0]!.files).toBe(held.files);
+  });
+
+  it('replaying a delete reuses the same empty files array', () => {
+    let s = withWindow();
+    s = newMsg(s, msg(1, { files: [F] }));
+    const del = msg(1, { body: '', editedAt: 6000, deletedAt: 6000 });
+    s = run(s, { t: 'message.delete', message: del });
+    const held = s.windows.c1!.messages[0]!;
+    s = run(s, { t: 'message.delete', message: { ...del } });
+    expect(s.windows.c1!.messages[0]!.files).toBe(held.files);
+  });
+
+  it('re-highlighting the same message bumps the nonce', () => {
+    let s = setup();
+    s = run(s, { t: 'local.highlight', messageId: 'm1' });
+    const n = s.highlightNonce;
+    s = run(s, { t: 'local.highlight', messageId: 'm1' });
+    expect(s.highlightNonce).toBe(n + 1);
   });
 
   it('local.highlight sets and local.open clears highlightId', () => {

@@ -85,4 +85,42 @@ describe('jumpTo', () => {
     expect(historyCalls(RAND)).toHaveLength(1);
     expect(api!.state.highlightId).toBe(rand[3]!.id);
   });
+
+  it('waits for an in-flight older load instead of giving up', async () => {
+    await mount();
+    await act(async () => {
+      await api!.actions.jumpTo(target(290));
+    });
+    let ok = false;
+    await act(async () => {
+      const scroll = api!.actions.loadOlder(GEN);
+      ok = await api!.actions.jumpTo(target(120));
+      await scroll;
+    });
+    expect(ok).toBe(true);
+  });
+
+  it('returns false and does not highlight when the channel changes mid-jump', async () => {
+    await mount();
+    let ok = true;
+    await act(async () => {
+      const p = api!.actions.jumpTo(target(120));
+      api!.actions.open(RAND);
+      ok = await p;
+    });
+    expect(ok).toBe(false);
+    expect(api!.state.highlightId).toBeNull();
+  });
+
+  it('re-jumping to the same message re-triggers the highlight', async () => {
+    await mount();
+    await act(async () => {
+      await api!.actions.jumpTo(target(290));
+    });
+    const n = api!.state.highlightNonce;
+    await act(async () => {
+      await api!.actions.jumpTo(target(290));
+    });
+    expect(api!.state.highlightNonce).toBe(n + 1);
+  });
 });

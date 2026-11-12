@@ -84,7 +84,7 @@ function startSession(
   let lastMemberRefreshAt = Number.NEGATIVE_INFINITY;
   const markSent = new Map<string, number>();
   let lastActivityAt = Number.NEGATIVE_INFINITY;
-  const olderLoading = new Set<string>();
+  const olderLoading = new Map<string, Promise<void>>();
   const latestLoads = new Map<string, Promise<void>>();
   const MAX_JUMP_PAGES = 20;
 
@@ -202,19 +202,22 @@ function startSession(
       dispatch({ t: 'local.open', channelId });
       latestLoads.set(channelId, loadLatest(channelId));
     },
-    async loadOlder(channelId) {
+    loadOlder(channelId) {
       const w = state.windows[channelId];
       const oldest = w?.messages[0]?.seq;
-      if (!w?.hasOlder || oldest === undefined || olderLoading.has(channelId)) return;
-      olderLoading.add(channelId);
-      try {
-        const page = await api<HistoryPage>(historyUrl(channelId, oldest));
-        dispatch({ t: 'local.history', channelId, page, mode: 'prepend' });
-      } catch (err) {
-        fail(err);
-      } finally {
-        olderLoading.delete(channelId);
-      }
+      if (!w?.hasOlder || oldest === undefined || olderLoading.has(channelId)) return Promise.resolve();
+      const run = (async () => {
+        try {
+          const page = await api<HistoryPage>(historyUrl(channelId, oldest));
+          dispatch({ t: 'local.history', channelId, page, mode: 'prepend' });
+        } catch (err) {
+          fail(err);
+        } finally {
+          olderLoading.delete(channelId);
+        }
+      })();
+      olderLoading.set(channelId, run);
+      return run;
     },
     openThread(parentId) {
       reportThreadError(null);
@@ -238,11 +241,18 @@ function startSession(
       await (latestLoads.get(channelId) ?? loadLatest(channelId));
       const has = () => state.windows[channelId]?.messages.some((m) => m.id === messageId) ?? false;
       for (let pages = 0; alive && !has() && state.windows[channelId]?.hasOlder && pages < MAX_JUMP_PAGES; pages++) {
+        const inflight = olderLoading.get(channelId);
+        if (inflight) {
+          // Another load (e.g. scrolling) is running: wait for it and re-check instead of giving up.
+          await inflight;
+          continue;
+        }
         const before = state.windows[channelId]?.messages[0]?.seq;
         await actions.loadOlder(channelId);
         if (state.windows[channelId]?.messages[0]?.seq === before) break;
       }
-      if (!alive || !has()) return false;
+      // The user may have switched channels while pages loaded.
+      if (!alive || state.openChannelId !== channelId || !has()) return false;
       dispatch({ t: 'local.highlight', messageId });
       return true;
     },

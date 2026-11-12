@@ -4,6 +4,7 @@ import {
   type Bootstrap,
   type ChannelSummary,
   type CustomEmoji,
+  type FileInfo,
   type HistoryPage,
   type HubFrame,
   type Message,
@@ -37,6 +38,8 @@ export type ChatState = {
   focused: boolean;
   /** Message to flash after a jump (search result); cleared when another channel opens. */
   highlightId: string | null;
+  /** Bumps on every highlight so jumping to the same message again re-triggers the flash. */
+  highlightNonce: number;
 };
 
 export type ChatEvent =
@@ -70,6 +73,7 @@ export function initialChat(me: string): ChatState {
     openThreadId: null,
     focused: true,
     highlightId: null,
+    highlightNonce: 0,
   };
 }
 
@@ -83,6 +87,8 @@ export function lastSeenFor(s: ChatState): Record<string, number> {
   return out;
 }
 
+const NO_FILES: FileInfo[] = [];
+
 /** Pick between a held message and an incoming copy; a replay never reverts newer edits or deletes. */
 function pick(held: Message | undefined, incoming: Message): Message {
   if (!held) return incoming;
@@ -93,7 +99,7 @@ function pick(held: Message | undefined, incoming: Message): Message {
   // P3-R13: frames without `reactions` (edits, deletes, duplicate acks) never wipe what is held.
   const reactions = incoming.reactions ?? held.reactions;
   // Phase 4: same rule for `files`; a deleted message has none.
-  const files = winner.deletedAt !== null ? [] : (incoming.files ?? held.files);
+  const files = winner.deletedAt !== null ? (winner.files?.length === 0 ? winner.files : NO_FILES) : (incoming.files ?? held.files);
   if (winner.reactions === reactions && winner.files === files) return winner;
   return { ...winner, reactions, ...(files !== undefined ? { files } : {}) };
 }
@@ -413,7 +419,9 @@ export function reduce(state: ChatState, e: ChatEvent, now: number): ChatState {
     case 'local.openThread':
       return { ...state, openThreadId: e.parentId };
     case 'local.highlight':
-      return state.highlightId === e.messageId ? state : { ...state, highlightId: e.messageId };
+      return e.messageId === null && state.highlightId === null
+        ? state
+        : { ...state, highlightId: e.messageId, highlightNonce: e.messageId === null ? state.highlightNonce : state.highlightNonce + 1 };
     case 'local.focus': {
       const s = { ...state, focused: e.focused };
       const c = e.focused && s.openChannelId ? s.channels[s.openChannelId] : undefined;
