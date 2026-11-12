@@ -72,10 +72,18 @@ export function lastSeenFor(s: ChatState): Record<string, number> {
   return out;
 }
 
+/** Pick between a held message and an incoming copy; a replay never reverts newer edits or deletes. */
+function pick(held: Message | undefined, incoming: Message): Message {
+  if (!held) return incoming;
+  if (held.deletedAt !== null && incoming.deletedAt === null) return held;
+  if (held.deletedAt === null && incoming.deletedAt !== null) return incoming;
+  return (held.editedAt ?? 0) > (incoming.editedAt ?? 0) ? held : incoming;
+}
+
 function mergeMessages(existing: Message[], incoming: Message[]): Message[] {
   const byId = new Map<string, Message>();
   for (const m of existing) byId.set(m.id, m);
-  for (const m of incoming) byId.set(m.id, m);
+  for (const m of incoming) byId.set(m.id, pick(byId.get(m.id), m));
   return [...byId.values()].sort((a, b) => a.seq - b.seq);
 }
 
@@ -90,7 +98,21 @@ function dropChannel(s: ChatState, channelId: string): ChatState {
   delete windows[channelId];
   const threads: Record<string, ThreadPage> = {};
   for (const [id, t] of Object.entries(s.threads)) if (t.parent.channelId !== channelId) threads[id] = t;
-  return { ...s, channels, windows, threads };
+  const threadOpenHere =
+    s.openThreadId !== null &&
+    (s.threads[s.openThreadId]?.parent.channelId === channelId || s.openChannelId === channelId);
+  const lastSeen = { ...s.lastSeen };
+  delete lastSeen[channelId];
+  return {
+    ...s,
+    channels,
+    windows,
+    threads,
+    lastSeen,
+    typing: s.typing.filter((x) => x.channelId !== channelId),
+    openChannelId: s.openChannelId === channelId ? null : s.openChannelId,
+    openThreadId: threadOpenHere ? null : s.openThreadId,
+  };
 }
 
 /** Replace a message by id wherever it is held (windows, thread parents and replies). */
@@ -98,7 +120,7 @@ function replaceEverywhere(s: ChatState, m: Message): ChatState {
   let windows = s.windows;
   const w = s.windows[m.channelId];
   if (w?.messages.some((x) => x.id === m.id)) {
-    windows = { ...windows, [m.channelId]: { ...w, messages: w.messages.map((x) => (x.id === m.id ? m : x)) } };
+    windows = { ...windows, [m.channelId]: { ...w, messages: w.messages.map((x) => (x.id === m.id ? pick(x, m) : x)) } };
   }
   let threads = s.threads;
   for (const [pid, t] of Object.entries(s.threads)) {
@@ -107,8 +129,8 @@ function replaceEverywhere(s: ChatState, m: Message): ChatState {
       threads = {
         ...threads,
         [pid]: {
-          parent: t.parent.id === m.id ? m : t.parent,
-          replies: inReplies ? t.replies.map((x) => (x.id === m.id ? m : x)) : t.replies,
+          parent: t.parent.id === m.id ? pick(t.parent, m) : t.parent,
+          replies: inReplies ? t.replies.map((x) => (x.id === m.id ? pick(x, m) : x)) : t.replies,
         },
       };
     }
@@ -119,10 +141,13 @@ function replaceEverywhere(s: ChatState, m: Message): ChatState {
 function applyMessage(s: ChatState, m: Message): ChatState {
   const ch = s.channels[m.channelId];
   const prev = Math.max(s.lastSeen[m.channelId] ?? 0, ch?.lastSeq ?? 0);
-  const isNew = m.seq > prev;
+  const inChannelView = m.parentId === null || m.alsoInChannel;
+  const known =
+    (inChannelView && (s.windows[m.channelId]?.messages.some((x) => x.id === m.id) ?? false)) ||
+    (m.parentId !== null && (s.threads[m.parentId]?.replies.some((x) => x.id === m.id) ?? false));
+  const isNew = m.seq > prev && !known;
   let next: ChatState = { ...s, lastSeen: { ...s.lastSeen, [m.channelId]: Math.max(s.lastSeen[m.channelId] ?? 0, m.seq) } };
 
-  const inChannelView = m.parentId === null || m.alsoInChannel;
   let channel = ch;
   if (channel) {
     channel = { ...channel, lastSeq: Math.max(channel.lastSeq, m.seq) };
@@ -179,6 +204,10 @@ function bumpParent(s: ChatState, reply: Message): ChatState {
 export function reduce(state: ChatState, e: ChatEvent, now: number): ChatState {
   switch (e.t) {
     case 'ack':
+      return {
+        ...applyMessage(state, e.message),
+        pending: state.pending.filter((p) => p.clientId !== e.clientId),
+      };
     case 'message.new':
       return applyMessage(state, e.message);
     case 'message.edit':
@@ -244,21 +273,38 @@ export function reduce(state: ChatState, e: ChatEvent, now: number): ChatState {
       delete windows[e.channelId];
       const threads: Record<string, ThreadPage> = {};
       for (const [id, t] of Object.entries(state.threads)) if (t.parent.channelId !== e.channelId) threads[id] = t;
-      return { ...state, windows, threads };
+      return { ...state, windows, threads, typing: state.typing.filter((x) => x.channelId !== e.channelId) };
     }
     case 'nack':
+      return {
+        ...state,
+        pending: state.pending.map((p) =>
+          p.clientId === e.clientId ? { ...p, status: 'failed' as const, error: e.code } : p,
+        ),
+      };
     case 'notify':
     case 'pong':
       return state;
     case 'local.bootstrap': {
       const channels: Record<string, ChannelSummary> = {};
-      for (const c of e.bootstrap.channels) channels[c.id] = c;
+      for (const c of e.bootstrap.channels) {
+        const known = state.channels[c.id];
+        const lastSeq = Math.max(c.lastSeq, state.lastSeen[c.id] ?? 0, known?.lastSeq ?? 0);
+        const merged = { ...c, lastSeq };
+        channels[c.id] = isViewing(state, c.id) ? zeroCounts(merged) : merged;
+      }
       return { ...state, bootstrap: e.bootstrap, channels };
     }
     case 'local.history': {
       const old = state.windows[e.channelId];
+      const maxSeq = e.page.messages.reduce((a, m) => Math.max(a, m.seq), 0);
       const messages =
-        e.mode === 'replace' || !old ? mergeMessages([], e.page.messages) : mergeMessages(old.messages, e.page.messages);
+        e.mode === 'replace' || !old
+          ? mergeMessages(
+              [],
+              [...e.page.messages, ...(old && e.mode === 'replace' ? old.messages.filter((m) => m.seq > maxSeq) : [])],
+            )
+          : mergeMessages(old.messages, e.page.messages);
       return {
         ...state,
         windows: { ...state.windows, [e.channelId]: { messages, hasOlder: e.page.hasMore, loaded: true } },

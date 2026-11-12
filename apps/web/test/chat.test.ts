@@ -1,5 +1,6 @@
 import { TYPING_TTL_MS, type ChannelSummary, type Message } from '@backroom/protocol';
 import { describe, expect, it } from 'vitest';
+import type { PendingSend } from '../src/realtime/outbox';
 import { initialChat, isViewing, lastSeenFor, reduce, type ChatEvent, type ChatState } from '../src/state/chat';
 
 const ME = 'U'.repeat(26);
@@ -29,6 +30,9 @@ function setup(channels: ChannelSummary[] = [chan('c1'), chan('c2')]): ChatState
   }, 0);
   return s;
 }
+const pend = (clientId: string): PendingSend => ({
+  clientId, channelId: 'c1', parentId: null, body: 'x', alsoInChannel: false, status: 'sending', attempts: 1, lastSentAt: 0,
+});
 const run = (s: ChatState, e: ChatEvent, now = 0) => reduce(s, e, now);
 const newMsg = (s: ChatState, m: Message) => run(s, { t: 'message.new', message: m });
 
@@ -205,10 +209,105 @@ describe('chat reducer', () => {
     expect(s.windows.c1).toBeDefined();
   });
 
-  it('is pure', () => {
-    const s = setup();
+  it('is pure and never mutates a deep-frozen state', () => {
+    const deepFreeze = <T>(o: T): T => {
+      if (o && typeof o === 'object' && !Object.isFrozen(o)) {
+        Object.freeze(o);
+        Object.values(o).forEach(deepFreeze);
+      }
+      return o;
+    };
+    let s = setup();
+    s = run(s, { t: 'local.history', channelId: 'c1', page: { messages: [msg(1)], hasMore: true }, mode: 'replace' });
+    s = run(s, { t: 'local.thread', page: { parent: msg(1), replies: [msg(2, { parentId: 'm1' })] } });
+    s = run(s, { t: 'local.pending', pending: [pend('p1')] });
+    s = run(s, { t: 'typing', channelId: 'c1', userId: OTHER }, 1);
+    deepFreeze(s);
     const snap = JSON.stringify(s);
-    newMsg(s, msg(1));
+    const events: ChatEvent[] = [
+      { t: 'message.new', message: msg(3, { body: '@here' }) },
+      { t: 'message.new', message: msg(4, { parentId: 'm1', alsoInChannel: true }) },
+      { t: 'message.edit', message: msg(1, { editedAt: 9 }) },
+      { t: 'ack', clientId: 'p1', message: msg(5, { userId: ME }) },
+      { t: 'read', channelId: 'c1', seq: 5 },
+      { t: 'stale', channelId: 'c1' },
+      { t: 'membership', action: 'removed', channelId: 'c1' },
+      { t: 'local.history', channelId: 'c1', page: { messages: [msg(1)], hasMore: false }, mode: 'prepend' },
+      { t: 'local.tick', now: 99999 },
+    ];
+    for (const e of events) run(s, e, 5);
     expect(JSON.stringify(s)).toBe(snap);
+  });
+
+  it('ack removes the pending item; own message renders once in either order', () => {
+    const base = run(setup(), { t: 'local.history', channelId: 'c1', page: { messages: [], hasMore: false }, mode: 'replace' });
+    const mine = msg(1, { userId: ME, id: 'mine' });
+    const a = run(run(run(base, { t: 'local.pending', pending: [pend('p1')] }), { t: 'message.new', message: mine }), { t: 'ack', clientId: 'p1', message: mine });
+    const b = run(run(run(base, { t: 'local.pending', pending: [pend('p1')] }), { t: 'ack', clientId: 'p1', message: mine }), { t: 'message.new', message: mine });
+    for (const s of [a, b]) {
+      expect(s.pending).toEqual([]);
+      expect(s.windows.c1!.messages.map((m) => m.id)).toEqual(['mine']);
+      expect(s.channels.c1!.unreadCount).toBe(0);
+    }
+  });
+
+  it('nack marks the pending item failed', () => {
+    const s = run(run(setup(), { t: 'local.pending', pending: [pend('p1'), pend('p2')] }), { t: 'nack', clientId: 'p1', code: 'forbidden' });
+    expect(s.pending[0]).toMatchObject({ status: 'failed', error: 'forbidden' });
+    expect(s.pending[1]!.status).toBe('sending');
+  });
+
+  it('a message already in a fetched page is not counted again when its live frame arrives', () => {
+    let s = setup();
+    s = run(s, { t: 'local.history', channelId: 'c1', page: { messages: [msg(1), msg(3, { parentId: 'm1', alsoInChannel: true, id: 'm3' })], hasMore: false }, mode: 'replace' });
+    s = run(s, { t: 'local.thread', page: { parent: msg(1, { replyCount: 2 }), replies: [msg(2, { parentId: 'm1' }), msg(3, { parentId: 'm1', alsoInChannel: true })] } });
+    s = newMsg(s, msg(2, { parentId: 'm1' }));
+    s = newMsg(s, msg(3, { parentId: 'm1', alsoInChannel: true }));
+    expect(s.threads.m1!.parent.replyCount).toBe(2);
+    expect(s.windows.c1!.messages.find((m) => m.id === 'm1')!.replyCount).toBe(2);
+    expect(s.channels.c1!.unreadCount).toBe(0);
+  });
+
+  it('local.bootstrap keeps the newest lastSeq and zeroes counts for the viewed channel', () => {
+    let s = setup();
+    s = run(s, { t: 'local.open', channelId: 'c1' });
+    s = newMsg(s, msg(7));
+    s = run(s, { t: 'local.bootstrap', bootstrap: { ...s.bootstrap!, channels: [chan('c1', { lastSeq: 5, unreadCount: 3, mentionCount: 1 }), chan('c2', { lastSeq: 1, unreadCount: 2 })] } });
+    expect(s.channels.c1).toMatchObject({ lastSeq: 7, unreadCount: 0, mentionCount: 0 });
+    expect(s.channels.c2!.unreadCount).toBe(2);
+  });
+
+  it('a replayed message does not revert a newer edit or delete', () => {
+    let s = setup();
+    s = run(s, { t: 'local.history', channelId: 'c1', page: { messages: [msg(1), msg(2)], hasMore: false }, mode: 'replace' });
+    s = run(s, { t: 'message.edit', message: msg(1, { body: 'edited', editedAt: 50 }) });
+    s = run(s, { t: 'message.delete', message: msg(2, { deletedAt: 60, body: '' }) });
+    s = run(s, { t: 'catchup', messages: [msg(1), msg(2)], presence: [] });
+    s = newMsg(s, msg(1));
+    expect(s.windows.c1!.messages[0]).toMatchObject({ body: 'edited', editedAt: 50 });
+    expect(s.windows.c1!.messages[1]!.deletedAt).toBe(60);
+  });
+
+  it('removed clears typing, open ids and lastSeen; stale keeps lastSeen', () => {
+    let s = setup();
+    s = newMsg(s, msg(1));
+    s = run(s, { t: 'local.open', channelId: 'c1' });
+    s = run(s, { t: 'local.openThread', parentId: 'm1' });
+    s = run(s, { t: 'typing', channelId: 'c1', userId: OTHER }, 0);
+    const st = run(s, { t: 'stale', channelId: 'c1' });
+    expect(st.lastSeen.c1).toBe(1);
+    expect(st.typing).toEqual([]);
+    expect(st.openChannelId).toBe('c1');
+    const r = run(s, { t: 'membership', action: 'removed', channelId: 'c1' });
+    expect(r).toMatchObject({ openChannelId: null, openThreadId: null, typing: [] });
+    expect(r.lastSeen.c1).toBeUndefined();
+  });
+
+  it('history replace keeps live messages newer than the page', () => {
+    let s = setup();
+    s = run(s, { t: 'local.history', channelId: 'c1', page: { messages: [msg(1)], hasMore: false }, mode: 'replace' });
+    s = newMsg(s, msg(3));
+    s = run(s, { t: 'local.history', channelId: 'c1', page: { messages: [msg(1), msg(2)], hasMore: false }, mode: 'replace' });
+    expect(s.windows.c1!.messages.map((m) => m.seq)).toEqual([1, 2, 3]);
   });
 });
