@@ -2,7 +2,8 @@ import { env } from 'cloudflare:test';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/app';
 import type { Bootstrap, Me } from '@backroom/protocol';
-import { captureMailer, resetDb, send, signIn, testDeps } from './helpers';
+import { sendMessage } from '../src/messaging/store';
+import { captureMailer, resetDb, seedUsers, send, signIn, testDeps } from './helpers';
 
 const GENERAL = '01JCLUBHACK0000000000000GN';
 
@@ -74,7 +75,7 @@ describe('bootstrap', () => {
     await env.DB.prepare('UPDATE channel_members SET last_read_seq = 1 WHERE user_id = ?').bind(userId).run();
     await addMessage('m1', 1, userId); // already read
     await addMessage('m2', 2, userId);
-    await addMessage('m3', 3, userId);
+    await addMessage('m3', 3, 'u-other'); // the @channel row, authored by someone else
     await env.DB.batch([
       env.DB.prepare("INSERT INTO mentions (message_id, user_id, kind) VALUES ('m1', ?, 'user')").bind(userId),
       env.DB.prepare("INSERT INTO mentions (message_id, user_id, kind) VALUES ('m2', ?, 'user')").bind(userId),
@@ -83,6 +84,23 @@ describe('bootstrap', () => {
     const b = (await (await send(app, 'GET', '/w/clubhack/bootstrap', undefined, cookie)).json()) as Bootstrap;
     expect(b.channels[0]!.mentionCount).toBe(2);
     expect(b.channels[0]!.unreadCount).toBe(2);
+  });
+
+  it('own @channel does not count toward own mentionCount', async () => {
+    const { mailer, sent } = captureMailer();
+    const app = createApp(testDeps({ mailer }));
+    const [owner, alice] = await seedUsers(app, sent, ['owner@test.dev', 'alice@test.dev']);
+    const r = await sendMessage(env.DB, {
+      clientId: crypto.randomUUID(), channelId: GENERAL, userId: owner!.userId, parentId: null,
+      body: '@channel hi', alsoInChannel: false, fileIds: [], now: 1_000,
+    });
+    expect(r.ok).toBe(true);
+    // Posting marks the channel read for the author; reset it so only the predicate decides.
+    await env.DB.prepare('UPDATE channel_members SET last_read_seq = 0 WHERE user_id = ?').bind(owner!.userId).run();
+    const count = async (cookie: string) =>
+      ((await (await send(app, 'GET', '/w/clubhack/bootstrap', undefined, cookie)).json()) as Bootstrap).channels[0]!.mentionCount;
+    expect(await count(owner!.cookie)).toBe(0);
+    expect(await count(alice!.cookie)).toBe(1);
   });
 
   it('non-member gets identical 404 for clubhack and for an unknown slug', async () => {

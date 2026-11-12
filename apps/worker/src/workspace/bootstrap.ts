@@ -30,7 +30,7 @@ export async function getBootstrap(db: D1Database, slug: string, userId: string)
                   WHERE m.channel_id = c.id AND m.seq > cm.last_read_seq AND m.deleted_at IS NULL
                     AND (m.parent_id IS NULL OR m.also_in_channel = 1)
                     AND EXISTS (SELECT 1 FROM mentions mn WHERE mn.message_id = m.id
-                                AND (mn.user_id = ?1 OR mn.kind IN ('channel', 'here')))) AS mentionCount
+                                AND (mn.user_id = ?1 OR (mn.kind IN ('channel', 'here') AND m.user_id <> ?1)))) AS mentionCount
          FROM channels c
          JOIN channel_members cm ON cm.channel_id = c.id AND cm.user_id = ?1
          WHERE c.workspace_id = ?2 AND c.archived_at IS NULL

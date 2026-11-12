@@ -2,6 +2,7 @@ import { createExecutionContext, env, waitOnExecutionContext } from 'cloudflare:
 import type { Hono } from 'hono';
 import type { AppEnv, Deps } from '../src/app';
 import type { Mailer } from '../src/auth/mailer';
+import { newId } from '../src/lib/ids';
 
 export function testDeps(overrides: Partial<Deps> = {}): Deps {
   return {
@@ -92,4 +93,49 @@ export async function send(
   );
   await waitOnExecutionContext(ctx);
   return res;
+}
+
+export const GENERAL = '01JCLUBHACK0000000000000GN';
+
+/** Sign in the owner (first email must be owner@test.dev) and the rest via one owner-created invite. */
+export async function seedUsers(
+  app: Hono<AppEnv>,
+  sent: { to: string; url: string }[],
+  emails: string[],
+): Promise<{ email: string; cookie: string; userId: string }[]> {
+  if (emails[0] !== 'owner@test.dev') throw new Error('first email must be owner@test.dev');
+  const out: { email: string; cookie: string; userId: string }[] = [];
+  const whoami = async (cookie: string) =>
+    ((await (await send(app, 'GET', '/me', undefined, cookie)).json()) as { id: string }).id;
+  const ownerCookie = await signIn(app, sent, emails[0]);
+  out.push({ email: emails[0], cookie: ownerCookie, userId: await whoami(ownerCookie) });
+  if (emails.length > 1) {
+    const res = await send(app, 'POST', '/w/clubhack/invites', { maxUses: emails.length }, ownerCookie);
+    const token = ((await res.json()) as { url: string }).url.split('/invite/')[1]!;
+    for (const email of emails.slice(1)) {
+      const cookie = await signIn(app, sent, email, token);
+      out.push({ email, cookie, userId: await whoami(cookie) });
+    }
+  }
+  return out;
+}
+
+/** Direct D1 insert of a channel in `clubhack` with the given members (last_read_seq 0). */
+export async function insertChannel(opts: {
+  name: string | null;
+  kind: 'public' | 'private' | 'dm';
+  memberIds: string[];
+  dmKey?: string;
+  createdBy?: string;
+}): Promise<string> {
+  const id = newId();
+  await env.DB.batch([
+    env.DB.prepare(
+      "INSERT INTO channels (id, workspace_id, name, kind, dm_key, created_by, created_at) VALUES (?, '01JCLUBHACK0000000000000WS', ?, ?, ?, ?, 1)",
+    ).bind(id, opts.name, opts.kind, opts.dmKey ?? null, opts.createdBy ?? null),
+    ...opts.memberIds.map((u) =>
+      env.DB.prepare('INSERT INTO channel_members (channel_id, user_id, last_read_seq, joined_at) VALUES (?, ?, 0, 1)').bind(id, u),
+    ),
+  ]);
+  return id;
 }
