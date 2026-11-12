@@ -2,7 +2,7 @@ import { useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import { MAX_BODY, TYPING_THROTTLE_MS, type MemberSummary } from '@backroom/protocol';
 import { decodeMentions, encodeMentions } from '../text/tokenize';
 
-const MENTION_QUERY_RE = /(?:^|\s)@([^\s@]*)$/;
+const MENTION_QUERY_RE = /(?:^|\s)@([^\s@]+)$/;
 const MAX_SUGGESTIONS = 8;
 
 export function Composer({
@@ -53,8 +53,9 @@ export function Composer({
   }
 
   function submit() {
-    if (encoded.trim() === '' || tooLong) return;
-    onSubmit(encoded);
+    const body = encoded.trimEnd();
+    if (body === '' || body.length > MAX_BODY) return;
+    onSubmit(body);
     setText('');
     setCaret(0);
     picked.current = new Map();
@@ -95,10 +96,11 @@ export function Composer({
   return (
     <div className="composer">
       {open && (
-        <ul role="listbox" aria-label="Mention suggestions" className="mention-list">
+        <ul id="mention-listbox" role="listbox" aria-label="Mention suggestions" className="mention-list">
           {matches.map((m, i) => (
             <li
               key={m.id}
+              id={`mention-opt-${m.id}`}
               role="option"
               aria-selected={i === active}
               className={i === active ? 'active' : undefined}
@@ -115,6 +117,9 @@ export function Composer({
       <textarea
         ref={area}
         aria-label={placeholder}
+        aria-controls={open ? 'mention-listbox' : undefined}
+        aria-expanded={open}
+        aria-activedescendant={open ? `mention-opt-${matches[Math.min(active, matches.length - 1)]!.id}` : undefined}
         placeholder={placeholder}
         value={text}
         rows={2}

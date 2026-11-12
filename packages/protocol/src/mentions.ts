@@ -2,7 +2,7 @@
 export const USER_MENTION_RE = /<@([0-9A-Z]{26})>/;
 
 /** Source of the @channel / @here matcher (shared with the client tokenizer). Build with flag 'g'. */
-export const BROADCAST_RE = /(?<![A-Za-z0-9_@<])@(channel|here)(?![A-Za-z0-9_-])/;
+export const BROADCAST_RE = /(?<![A-Za-z0-9_@</])@(channel|here)(?![A-Za-z0-9_-])/;
 
 export const MAX_USER_MENTIONS = 50;
 

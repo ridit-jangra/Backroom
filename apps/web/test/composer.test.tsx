@@ -73,7 +73,7 @@ describe('Composer', () => {
     expect(ta.value).toBe('@Ann Lee ');
     expect(screen.queryByRole('listbox')).toBeNull();
     fireEvent.keyDown(ta, { key: 'Enter' });
-    expect(onSubmit).toHaveBeenCalledWith(`<@${A}> `);
+    expect(onSubmit).toHaveBeenCalledWith(`<@${A}>`);
   });
   it('edit mode decodes initial mentions and re-encodes', () => {
     const { onSubmit, ta } = setup({ initial: `hi <@${A}>` });
@@ -91,5 +91,37 @@ describe('Composer', () => {
     act(() => void vi.advanceTimersByTime(3000));
     type(ta, 'abc');
     expect(onTyping).toHaveBeenCalledTimes(2);
+  });
+  it('bare @ does not open autocomplete and Enter sends', () => {
+    const { onSubmit, ta } = setup();
+    fireEvent.change(ta, { target: { value: 'see you @', selectionStart: 9 } });
+    expect(screen.queryByRole('listbox')).toBeNull();
+    fireEvent.keyDown(ta, { key: 'Enter' });
+    expect(onSubmit).toHaveBeenCalledWith('see you @');
+  });
+  it('trims trailing whitespace of the submitted body', () => {
+    const { onSubmit, ta } = setup();
+    type(ta, 'hi  \n');
+    fireEvent.keyDown(ta, { key: 'Enter' });
+    expect(onSubmit).toHaveBeenCalledWith('hi');
+  });
+  it('Escape calls onCancel', () => {
+    const onCancel = vi.fn();
+    const { ta } = setup({ onCancel });
+    fireEvent.keyDown(ta, { key: 'Escape' });
+    expect(onCancel).toHaveBeenCalled();
+  });
+  it('ArrowDown + Enter picks the second option; aria wiring', () => {
+    const many = [...members, { id: '01HZZZZZZZZZZZZZZZZZZZZZZC', displayName: 'Anna', role: 'member' as const, avatarKey: null }];
+    const onSubmit = vi.fn();
+    render(<Composer placeholder="M2" members={many} onSubmit={onSubmit} />);
+    const ta = screen.getByLabelText('M2') as HTMLTextAreaElement;
+    fireEvent.change(ta, { target: { value: '@an', selectionStart: 3 } });
+    expect(ta.getAttribute('aria-expanded')).toBe('true');
+    expect(ta.getAttribute('aria-controls')).toBe('mention-listbox');
+    fireEvent.keyDown(ta, { key: 'ArrowDown' });
+    expect(ta.getAttribute('aria-activedescendant')).toBe('mention-opt-01HZZZZZZZZZZZZZZZZZZZZZZC');
+    fireEvent.keyDown(ta, { key: 'Enter' });
+    expect(ta.value).toBe('@Anna ');
   });
 });

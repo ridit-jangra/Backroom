@@ -1,11 +1,13 @@
 import type { MemberSummary } from '@backroom/protocol';
+import { useMemo } from 'react';
 import { tokenize } from '../text/tokenize';
 
 export function MessageText({ body, members, me }: { body: string; members: MemberSummary[]; me: string }) {
   const names = new Map(members.map((m) => [m.id, m.displayName]));
+  const tokens = useMemo(() => tokenize(body), [body]);
   return (
     <span className="msg-text">
-      {tokenize(body).map((t, i) => {
+      {tokens.map((t, i) => {
         switch (t.kind) {
           case 'text':
             return t.text;

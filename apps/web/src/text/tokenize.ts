@@ -9,23 +9,24 @@ export type Token =
 const LINK_RE = /https?:\/\/[^\s<>"]+/g;
 const TRAILING_PUNCT = '.,!?:;\'"';
 
-function count(s: string, ch: string): number {
-  let n = 0;
-  for (const c of s) if (c === ch) n++;
-  return n;
-}
-
 /** Trim trailing punctuation and an unbalanced ")" back to plain text. */
 function trimLink(raw: string): string {
-  let s = raw;
-  for (;;) {
-    const last = s[s.length - 1];
-    if (last !== undefined && TRAILING_PUNCT.includes(last)) {
-      s = s.slice(0, -1);
-    } else if (last === ')' && count(s, ')') > count(s, '(')) {
-      s = s.slice(0, -1);
-    } else return s;
+  let end = raw.length;
+  let open = 0;
+  let close = 0;
+  for (let i = 0; i < end; i++) {
+    if (raw[i] === '(') open++;
+    else if (raw[i] === ')') close++;
   }
+  while (end > 0) {
+    const last = raw[end - 1]!;
+    if (TRAILING_PUNCT.includes(last)) end--;
+    else if (last === ')' && close > open) {
+      close--;
+      end--;
+    } else break;
+  }
+  return raw.slice(0, end);
 }
 
 function isHttp(text: string): boolean {
@@ -79,7 +80,7 @@ function escapeRe(s: string): string {
 export function encodeMentions(text: string, picked: Map<string, string>): string {
   if (picked.size === 0) return text;
   const names = [...picked.keys()].sort((a, b) => b.length - a.length).map(escapeRe);
-  const re = new RegExp(`@(${names.join('|')})(?=$|[\\s.,!?:;)\\]'"])`, 'g');
+  const re = new RegExp(`(?<![A-Za-z0-9_])@(${names.join('|')})(?=$|[\\s.,!?:;)\\]'"])`, 'g');
   return text.replace(re, (_m, name: string) => `<@${picked.get(name)!}>`);
 }
 

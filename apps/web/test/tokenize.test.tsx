@@ -51,3 +51,40 @@ describe('MessageText', () => {
     expect(container.textContent).toContain('@Ann Lee');
   });
 });
+
+describe('tokenize hardening', () => {
+  it('trims many trailing parens in linear time', () => {
+    const t0 = performance.now();
+    const out = tokenize('https://x' + ')'.repeat(39_990));
+    expect(performance.now() - t0).toBeLessThan(50);
+    expect(out[0]).toEqual({ kind: 'link', href: 'https://x', text: 'https://x' });
+    expect(out[1]).toEqual({ kind: 'text', text: ')'.repeat(39_990) });
+  });
+  it('keeps balanced parens', () => {
+    const u = 'https://en.wikipedia.org/wiki/Foo_(bar)';
+    expect(tokenize(u)).toEqual([{ kind: 'link', href: u, text: u }]);
+  });
+  it('non-http schemes stay text', () => {
+    for (const s of ['data:text/html,x', 'vbscript:x', 'HTTP:evil']) {
+      expect(tokenize(s).every((t) => t.kind === 'text')).toBe(true);
+    }
+  });
+  it('does not encode a name glued to a preceding word char', () => {
+    expect(encodeMentions('bob@Ann Lee', new Map([['Ann Lee', A]]))).toBe('bob@Ann Lee');
+  });
+  it('@here inside a URL is only a link', () => {
+    expect(tokenize('https://ex.com/@here').map((t) => t.kind)).toEqual(['link']);
+  });
+});
+
+describe('MessageText details', () => {
+  it('link target, me class, unknown user', () => {
+    const { container } = render(
+      <MessageText body={`https://ex.com <@${A}> <@01HZZZZZZZZZZZZZZZZZZZZZZZ> @here`} members={[ann]} me={A} />,
+    );
+    expect(container.querySelector('a')!.getAttribute('target')).toBe('_blank');
+    expect(container.querySelector('.mention.me')!.textContent).toBe('@Ann Lee');
+    expect(container.textContent).toContain('@unknown');
+    expect(container.textContent).toContain('@here');
+  });
+});

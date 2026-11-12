@@ -8,6 +8,11 @@ describe('extractMentions', () => {
   it('extracts user tokens deduped in order', () => {
     expect(extractMentions(`<@${B}> hi <@${A}> <@${B}>`)).toEqual({ userIds: [B, A], channel: false, here: false });
   });
+  it('does not treat @here inside a URL path as a broadcast', () => {
+    expect(extractMentions('https://ex.com/@here')).toMatchObject({ channel: false, here: false });
+    expect(extractMentions(' @here')).toMatchObject({ here: true });
+    expect(extractMentions('(@here)')).toMatchObject({ here: true });
+  });
   it('finds @channel and @here at word boundaries only', () => {
     expect(extractMentions('@channel look')).toMatchObject({ channel: true, here: false });
     expect(extractMentions('ping @here.')).toMatchObject({ here: true });
