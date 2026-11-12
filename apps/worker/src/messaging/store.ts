@@ -1,5 +1,6 @@
 import { extractMentions, type ChannelKind, type Message, type NackCode, type ParsedMentions } from '@backroom/protocol';
 import { newId } from '../lib/ids';
+import { canSeeChannel } from './read';
 import { MESSAGE_COLUMNS, rowToMessage } from './rows';
 
 export type MemberNotify = { userId: string; notify: 'all' | 'mentions' | 'none' };
@@ -196,8 +197,7 @@ async function loadTarget(db: D1Database, messageId: string, userId: string): Pr
     )
     .bind(messageId, userId)
     .first<Target>();
-  if (!row || row.deletedAt !== null || row.role === null) return null;
-  if (row.kind !== 'public' && !row.isMember) return null;
+  if (!row || row.deletedAt !== null || !canSeeChannel(row)) return null;
   return row;
 }
 
