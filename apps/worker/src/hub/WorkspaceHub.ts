@@ -9,9 +9,12 @@ import {
   type Message,
   type NackCode,
   type PresenceState,
+  MARK_READ_INTERVAL_MS,
 } from '@backroom/protocol';
 import type { Env } from '../env';
 import { catchUp } from '../messaging/read';
+import { notifyTargets } from '../messaging/notify';
+import { MESSAGE_COLUMNS, rowToMessage } from '../messaging/rows';
 import { deleteMessage, editMessage, sendMessage, type Audience } from '../messaging/store';
 import { channelsOf, getAtt, setAtt } from './attachment';
 
@@ -57,6 +60,11 @@ const MIN_ALARM_DELAY_MS = 1_000;
 const RECENT_TTL_MS = 300_000;
 const RECENT_MAX = 1_000;
 
+/** What a queued send resolved to; deliberately tiny so `recent` never holds a message body. */
+type SendOutcome = { messageId: string } | { code: NackCode };
+
+type ReadState = { lastWriteAt: number; lastSeq: number; pending?: number; timer?: number };
+
 type SendFrame = Extract<ClientFrame, { t: 'send' }>;
 type EditFrame = Extract<ClientFrame, { t: 'edit' }>;
 type DeleteFrame = Extract<ClientFrame, { t: 'delete' }>;
@@ -76,7 +84,9 @@ export class WorkspaceHub extends DurableObject<Env> {
   /** Per-channel tail of the write chain, so D1 writes and their broadcasts leave in `seq` order. */
   private queues = new Map<string, Promise<unknown>>();
   /** Recent sends keyed `${userId}:${clientId}` (insertion order = age); a nack deletes its entry. */
-  private recent = new Map<string, { at: number; result: Promise<HubFrame> }>();
+  private recent = new Map<string, { at: number; result: Promise<SendOutcome> }>();
+  /** Per-socket mark_read / mark_thread_read throttle state, keyed by channel or `thread:<id>`. */
+  private readState = new WeakMap<WebSocket, Map<string, ReadState>>();
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -138,8 +148,13 @@ export class WorkspaceHub extends DurableObject<Env> {
         return this.onEditOrDelete(ws, f);
       case 'delete':
         return this.onEditOrDelete(ws, f);
+      case 'mark_read':
+        return this.onMarkRead(ws, f.channelId, f.seq);
+      case 'mark_thread_read':
+        return this.onMarkThreadRead(ws, f.messageId, f.seq);
+      case 'typing':
+        return this.onTyping(ws, f.channelId, f.parentId);
       default:
-        // mark_read/mark_thread_read/typing: added by later tasks.
         return;
     }
   }
@@ -173,14 +188,15 @@ export class WorkspaceHub extends DurableObject<Env> {
     const hit = this.recent.get(key);
     if (hit) {
       // In-flight or recently answered: replay the original answer only (no second broadcast).
-      this.sendFrame(ws, await hit.result);
+      this.sendFrame(ws, await this.frameFor(f.clientId, await hit.result));
       return;
     }
     if (!channelsOf(ws).includes(f.channelId)) {
       this.sendFrame(ws, { t: 'nack', clientId: f.clientId, code: 'not_found' });
       return;
     }
-    const result = this.enqueue(f.channelId, async (): Promise<HubFrame> => {
+    let stored: Message | undefined;
+    const result = this.enqueue(f.channelId, async (): Promise<SendOutcome> => {
       let r: Awaited<ReturnType<typeof sendMessage>>;
       try {
         r = await sendMessage(this.env.DB, {
@@ -196,25 +212,146 @@ export class WorkspaceHub extends DurableObject<Env> {
         });
       } catch {
         console.error(JSON.stringify({ level: 'error', code: 'send_failed' }));
-        return { t: 'nack', clientId: f.clientId, code: 'failed' };
+        return { code: 'failed' };
       }
-      if (!r.ok) return { t: 'nack', clientId: f.clientId, code: r.code };
+      if (!r.ok) return { code: r.code };
+      stored = r.message;
       if (!r.duplicate) {
-        const frame: HubFrame = { t: 'message.new', message: r.message };
-        for (const s of this.socketsForChannel(f.channelId)) if (s !== ws) this.sendFrame(s, frame);
-        this.notify(r.message, r.audience);
+        // The message is stored: nothing after this point may turn the send into a failure.
+        try {
+          const frame: HubFrame = { t: 'message.new', message: r.message };
+          for (const s of this.socketsForChannel(f.channelId)) if (s !== ws) this.sendFrame(s, frame);
+          this.notify(r.message, r.audience);
+        } catch {
+          console.error(JSON.stringify({ level: 'error', code: 'post_store_failed' }));
+        }
       }
-      return { t: 'ack', clientId: f.clientId, message: r.message };
+      return { messageId: r.message.id };
     });
     this.recent.set(key, { at: now, result });
     if (this.recent.size > RECENT_MAX) this.pruneRecent(now);
-    const frame = await result;
-    if (frame.t === 'nack' && this.recent.get(key)?.result === result) this.recent.delete(key);
-    this.sendFrame(ws, frame);
+    const outcome = await result;
+    if ('code' in outcome && this.recent.get(key)?.result === result) this.recent.delete(key);
+    this.sendFrame(ws, stored && 'messageId' in outcome ? { t: 'ack', clientId: f.clientId, message: stored } : await this.frameFor(f.clientId, outcome));
+  }
+
+  /** Builds the ack for a stored send by reloading it from D1 (`recent` keeps ids only), or the nack. */
+  private async frameFor(clientId: string, outcome: SendOutcome): Promise<HubFrame> {
+    if ('code' in outcome) return { t: 'nack', clientId, code: outcome.code };
+    try {
+      const row = await this.env.DB.prepare(`SELECT ${MESSAGE_COLUMNS} FROM messages WHERE id = ?`)
+        .bind(outcome.messageId)
+        .first<Record<string, unknown>>();
+      if (row) return { t: 'ack', clientId, message: rowToMessage(row) };
+    } catch {
+      console.error(JSON.stringify({ level: 'error', code: 'ack_reload_failed' }));
+    }
+    return { t: 'nack', clientId, code: 'failed' };
   }
 
   /** Notification fan-out for a freshly stored message (Task 6). */
-  private notify(_message: Message, _audience: Audience): void {}
+  private notify(message: Message, audience: Audience): void {
+    const preview = message.body.slice(0, 140);
+    for (const { userId, kind } of notifyTargets(audience, message, (u) => this.isActive(u))) {
+      const frame: HubFrame = {
+        t: 'notify',
+        kind,
+        channelId: message.channelId,
+        messageId: message.id,
+        parentId: message.parentId,
+        fromUserId: message.userId,
+        preview,
+      };
+      for (const s of this.socketsForUser(userId)) this.sendFrame(s, frame);
+    }
+  }
+
+  /**
+   * At most one D1 write per key per MARK_READ_INTERVAL_MS per socket; writes inside the window keep
+   * the highest seq and flush when it ends. `write` returns the position now stored, if known.
+   */
+  private throttleRead(ws: WebSocket, key: string, seq: number, write: (seq: number) => Promise<number | undefined>): void {
+    let states = this.readState.get(ws);
+    if (!states) this.readState.set(ws, (states = new Map()));
+    let st = states.get(key);
+    if (!st) states.set(key, (st = { lastWriteAt: Number.NEGATIVE_INFINITY, lastSeq: 0 }));
+    const state = st;
+    if (seq <= Math.max(state.lastSeq, state.pending ?? 0)) return;
+    const run = (value: number): void => {
+      const prev = state.lastSeq;
+      state.lastWriteAt = this.now();
+      state.lastSeq = value; // optimistic, so a burst is coalesced before the write returns
+      write(value).then(
+        (stored) => {
+          if (stored !== undefined) state.lastSeq = stored;
+        },
+        () => {
+          state.lastSeq = prev;
+          console.error(JSON.stringify({ level: 'error', code: 'mark_read_failed' }));
+        },
+      );
+    };
+    const wait = state.lastWriteAt + MARK_READ_INTERVAL_MS - this.now();
+    if (wait <= 0) {
+      run(seq);
+      return;
+    }
+    state.pending = seq;
+    if (state.timer === undefined) {
+      state.timer = setTimeout(() => {
+        state.timer = undefined;
+        const p = state.pending;
+        state.pending = undefined;
+        if (p !== undefined) run(p);
+      }, wait) as unknown as number;
+    }
+  }
+
+  private onMarkRead(ws: WebSocket, channelId: string, seq: number): void {
+    if (!channelsOf(ws).includes(channelId)) return;
+    const { userId } = getAtt(ws);
+    this.throttleRead(ws, channelId, seq, async (value) => {
+      const row = await this.env.DB.prepare(
+        `UPDATE channel_members SET last_read_seq = MIN(?1, (SELECT last_seq FROM channels WHERE id = ?2))
+         WHERE channel_id = ?2 AND user_id = ?3 AND last_read_seq < ?1 RETURNING last_read_seq AS seq`,
+      )
+        .bind(value, channelId, userId)
+        .first<{ seq: number }>();
+      if (!row) {
+        // Nothing moved (already read that far): learn the stored position so a later seq is not ignored.
+        const cur = await this.env.DB.prepare('SELECT last_read_seq AS seq FROM channel_members WHERE channel_id = ? AND user_id = ?')
+          .bind(channelId, userId)
+          .first<{ seq: number }>();
+        return cur?.seq;
+      }
+      // Clamped to last_seq by the UPDATE (P2-R16); only sent when the row changed.
+      for (const s of this.socketsForUser(userId)) {
+        if (s !== ws) this.sendFrame(s, { t: 'read', channelId, seq: row.seq });
+      }
+      return row.seq;
+    });
+  }
+
+  private onMarkThreadRead(ws: WebSocket, messageId: string, seq: number): void {
+    const { userId } = getAtt(ws);
+    this.throttleRead(ws, `thread:${messageId}`, seq, async (value) => {
+      await this.env.DB.prepare(
+        'UPDATE thread_follows SET last_read_reply_seq = ? WHERE message_id = ? AND user_id = ? AND last_read_reply_seq < ?',
+      )
+        .bind(value, messageId, userId, value)
+        .run();
+      return value;
+    });
+  }
+
+  private onTyping(ws: WebSocket, channelId: string, parentId: string | undefined): void {
+    if (!channelsOf(ws).includes(channelId)) return;
+    const { userId } = getAtt(ws);
+    const frame: HubFrame = parentId === undefined
+      ? { t: 'typing', channelId, userId }
+      : { t: 'typing', channelId, userId, parentId };
+    for (const s of this.socketsForChannel(channelId)) if (getAtt(s).userId !== userId) this.sendFrame(s, frame);
+  }
 
   private async onEditOrDelete(ws: WebSocket, f: EditFrame | DeleteFrame): Promise<void> {
     const { userId } = getAtt(ws);
