@@ -3,3 +3,5 @@ dist
 .wrangler
 .dev.vars
 .superpowers/
+packages/emoji/src/generated/
+apps/web/public/twemoji/
