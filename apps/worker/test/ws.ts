@@ -102,9 +102,16 @@ export function adopt(res: Response): TestSocket {
   return s;
 }
 
-/** Close every socket opened through this module (call from `afterEach`). */
-export function closeAll(): void {
-  for (const s of open.splice(0)) s.close();
+/**
+ * Close every socket opened through this module and wait (briefly) until the hub has echoed each
+ * close, so its webSocketClose work is done before the next test (call from `afterEach`).
+ */
+export async function closeAll(timeoutMs = 1_000): Promise<void> {
+  const socks = open.splice(0);
+  for (const s of socks) s.close();
+  await Promise.all(
+    socks.map((s) => Promise.race([s.closed(), new Promise<void>((r) => setTimeout(r, timeoutMs))])),
+  );
 }
 
 export function hubStub(): DurableObjectStub<WorkspaceHub> {

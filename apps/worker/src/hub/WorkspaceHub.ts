@@ -6,6 +6,7 @@ import {
   parseClientFrame,
   type ClientFrame,
   type HubFrame,
+  type Message,
   type PresenceState,
 } from '@backroom/protocol';
 import type { Env } from '../env';
@@ -13,6 +14,41 @@ import { catchUp } from '../messaging/read';
 import { channelsOf, getAtt, setAtt } from './attachment';
 
 const MAX_FRAME_CHARS = 262_144;
+/**
+ * Upper bound (bytes of serialized JSON) for the messages in one `catchup` frame. A channel whose
+ * missed messages would push the frame past it is sent as `stale` instead (the client refetches it
+ * over REST), so one frame can never exceed the WebSocket message limit.
+ */
+export const CATCHUP_FRAME_BUDGET = 1_000_000;
+
+const utf8 = new TextEncoder();
+
+/** Keep whole channels while they fit the budget; the rest become stale. Preserves channel order. */
+export function budgetCatchup(
+  messages: Message[],
+  stale: string[],
+  budget = CATCHUP_FRAME_BUDGET,
+): { messages: Message[]; stale: string[] } {
+  const byChannel = new Map<string, { msgs: Message[]; bytes: number }>();
+  for (const m of messages) {
+    const g = byChannel.get(m.channelId) ?? { msgs: [], bytes: 0 };
+    g.msgs.push(m);
+    g.bytes += utf8.encode(JSON.stringify(m)).byteLength + 1; // +1 for the array comma
+    byChannel.set(m.channelId, g);
+  }
+  const kept: Message[] = [];
+  const overflow: string[] = [];
+  let used = 0;
+  for (const [channelId, g] of byChannel) {
+    if (used + g.bytes <= budget) {
+      kept.push(...g.msgs);
+      used += g.bytes;
+    } else {
+      overflow.push(channelId);
+    }
+  }
+  return { messages: kept, stale: [...stale, ...overflow] };
+}
 /** Never schedule an alarm in the real past: workerd would fire it at once and could spin (P2-R6). */
 const MIN_ALARM_DELAY_MS = 1_000;
 
@@ -50,10 +86,13 @@ export class WorkspaceHub extends DurableObject<Env> {
       .all<{ id: string }>();
 
     const announced: PresenceState = this.isActive(userId) ? 'active' : 'away';
+    // A new tab of a user who is already active inherits their latest activity, so the alarm keeps
+    // treating them consistently.
+    const lastActivityAt = Math.max(0, ...this.socketsForUser(userId).map((ws) => getAtt(ws).lastActivityAt));
     const pair = new WebSocketPair();
     const [client, server] = [pair[0], pair[1]];
     this.ctx.acceptWebSocket(server, [userId]);
-    setAtt(server, { userId, workspaceId, channelIds: results.map((r) => r.id), lastActivityAt: 0, announced });
+    setAtt(server, { userId, workspaceId, channelIds: results.map((r) => r.id), lastActivityAt, announced });
     return new Response(null, { status: 101, webSocket: client });
   }
 
@@ -86,7 +125,18 @@ export class WorkspaceHub extends DurableObject<Env> {
   }
 
   private async onHello(ws: WebSocket, lastSeen: Record<string, number>): Promise<void> {
-    const { messages, stale } = await catchUp(this.env.DB, channelsOf(ws), lastSeen);
+    const channelIds = channelsOf(ws);
+    let result: { messages: Message[]; stale: string[] };
+    try {
+      const r = await catchUp(this.env.DB, channelIds, lastSeen);
+      result = budgetCatchup(r.messages, r.stale);
+    } catch {
+      // Never leave the client waiting: every requested channel becomes stale and is refetched over REST.
+      console.error(JSON.stringify({ level: 'error', code: 'catchup_failed' }));
+      const mine = new Set(channelIds);
+      result = { messages: [], stale: Object.keys(lastSeen).filter((id) => mine.has(id)) };
+    }
+    const { messages, stale } = result;
     this.sendFrame(ws, { t: 'catchup', messages, presence: this.presenceSnapshot() });
     for (const channelId of stale) this.sendFrame(ws, { t: 'stale', channelId });
     await this.onActivity(ws);
@@ -184,7 +234,10 @@ export class WorkspaceHub extends DurableObject<Env> {
     try {
       ws.send(JSON.stringify(f));
     } catch {
-      // socket is closing; its close handler cleans up
+      // A closing socket is expected to reject sends (its close handler cleans up); anything else is a bug.
+      if (ws.readyState === WebSocket.OPEN) {
+        console.error(JSON.stringify({ level: 'error', code: 'ws_send_failed', t: f.t }));
+      }
     }
   }
 
