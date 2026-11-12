@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { ClientFrame } from '@backroom/protocol';
+import type { ClientFrame, FileInfo } from '@backroom/protocol';
 import { Outbox, type PendingSend } from '../src/realtime/outbox';
 
 const CH = '01JCHANNEL0000000000000000';
@@ -136,5 +136,28 @@ describe('Outbox', () => {
     const id = o.enqueue(msg);
     o.discard(id);
     expect(last).toEqual([]);
+  });
+
+  const F: FileInfo = { id: 'f'.repeat(26), name: 'a.png', mime: 'image/png', size: 1, width: null, height: null, hasThumb: false };
+
+  it('files become fileIds; no files means no fileIds field', () => {
+    const o = make();
+    o.enqueue({ ...msg, files: [F] });
+    expect((sent[0] as { fileIds?: string[] }).fileIds).toEqual([F.id]);
+    o.enqueue(msg);
+    expect('fileIds' in sent[1]!).toBe(false);
+    o.enqueue({ ...msg, body: '', files: [F] });
+    expect(sent[2]).toMatchObject({ body: '', fileIds: [F.id] });
+  });
+
+  it('a nack (e.g. invalid after a failed attach) is terminal: no automatic resend', () => {
+    const o = make();
+    const id = o.enqueue({ ...msg, files: [F] });
+    o.nack(id, 'invalid');
+    t += 60_000;
+    o.tick();
+    o.flush();
+    expect(sent).toHaveLength(1);
+    expect(last[0]).toMatchObject({ status: 'failed', error: 'invalid' });
   });
 });

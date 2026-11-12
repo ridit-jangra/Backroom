@@ -1,4 +1,4 @@
-import { TYPING_TTL_MS, type ChannelSummary, type CustomEmoji, type Message } from '@backroom/protocol';
+import { TYPING_TTL_MS, type ChannelSummary, type CustomEmoji, type FileInfo, type Message } from '@backroom/protocol';
 import { describe, expect, it } from 'vitest';
 import type { PendingSend } from '../src/realtime/outbox';
 import { initialChat, isViewing, lastSeenFor, reduce, type ChatEvent, type ChatState } from '../src/state/chat';
@@ -31,7 +31,7 @@ function setup(channels: ChannelSummary[] = [chan('c1'), chan('c2')]): ChatState
   return s;
 }
 const pend = (clientId: string): PendingSend => ({
-  clientId, channelId: 'c1', parentId: null, body: 'x', alsoInChannel: false, status: 'sending', attempts: 1, lastSentAt: 0,
+  clientId, channelId: 'c1', parentId: null, body: 'x', alsoInChannel: false, files: [], status: 'sending', attempts: 1, lastSentAt: 0,
 });
 const run = (s: ChatState, e: ChatEvent, now = 0) => reduce(s, e, now);
 const newMsg = (s: ChatState, m: Message) => run(s, { t: 'message.new', message: m });
@@ -416,5 +416,44 @@ describe('reactions and custom emoji', () => {
     run(s, rx('m1', false));
     run(s, { t: 'emoji.update', added: [], removed: ['x'] });
     expect(JSON.stringify(s)).toBe(snap);
+  });
+});
+
+const F: FileInfo = { id: 'f'.repeat(26), name: 'a.png', mime: 'image/png', size: 10, width: 1, height: 1, hasThumb: true };
+
+const withWindow = () =>
+  run(setup(), { t: 'local.history', channelId: 'c1', page: { messages: [], hasMore: false }, mode: 'replace' });
+
+describe('files and highlight', () => {
+  it('files: ack and message.new carry them; edits without files keep them; deletes clear them', () => {
+    let s = withWindow();
+    s = newMsg(s, msg(1, { files: [F] }));
+    expect(s.windows.c1!.messages[0]!.files).toEqual([F]);
+    const edited = msg(1, { body: 'edited', editedAt: 5000 });
+    s = run(s, { t: 'message.edit', message: edited });
+    expect(s.windows.c1!.messages[0]!.files).toEqual([F]);
+    expect(s.windows.c1!.messages[0]!.body).toBe('edited');
+    s = run(s, { t: 'message.delete', message: msg(1, { body: '', editedAt: 6000, deletedAt: 6000 }) });
+    expect(s.windows.c1!.messages[0]!.files).toEqual([]);
+    s = newMsg(s, msg(1, { files: [F] }));
+    expect(s.windows.c1!.messages[0]!.files).toEqual([]);
+  });
+
+  it('keeps object identity when files are unchanged', () => {
+    let s = withWindow();
+    const m = msg(1, { files: [F] });
+    s = newMsg(s, m);
+    const held = s.windows.c1!.messages[0]!;
+    s = newMsg(s, { ...m });
+    expect(s.windows.c1!.messages[0]!.files).toBe(held.files);
+  });
+
+  it('local.highlight sets and local.open clears highlightId', () => {
+    let s = setup();
+    expect(s.highlightId).toBeNull();
+    s = run(s, { t: 'local.highlight', messageId: 'm1' });
+    expect(s.highlightId).toBe('m1');
+    s = run(s, { t: 'local.open', channelId: 'c2' });
+    expect(s.highlightId).toBeNull();
   });
 });

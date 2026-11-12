@@ -43,7 +43,7 @@ export type Route = (url: string, init: { method?: string; body?: string } | und
 export type Posted = { url: string; method: string; body: unknown };
 
 /** Stubs fetch: `route` answers a request with `Response`/JSON or returns undefined to fall through. */
-export function stubApi(opts: { bootstrap?: () => Bootstrap; pages?: Record<string, { messages: Message[]; hasMore: boolean }>; route?: Route } = {}) {
+export function stubApi(opts: { bootstrap?: () => Bootstrap; pages?: Record<string, { messages: Message[]; hasMore: boolean } | Message[]>; route?: Route } = {}) {
   const posted: Posted[] = [];
   vi.stubGlobal(
     'fetch',
@@ -54,8 +54,18 @@ export function stubApi(opts: { bootstrap?: () => Bootstrap; pages?: Record<stri
       if (custom instanceof Response) return custom;
       if (custom !== undefined) return new Response(JSON.stringify(custom), { status: 200 });
       if (/\/bootstrap(\?|$)/.test(url)) return new Response(JSON.stringify((opts.bootstrap ?? makeBootstrap)()), { status: 200 });
-      const hist = /^\/channels\/([0-9A-Z]{26})\/messages\?/.exec(url);
-      if (hist) return new Response(JSON.stringify(opts.pages?.[hist[1]!] ?? { messages: [], hasMore: false }), { status: 200 });
+      const hist = /^\/channels\/([0-9A-Z]{26})\/messages\?(.*)$/.exec(url);
+      if (hist) {
+        const page = opts.pages?.[hist[1]!];
+        if (Array.isArray(page)) {
+          // P4-R10: an array is the full channel history; serve 50 at a time, honouring before=.
+          const before = Number(new URLSearchParams(hist[2]).get('before') ?? Infinity);
+          const older = page.filter((m) => m.seq < before);
+          const out = older.slice(-50);
+          return new Response(JSON.stringify({ messages: out, hasMore: older.length > out.length }), { status: 200 });
+        }
+        return new Response(JSON.stringify(page ?? { messages: [], hasMore: false }), { status: 200 });
+      }
       return new Response(JSON.stringify({ error: { code: 'not_found', message: 'nf' } }), { status: 404 });
     }),
   );

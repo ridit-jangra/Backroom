@@ -32,7 +32,9 @@ export function Workspace({ slug, channelId }: { slug: string; channelId?: strin
   }, [channelId, bootstrap, state.channels, base]);
 
   useEffect(() => {
-    if (channelId) actions.open(channelId);
+    // P4-R9: jumpTo may already have opened this channel; opening again would clear the highlight.
+    if (channelId && state.openChannelId !== channelId) actions.open(channelId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [channelId, actions]);
 
   async function signOut() {

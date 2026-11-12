@@ -1,4 +1,4 @@
-import { RESEND_AFTER_MS, type ClientFrame, type NackCode } from '@backroom/protocol';
+import { RESEND_AFTER_MS, type ClientFrame, type FileInfo, type NackCode } from '@backroom/protocol';
 
 export type PendingSend = {
   clientId: string;
@@ -6,6 +6,7 @@ export type PendingSend = {
   parentId: string | null;
   body: string;
   alsoInChannel: boolean;
+  files: FileInfo[];
   status: 'sending' | 'failed';
   error?: NackCode;
   attempts: number;
@@ -28,9 +29,9 @@ export class Outbox {
     this.now = opts.now ?? Date.now;
   }
 
-  enqueue(p: { channelId: string; parentId: string | null; body: string; alsoInChannel: boolean }): string {
+  enqueue(p: { channelId: string; parentId: string | null; body: string; alsoInChannel: boolean; files?: FileInfo[] }): string {
     const clientId = crypto.randomUUID();
-    const item: PendingSend = { ...p, clientId, status: 'sending', attempts: 0, lastSentAt: 0 };
+    const item: PendingSend = { ...p, files: p.files ?? [], clientId, status: 'sending', attempts: 0, lastSentAt: 0 };
     this.items.set(clientId, item);
     this.transmit(item);
     this.emit();
@@ -95,6 +96,7 @@ export class Outbox {
       body: it.body,
       ...(it.parentId !== null ? { parentId: it.parentId } : {}),
       ...(it.alsoInChannel ? { alsoInChannel: true } : {}),
+      ...(it.files.length > 0 ? { fileIds: it.files.map((f) => f.id) } : {}),
     };
     // Count only real transmissions so an offline period does not burn attempts.
     const sentOk = this.opts.send(frame);

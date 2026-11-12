@@ -4,6 +4,7 @@ import {
   MARK_READ_INTERVAL_MS,
   type Bootstrap,
   type ClientFrame,
+  type FileInfo,
   type HistoryPage,
   type HubFrame,
   type ThreadPage,
@@ -21,7 +22,9 @@ export type ChatActions = {
   openThread(parentId: string | null): void;
   /** False when the frame could not be sent (not connected). */
   markThreadRead(messageId: string, seq: number): boolean;
-  send(channelId: string, body: string, parentId?: string | null, alsoInChannel?: boolean): void;
+  send(channelId: string, body: string, parentId?: string | null, alsoInChannel?: boolean, files?: FileInfo[]): void;
+  /** Opens the message's channel (or thread, for a reply) and highlights it; false when it could not be found. */
+  jumpTo(t: { channelId: string; messageId: string; seq: number; parentId: string | null; alsoInChannel: boolean }): Promise<boolean>;
   retry(clientId: string): void;
   discard(clientId: string): void;
   /** False when the frame could not be sent (not connected); the caller keeps the user's input. */
@@ -82,6 +85,8 @@ function startSession(
   const markSent = new Map<string, number>();
   let lastActivityAt = Number.NEGATIVE_INFINITY;
   const olderLoading = new Set<string>();
+  const latestLoads = new Map<string, Promise<void>>();
+  const MAX_JUMP_PAGES = 20;
 
   const toLogin = () => {
     if (alive) navigate('/login', { replace: true });
@@ -195,7 +200,7 @@ function startSession(
       const thread = tid ? state.threads[tid] : undefined;
       if (thread && thread.parent.channelId !== channelId) dispatch({ t: 'local.openThread', parentId: null });
       dispatch({ t: 'local.open', channelId });
-      void loadLatest(channelId);
+      latestLoads.set(channelId, loadLatest(channelId));
     },
     async loadOlder(channelId) {
       const w = state.windows[channelId];
@@ -219,8 +224,27 @@ function startSession(
     markThreadRead(messageId, seq) {
       return sendFrame({ t: 'mark_thread_read', messageId, seq });
     },
-    send(channelId, body, parentId = null, alsoInChannel = false) {
-      if (alive) outbox.enqueue({ channelId, parentId: parentId ?? null, body, alsoInChannel });
+    send(channelId, body, parentId = null, alsoInChannel = false, files = []) {
+      if (alive) outbox.enqueue({ channelId, parentId: parentId ?? null, body, alsoInChannel, files });
+    },
+    async jumpTo({ channelId, messageId, parentId, alsoInChannel }) {
+      // P4-R9: open the channel here so the route effect's open() is a no-op and the highlight survives.
+      if (state.openChannelId !== channelId) actions.open(channelId);
+      if (parentId !== null && !alsoInChannel) {
+        actions.openThread(parentId);
+        dispatch({ t: 'local.highlight', messageId });
+        return true;
+      }
+      await (latestLoads.get(channelId) ?? loadLatest(channelId));
+      const has = () => state.windows[channelId]?.messages.some((m) => m.id === messageId) ?? false;
+      for (let pages = 0; alive && !has() && state.windows[channelId]?.hasOlder && pages < MAX_JUMP_PAGES; pages++) {
+        const before = state.windows[channelId]?.messages[0]?.seq;
+        await actions.loadOlder(channelId);
+        if (state.windows[channelId]?.messages[0]?.seq === before) break;
+      }
+      if (!alive || !has()) return false;
+      dispatch({ t: 'local.highlight', messageId });
+      return true;
     },
     retry: (clientId) => outbox.retry(clientId),
     discard: (clientId) => outbox.discard(clientId),
@@ -374,7 +398,8 @@ export function useChat(slug: string): { state: ChatState; actions: ChatActions;
       loadOlder: (id) => impl.current?.loadOlder(id) ?? Promise.resolve(),
       openThread: (id) => impl.current?.openThread(id),
       markThreadRead: (id, seq) => impl.current?.markThreadRead(id, seq) ?? false,
-      send: (cid, body, pid, also) => impl.current?.send(cid, body, pid, also),
+      send: (cid, body, pid, also, files) => impl.current?.send(cid, body, pid, also, files),
+      jumpTo: (t) => impl.current?.jumpTo(t) ?? Promise.resolve(false),
       retry: (id) => impl.current?.retry(id),
       discard: (id) => impl.current?.discard(id),
       edit: (id, body) => impl.current?.edit(id, body) ?? false,
