@@ -37,6 +37,8 @@ export function Workspace({ slug, channelId }: { slug: string; channelId?: strin
     if (state.bootstrap) void desktopSetBadge(totalUnread);
   }, [totalUnread, state.bootstrap]);
 
+  useEffect(() => () => void desktopSetBadge(0), []);
+
   // A clicked desktop notification asks to open its channel.
   useEffect(() => onDesktopNavigate((id) => navigate(`/client/${encodeURIComponent(slug)}/${encodeURIComponent(id)}`)), [slug]);
 

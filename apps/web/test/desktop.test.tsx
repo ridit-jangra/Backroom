@@ -1,3 +1,4 @@
+import { StrictMode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -155,6 +156,72 @@ describe('/desktop-auth', () => {
     render(<App />);
     expect((await screen.findByRole('alert')).textContent).toBe('This sign-in code is invalid or expired.');
     expect(f).not.toHaveBeenCalled();
+  });
+});
+
+describe('fix round 1', () => {
+  it('/desktop-auth under StrictMode posts exactly once and navigates', async () => {
+    const f = vi.fn(async (_u: string) => new Response(JSON.stringify({ ok: true, workspace: 'clubhack' }), { status: 200 }));
+    vi.stubGlobal('fetch', f);
+    history.replaceState(null, '', '/desktop-auth#code=the-code&verifier=the-verifier');
+    render(
+      <StrictMode>
+        <App />
+      </StrictMode>,
+    );
+    await waitFor(() => expect(location.pathname).toBe('/client/clubhack'));
+    expect(f.mock.calls.filter(([u]) => u === '/auth/desktop/exchange')).toHaveLength(1);
+    expect(screen.queryByText('This sign-in code is invalid or expired.')).toBeNull();
+  });
+
+  it.each([[''], [undefined]])('Login in desktop with challenge %j shows an error and does not submit', async (v) => {
+    markDesktop();
+    invoke.mockImplementation(async (cmd: string) => (cmd === 'login_challenge' ? v : undefined));
+    const f = vi.fn(async () => new Response('{}', { status: 200 }));
+    vi.stubGlobal('fetch', f);
+    render(<Login />);
+    await userEvent.type(screen.getByLabelText('Email'), 'a@b.co');
+    await userEvent.click(screen.getByRole('button', { name: 'Email me a sign-in link' }));
+    expect((await screen.findByRole('alert')).textContent).toBe("Couldn't start desktop sign-in. Restart Backroom and try again.");
+    expect(f).not.toHaveBeenCalled();
+  });
+
+  it('badge excludes non-member channels and resets to 0 on unmount', async () => {
+    markDesktop();
+    stubApi({
+      bootstrap: () =>
+        makeBootstrap({
+          channels: [
+            chan(GEN, 'general', { unreadCount: 2, lastSeq: 2 }),
+            chan(RAND, 'random', { unreadCount: 1, lastSeq: 1 }),
+          ],
+        }),
+    });
+    const ws = await boot(`/client/clubhack/${GEN}`);
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('set_badge', { count: 1 }));
+    // A message in a channel not in the bootstrap (non-member) must not count.
+    act(() => ws.receive({ t: 'message.new', message: msg(1, { channelId: id('01JOTHER') }) }));
+    await new Promise((r) => setTimeout(r, 50));
+    expect(invoke.mock.calls.filter(([c, a]) => c === 'set_badge' && (a as { count: number }).count > 1)).toEqual([]);
+    cleanup();
+    expect(invoke).toHaveBeenLastCalledWith('set_badge', { count: 0 });
+  });
+
+  it('no desktopNotify for the channel being viewed with the window focused', async () => {
+    markDesktop();
+    Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'visible' });
+    Object.defineProperty(document, 'hasFocus', { configurable: true, value: () => true });
+    try {
+      stubApi();
+      const ws = await boot(`/client/clubhack/${GEN}`);
+      act(() =>
+        ws.receive({ t: 'notify', kind: 'mention', channelId: GEN, messageId: id('01JN'), parentId: null, fromUserId: BOB, preview: 'hi' }),
+      );
+      expect(invoke.mock.calls.some(([c]) => c === 'notify')).toBe(false);
+    } finally {
+      delete (document as { visibilityState?: unknown }).visibilityState;
+      delete (document as { hasFocus?: unknown }).hasFocus;
+    }
   });
 });
 

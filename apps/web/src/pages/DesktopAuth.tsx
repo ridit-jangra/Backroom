@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { api } from '../api';
 import { navigate } from '../nav';
 
@@ -7,8 +7,19 @@ const INVALID = 'This sign-in code is invalid or expired.';
 /** Reads code and verifier from the URL fragment only (never the query), drops them, then exchanges. */
 export function DesktopAuth() {
   const [error, setError] = useState('');
+  // StrictMode runs effects twice on one instance: exchange exactly once, and let a re-run
+  // re-attach to the in-flight result instead of re-reading the (already cleared) fragment.
+  const started = useRef(false);
+  const mounted = useRef(false);
 
   useEffect(() => {
+    mounted.current = true;
+    if (started.current) {
+      return () => {
+        mounted.current = false;
+      };
+    }
+    started.current = true;
     const params = new URLSearchParams(location.hash.replace(/^#/, ''));
     const code = params.get('code');
     const verifier = params.get('verifier');
@@ -17,22 +28,21 @@ export function DesktopAuth() {
       setError(INVALID);
       return;
     }
-    let alive = true;
     api<{ ok: true; workspace: string }>('/auth/desktop/exchange', {
       method: 'POST',
       body: { code, verifier },
     }).then(
       (res) => {
-        if (alive) navigate(`/client/${res.workspace}`, { replace: true });
+        if (mounted.current) navigate(`/client/${res.workspace}`, { replace: true });
       },
       (err) => {
-        if (!alive) return;
+        if (!mounted.current) return;
         const status = (err as { status?: number }).status;
         setError(status === 400 ? INVALID : err instanceof Error ? err.message : 'Something went wrong');
       },
     );
     return () => {
-      alive = false;
+      mounted.current = false;
     };
   }, []);
 

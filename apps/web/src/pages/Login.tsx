@@ -15,6 +15,10 @@ export function Login() {
     const inviteToken = new URLSearchParams(location.search).get('invite');
     try {
       const desktopChallenge = isDesktop() ? await desktopLoginChallenge() : '';
+      if (isDesktop() && !desktopChallenge) {
+        setError("Couldn't start desktop sign-in. Restart Backroom and try again.");
+        return;
+      }
       await api('/auth/start', {
         method: 'POST',
         body: {
