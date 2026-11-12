@@ -7,6 +7,7 @@ import {
   type ChannelInfo,
   type ChannelSummary,
   type ClientFrame,
+  type CustomEmoji,
   type HubFrame,
   type Message,
   type NackCode,
@@ -18,6 +19,7 @@ import { catchUp } from '../messaging/read';
 import { notifyTargets } from '../messaging/notify';
 import { MESSAGE_COLUMNS, rowToMessage } from '../messaging/rows';
 import { deleteMessage, editMessage, sendMessage, type Audience } from '../messaging/store';
+import { toggleReaction } from '../emoji/reactions';
 import { addChannel, channelsOf, getAtt, removeChannel, setAtt } from './attachment';
 
 export type MembershipChange =
@@ -80,6 +82,7 @@ type ReadState = { lastWriteAt: number; lastSeq: number; pending?: number; timer
 type SendFrame = Extract<ClientFrame, { t: 'send' }>;
 type EditFrame = Extract<ClientFrame, { t: 'edit' }>;
 type DeleteFrame = Extract<ClientFrame, { t: 'delete' }>;
+type ReactFrame = Extract<ClientFrame, { t: 'react' }>;
 
 function errorResponse(status: number, code: string, message: string): Response {
   return Response.json({ error: { code, message } }, { status });
@@ -197,6 +200,8 @@ export class WorkspaceHub extends DurableObject<Env> {
         return this.onEditOrDelete(ws, f);
       case 'delete':
         return this.onEditOrDelete(ws, f);
+      case 'react':
+        return this.onReact(ws, f);
       case 'mark_read':
         return this.onMarkRead(ws, f.channelId, f.seq);
       case 'mark_thread_read':
@@ -245,6 +250,7 @@ export class WorkspaceHub extends DurableObject<Env> {
       return;
     }
     let stored: Message | undefined;
+    let fresh = false;
     const result = this.enqueue(f.channelId, async (): Promise<SendOutcome> => {
       let r: Awaited<ReturnType<typeof sendMessage>>;
       try {
@@ -266,9 +272,10 @@ export class WorkspaceHub extends DurableObject<Env> {
       if (!r.ok) return { code: r.code };
       stored = r.message;
       if (!r.duplicate) {
+        fresh = true;
         // The message is stored: nothing after this point may turn the send into a failure.
         try {
-          const frame: HubFrame = { t: 'message.new', message: r.message };
+          const frame: HubFrame = { t: 'message.new', message: { ...r.message, reactions: [] } };
           for (const s of this.socketsForChannel(f.channelId)) if (s !== ws) this.sendFrame(s, frame);
         } catch {
           console.error(JSON.stringify({ level: 'error', code: 'broadcast_failed' }));
@@ -285,7 +292,7 @@ export class WorkspaceHub extends DurableObject<Env> {
     if (this.recent.size > RECENT_MAX) this.pruneRecent(now);
     const outcome = await result;
     if ('code' in outcome && this.recent.get(key)?.result === result) this.recent.delete(key);
-    this.sendFrame(ws, stored && 'messageId' in outcome ? { t: 'ack', clientId: f.clientId, message: stored } : await this.frameFor(f.clientId, outcome));
+    this.sendFrame(ws, stored && 'messageId' in outcome ? { t: 'ack', clientId: f.clientId, message: fresh ? { ...stored, reactions: [] } : stored } : await this.frameFor(f.clientId, outcome));
   }
 
   /** Builds the ack for a stored send by reloading it from D1 (`recent` keeps ids only), or the nack. */
@@ -443,6 +450,51 @@ export class WorkspaceHub extends DurableObject<Env> {
     });
   }
 
+  private async onReact(ws: WebSocket, f: ReactFrame): Promise<void> {
+    const { userId } = getAtt(ws);
+    const nack = (code: NackCode) => {
+      if (f.clientId !== undefined) this.sendFrame(ws, { t: 'nack', clientId: f.clientId, code });
+    };
+    let row: { channelId: string } | null;
+    try {
+      row = await this.env.DB.prepare('SELECT channel_id AS channelId FROM messages WHERE id = ?')
+        .bind(f.messageId)
+        .first<{ channelId: string }>();
+    } catch {
+      console.error(JSON.stringify({ level: 'error', code: 'react_failed' }));
+      return nack('failed');
+    }
+    if (!row || !channelsOf(ws).includes(row.channelId)) return nack('not_found');
+    const channelId = row.channelId;
+    await this.enqueue(channelId, async () => {
+      let r: Awaited<ReturnType<typeof toggleReaction>>;
+      try {
+        r = await toggleReaction(this.env.DB, {
+          messageId: f.messageId,
+          userId,
+          emoji: f.emoji,
+          on: f.on,
+          now: this.now(),
+        });
+      } catch {
+        console.error(JSON.stringify({ level: 'error', code: 'react_failed' }));
+        return nack('failed');
+      }
+      if (!r.ok) return nack(r.code);
+      const frame: HubFrame = {
+        t: 'reaction',
+        channelId,
+        messageId: f.messageId,
+        emoji: r.emoji,
+        userId,
+        on: f.on,
+      };
+      // Unchanged: only the sender hears it, so a stale tab converges without noising the channel.
+      const targets = r.changed ? this.socketsForChannel(channelId) : [ws];
+      for (const s of targets) this.sendFrame(s, frame);
+    });
+  }
+
   private async onHello(ws: WebSocket, lastSeen: Record<string, number>): Promise<void> {
     const channelIds = channelsOf(ws);
     let result: { messages: Message[]; stale: string[] };
@@ -495,6 +547,11 @@ export class WorkspaceHub extends DurableObject<Env> {
   async channelUpdated(channel: ChannelInfo): Promise<void> {
     const frame: HubFrame = { t: 'channel.update', channel };
     for (const ws of this.socketsForChannel(channel.id)) this.sendFrame(ws, frame);
+  }
+
+  /** Custom emoji added or removed (D1 already updated): every open socket in the workspace hears it. */
+  async emojiChanged(change: { added: CustomEmoji[]; removed: string[] }): Promise<void> {
+    this.broadcast({ t: 'emoji.update', added: change.added, removed: change.removed });
   }
 
   /** Closes every socket of a deactivated user (4001: the client signs out and does not reconnect). */

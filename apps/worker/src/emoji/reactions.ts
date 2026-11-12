@@ -63,8 +63,9 @@ export async function toggleReaction(
       .prepare(
         `INSERT OR IGNORE INTO reactions (message_id, user_id, emoji, created_at)
          SELECT ?1, ?2, ?3, ?4
-         WHERE EXISTS (SELECT 1 FROM reactions WHERE message_id = ?1 AND emoji = ?3)
-            OR (SELECT COUNT(DISTINCT emoji) FROM reactions WHERE message_id = ?1) < ?5`,
+         WHERE EXISTS (SELECT 1 FROM messages WHERE id = ?1 AND deleted_at IS NULL)
+           AND (EXISTS (SELECT 1 FROM reactions WHERE message_id = ?1 AND emoji = ?3)
+                OR (SELECT COUNT(DISTINCT emoji) FROM reactions WHERE message_id = ?1) < ?5)`,
       )
       .bind(input.messageId, input.userId, emoji, input.now, MAX_DISTINCT_REACTIONS)
       .run();
