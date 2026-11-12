@@ -1,0 +1,290 @@
+import { createExecutionContext, env, waitOnExecutionContext } from 'cloudflare:test';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import type { CustomEmoji } from '@backroom/protocol';
+import type { Hono } from 'hono';
+import type { AppEnv } from '../src/app';
+import { createApp } from '../src/app';
+import { readSettings } from '../src/emoji/custom';
+import { captureMailer, gif, insertCustomEmoji, jpeg, png, resetDb, send, seedUsers, testDeps, uploadEmoji } from './helpers';
+import { CLUBHACK_WS, closeAll, connect } from './ws';
+
+beforeEach(resetDb);
+afterEach(() => closeAll());
+
+const PREFIX = `ws/${CLUBHACK_WS}/emoji/`;
+const text = (s: string) => new TextEncoder().encode(s);
+
+async function setup() {
+  const { mailer, sent } = captureMailer();
+  const app = createApp(testDeps({ mailer }));
+  const [owner, alice] = await seedUsers(app, sent, ['owner@test.dev', 'alice@test.dev']);
+  return { app, owner: owner!, alice: alice! };
+}
+
+async function errCode(res: Response): Promise<string> {
+  return ((await res.json()) as { error: { code: string } }).error.code;
+}
+
+async function created(res: Response): Promise<CustomEmoji> {
+  expect(res.status).toBe(201);
+  return ((await res.json()) as { emoji: CustomEmoji }).emoji;
+}
+
+async function getImage(app: Hono<AppEnv>, path: string, headers: Record<string, string> = {}): Promise<Response> {
+  const ctx = createExecutionContext();
+  const res = await app.request(path, { method: 'GET', headers }, env, ctx);
+  await waitOnExecutionContext(ctx);
+  return res;
+}
+
+async function objectCount(): Promise<number> {
+  return (await env.BUCKET.list({ prefix: PREFIX })).objects.length;
+}
+
+describe('readSettings', () => {
+  it('defaults to admins unless the JSON says everyone', () => {
+    expect(readSettings(null)).toEqual({ customEmojiPolicy: 'admins' });
+    expect(readSettings('{}')).toEqual({ customEmojiPolicy: 'admins' });
+    expect(readSettings('not json')).toEqual({ customEmojiPolicy: 'admins' });
+    expect(readSettings('null')).toEqual({ customEmojiPolicy: 'admins' });
+    expect(readSettings('{"customEmojiPolicy":"weird"}')).toEqual({ customEmojiPolicy: 'admins' });
+    expect(readSettings('{"customEmojiPolicy":"everyone"}')).toEqual({ customEmojiPolicy: 'everyone' });
+  });
+});
+
+describe('custom emoji', () => {
+  it('owner uploads a 32×32 PNG', async () => {
+    const s = await setup();
+    const emoji = await created(await uploadEmoji(s.app, s.owner.cookie, 'partyparrot', png(32, 32)));
+    expect(emoji).toMatchObject({ name: 'partyparrot', aliasFor: null, createdBy: s.owner.userId, createdAt: 1_800_000_000_000 });
+    expect(emoji.url).toBe('/emoji/' + emoji.id);
+    const obj = await env.BUCKET.head(`ws/01JCLUBHACK0000000000000WS/emoji/${emoji.id}`);
+    expect(obj?.httpMetadata?.contentType).toBe('image/png');
+    const list = await send(s.app, 'GET', '/w/clubhack/emoji', undefined, s.owner.cookie);
+    expect(list.status).toBe(200);
+    expect(await list.json()).toEqual({ emoji: [emoji] });
+  });
+
+  it('lists in name order; aliases have no url; non-members get 404', async () => {
+    const s = await setup();
+    await insertCustomEmoji({ name: 'zeta' });
+    await insertCustomEmoji({ name: 'pp', aliasFor: 'alpha' });
+    await insertCustomEmoji({ name: 'alpha' });
+    await insertCustomEmoji({ name: 'other', workspaceId: '01OTHERWS00000000000000000' });
+    const res = await send(s.app, 'GET', '/w/clubhack/emoji', undefined, s.alice.cookie);
+    const { emoji } = (await res.json()) as { emoji: CustomEmoji[] };
+    expect(emoji.map((e) => e.name)).toEqual(['alpha', 'pp', 'zeta']);
+    expect(emoji[1]).toMatchObject({ url: null, aliasFor: 'alpha' });
+    expect(emoji[0]!.url).toBe(`/emoji/${emoji[0]!.id}`);
+    expect((await send(s.app, 'GET', '/w/nope/emoji', undefined, s.alice.cookie)).status).toBe(404);
+    expect((await send(s.app, 'GET', '/w/clubhack/emoji')).status).toBe(401);
+  });
+
+  it('type comes from magic bytes; disguised SVG/HTML and bombs are rejected', async () => {
+    const s = await setup();
+    const svg = await uploadEmoji(s.app, s.owner.cookie, 'svg', text('<svg xmlns="http://www.w3.org/2000/svg"/>'), {
+      filename: 'x.png',
+      type: 'image/png',
+    });
+    expect(svg.status).toBe(400);
+    expect(await errCode(svg)).toBe('unsupported_type');
+    const html = await uploadEmoji(s.app, s.owner.cookie, 'html', text('<html><script>alert(1)</script></html>'), {
+      filename: 'x.png',
+      type: 'image/png',
+    });
+    expect(html.status).toBe(400);
+    expect(await errCode(html)).toBe('unsupported_type');
+    const bomb = await uploadEmoji(s.app, s.owner.cookie, 'bomb', png(20_000, 20_000, 1_024));
+    expect(bomb.status).toBe(400);
+    expect(await errCode(bomb)).toBe('too_big');
+    expect(await objectCount()).toBe(0);
+
+    const bytes = gif(32, 32);
+    const emoji = await created(await uploadEmoji(s.app, s.owner.cookie, 'gifjpeg', bytes, { filename: 'x.jpg', type: 'image/jpeg' }));
+    const img = await getImage(s.app, emoji.url!, { Cookie: s.owner.cookie });
+    expect(img.status).toBe(200);
+    expect(img.headers.get('Content-Type')).toBe('image/gif');
+    expect(img.headers.get('X-Content-Type-Options')).toBe('nosniff');
+    expect(new Uint8Array(await img.arrayBuffer())).toEqual(bytes);
+
+    const j = await created(await uploadEmoji(s.app, s.owner.cookie, 'jpg', jpeg(64, 48), { filename: 'x.gif', type: 'image/gif' }));
+    expect((await env.BUCKET.head(PREFIX + j.id))?.httpMetadata?.contentType).toBe('image/jpeg');
+  });
+
+  it('size limits', async () => {
+    const s = await setup();
+    await created(await uploadEmoji(s.app, s.owner.cookie, 'exact', png(32, 32, 131_072)));
+    const over = await uploadEmoji(s.app, s.owner.cookie, 'over', png(32, 32, 131_073));
+    expect(over.status).toBe(413);
+    expect(await errCode(over)).toBe('too_large');
+    const small = await uploadEmoji(s.app, s.owner.cookie, 'small', png(31, 32));
+    expect(small.status).toBe(400);
+    expect(await errCode(small)).toBe('too_small');
+    const tall = await uploadEmoji(s.app, s.owner.cookie, 'tall', png(32, 4_097));
+    expect(await errCode(tall)).toBe('too_big');
+    await created(await uploadEmoji(s.app, s.owner.cookie, 'max', png(4_096, 4_096)));
+  });
+
+  it('rejects bodies over the upload limit before parsing them', async () => {
+    const s = await setup();
+    const big = new Uint8Array(200_000);
+    big.set(png(32, 32));
+    // Declared Content-Length over the limit.
+    const ctx = createExecutionContext();
+    const declared = await s.app.request(
+      '/w/clubhack/emoji',
+      {
+        method: 'POST',
+        headers: { Origin: 'https://app.test', Cookie: s.owner.cookie, 'Content-Type': 'multipart/form-data; boundary=x', 'Content-Length': '200000' },
+        body: big,
+      },
+      env,
+      ctx,
+    );
+    expect(declared.status).toBe(413);
+    expect(await errCode(declared)).toBe('too_large');
+    // A streamed body without Content-Length is cut off at the limit too.
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (let i = 0; i < 4; i++) controller.enqueue(new Uint8Array(50_000));
+        controller.close();
+      },
+    });
+    const streamed = await s.app.request(
+      '/w/clubhack/emoji',
+      {
+        method: 'POST',
+        headers: { Origin: 'https://app.test', Cookie: s.owner.cookie, 'Content-Type': 'multipart/form-data; boundary=x' },
+        body: stream,
+        // @ts-expect-error duplex is required for stream bodies but missing from the RequestInit type
+        duplex: 'half',
+      },
+      env,
+      createExecutionContext(),
+    );
+    expect(streamed.status).toBe(413);
+    // Not multipart at all.
+    const bad = await send(s.app, 'POST', '/w/clubhack/emoji', { name: 'x' }, s.owner.cookie);
+    expect(bad.status).toBe(400);
+    expect(await errCode(bad)).toBe('invalid_request');
+  });
+
+  it('name rules', async () => {
+    const s = await setup();
+    const upper = await uploadEmoji(s.app, s.owner.cookie, 'Party', png(32, 32));
+    expect(upper.status).toBe(400);
+    expect(await errCode(upper)).toBe('invalid_name');
+    const long = await uploadEmoji(s.app, s.owner.cookie, 'a'.repeat(33), png(32, 32));
+    expect(long.status).toBe(400);
+    expect(await errCode(long)).toBe('invalid_name');
+    for (const name of ['smile', 'thumbsup']) {
+      const res = await uploadEmoji(s.app, s.owner.cookie, name, png(32, 32));
+      expect(res.status).toBe(409);
+      expect(await errCode(res)).toBe('name_taken');
+    }
+    await created(await uploadEmoji(s.app, s.owner.cookie, 'partyparrot', png(32, 32)));
+    const dup = await uploadEmoji(s.app, s.owner.cookie, 'partyparrot', gif(40, 40));
+    expect(dup.status).toBe(409);
+    expect(await errCode(dup)).toBe('name_taken');
+    expect(await objectCount()).toBe(1);
+    const n = await env.DB.prepare("SELECT COUNT(*) AS n FROM custom_emoji WHERE name = 'partyparrot'").first<{ n: number }>();
+    expect(n!.n).toBe(1);
+  });
+
+  it('missing image is invalid_request', async () => {
+    const s = await setup();
+    const form = new FormData();
+    form.set('name', 'noimage');
+    form.set('image', 'not a file');
+    const ctx = createExecutionContext();
+    const res = await s.app.request(
+      '/w/clubhack/emoji',
+      { method: 'POST', headers: { Origin: 'https://app.test', Cookie: s.owner.cookie }, body: form },
+      env,
+      ctx,
+    );
+    expect(res.status).toBe(400);
+    expect(await errCode(res)).toBe('invalid_request');
+  });
+
+  it('members cannot add by default', async () => {
+    const s = await setup();
+    const res = await uploadEmoji(s.app, s.alice.cookie, 'mine', png(32, 32));
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({
+      error: { code: 'forbidden', message: 'Only admins can add custom emoji in this workspace.' },
+    });
+    await env.DB.prepare(`UPDATE workspaces SET settings_json = '{"customEmojiPolicy":"everyone"}' WHERE id = ?`).bind(CLUBHACK_WS).run();
+    await created(await uploadEmoji(s.app, s.alice.cookie, 'mine', png(32, 32)));
+    // Non-members of the slug get 404, not 403; no Origin is 403 bad_origin.
+    expect((await send(s.app, 'POST', '/w/nope/emoji', {}, s.owner.cookie)).status).toBe(404);
+  });
+
+  it('limit_reached at 2,000', async () => {
+    const s = await setup();
+    const stmt = env.DB.prepare(
+      "INSERT INTO custom_emoji (id, workspace_id, name, r2_key, alias_for, created_by, created_at) VALUES (?, ?, ?, 'k', NULL, NULL, 1)",
+    );
+    const rows = Array.from({ length: 2_000 }, (_, i) => stmt.bind(`ID${String(i).padStart(24, '0')}`, CLUBHACK_WS, `e${i}`));
+    for (let i = 0; i < rows.length; i += 500) await env.DB.batch(rows.slice(i, i + 500));
+    const res = await uploadEmoji(s.app, s.owner.cookie, 'onemore', png(32, 32));
+    expect(res.status).toBe(400);
+    expect(await errCode(res)).toBe('limit_reached');
+    expect(await objectCount()).toBe(0);
+  });
+
+  it('serving headers and access', async () => {
+    const s = await setup();
+    const bytes = png(32, 32, 500);
+    bytes[400] = 7;
+    const emoji = await created(await uploadEmoji(s.app, s.owner.cookie, 'served', bytes));
+    const res = await getImage(s.app, `/emoji/${emoji.id}`, { Cookie: s.alice.cookie });
+    expect(res.status).toBe(200);
+    expect(res.headers.get('Content-Type')).toBe('image/png');
+    expect(res.headers.get('X-Content-Type-Options')).toBe('nosniff');
+    expect(res.headers.get('Cache-Control')).toBe('private, max-age=31536000, immutable');
+    expect(res.headers.get('Content-Security-Policy')).toBe("default-src 'none'; sandbox");
+    const etag = res.headers.get('ETag');
+    expect(etag).toBeTruthy();
+    expect(new Uint8Array(await res.arrayBuffer())).toEqual(bytes);
+
+    const cached = await getImage(s.app, `/emoji/${emoji.id}`, { Cookie: s.alice.cookie, 'If-None-Match': etag! });
+    expect(cached.status).toBe(304);
+    expect(cached.headers.get('ETag')).toBe(etag);
+    expect(await cached.text()).toBe('');
+    const stale = await getImage(s.app, `/emoji/${emoji.id}`, { Cookie: s.alice.cookie, 'If-None-Match': '"nope"' });
+    expect(stale.status).toBe(200);
+    await stale.arrayBuffer();
+
+    expect((await getImage(s.app, `/emoji/${emoji.id}`)).status).toBe(401);
+
+    const otherId = await insertCustomEmoji({ name: 'theirs', workspaceId: '01OTHERWS00000000000000000' });
+    await env.BUCKET.put(`ws/01OTHERWS00000000000000000/emoji/${otherId}`, png(32, 32), { httpMetadata: { contentType: 'image/png' } });
+    const other = await getImage(s.app, `/emoji/${otherId}`, { Cookie: s.alice.cookie });
+    expect(other.status).toBe(404);
+    expect(await errCode(other)).toBe('not_found');
+
+    const aliasId = await insertCustomEmoji({ name: 'srv', aliasFor: 'served' });
+    expect((await getImage(s.app, `/emoji/${aliasId}`, { Cookie: s.alice.cookie })).status).toBe(404);
+
+    // Row exists but the object is gone; unknown and malformed ids.
+    const orphan = await insertCustomEmoji({ name: 'orphan' });
+    expect((await getImage(s.app, `/emoji/${orphan}`, { Cookie: s.alice.cookie })).status).toBe(404);
+    expect((await getImage(s.app, '/emoji/01AAAAAAAAAAAAAAAAAAAAAAAA', { Cookie: s.alice.cookie })).status).toBe(404);
+    expect((await getImage(s.app, '/emoji/..%2F..%2Fx', { Cookie: s.alice.cookie })).status).toBe(404);
+
+    // A deactivated member loses access (their session no longer resolves).
+    await env.DB.prepare('UPDATE workspace_members SET deactivated_at = 1 WHERE user_id = ?').bind(s.alice.userId).run();
+    expect((await getImage(s.app, `/emoji/${emoji.id}`, { Cookie: s.alice.cookie })).status).toBe(401);
+  });
+
+  it('upload broadcasts emoji.update', async () => {
+    const s = await setup();
+    const sock = await connect(s.app, s.alice.cookie);
+    const emoji = await created(await uploadEmoji(s.app, s.owner.cookie, 'live', png(32, 32)));
+    const f = await sock.next('emoji.update');
+    expect(f.added[0]!.name).toBe('live');
+    expect(f.added).toEqual([emoji]);
+    expect(f.removed).toEqual([]);
+  });
+});

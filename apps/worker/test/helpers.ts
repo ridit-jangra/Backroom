@@ -70,7 +70,65 @@ export async function resetDb(): Promise<void> {
     ...tables.map((t) => env.DB.prepare(`DELETE FROM ${t}`)),
     env.DB.prepare(`DELETE FROM channels WHERE id NOT IN (${SEED_CHANNELS.map(() => '?').join(',')})`).bind(...SEED_CHANNELS),
     env.DB.prepare('UPDATE channels SET last_seq = 0, topic = NULL, archived_at = NULL'),
+    env.DB.prepare("UPDATE workspaces SET settings_json = '{}'"),
   ]);
+  for (;;) {
+    const page = await env.BUCKET.list();
+    if (page.objects.length > 0) await env.BUCKET.delete(page.objects.map((o) => o.key));
+    if (!page.truncated) break;
+  }
+}
+
+function padTo(header: number[], size?: number): Uint8Array {
+  const out = new Uint8Array(Math.max(header.length, size ?? 0));
+  out.set(header);
+  return out;
+}
+
+const be32 = (n: number) => [(n >>> 24) & 255, (n >>> 16) & 255, (n >>> 8) & 255, n & 255];
+const be16 = (n: number) => [(n >>> 8) & 255, n & 255];
+const le16 = (n: number) => [n & 255, (n >>> 8) & 255];
+
+/** PNG signature + IHDR chunk (zero CRC), padded with zeros to `size`. */
+export function png(w: number, h: number, size?: number): Uint8Array {
+  return padTo(
+    [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, ...be32(13), 0x49, 0x48, 0x44, 0x52, ...be32(w), ...be32(h), 8, 6, 0, 0, 0, 0, 0, 0, 0],
+    size,
+  );
+}
+
+/** GIF89a header + logical screen descriptor + trailer. */
+export function gif(w: number, h: number): Uint8Array {
+  return padTo([0x47, 0x49, 0x46, 0x38, 0x39, 0x61, ...le16(w), ...le16(h), 0, 0, 0, 0x3b]);
+}
+
+/** SOI, an APP0 (JFIF) segment, then SOF0 with the dimensions, then EOI. */
+export function jpeg(w: number, h: number): Uint8Array {
+  const app0 = [0xff, 0xe0, ...be16(16), 0x4a, 0x46, 0x49, 0x46, 0, 1, 1, 0, 0, 1, 0, 1, 0, 0];
+  const sof0 = [0xff, 0xc0, ...be16(17), 8, ...be16(h), ...be16(w), 3, 1, 0x22, 0, 2, 0x11, 1, 3, 0x11, 1];
+  return padTo([0xff, 0xd8, ...app0, ...sof0, 0xff, 0xd9]);
+}
+
+/** Multipart `POST /w/:slug/emoji` (slug `clubhack`) with `name` and `image`, plus Origin. */
+export async function uploadEmoji(
+  app: Hono<AppEnv>,
+  cookie: string,
+  name: string,
+  bytes: Uint8Array,
+  opts: { filename?: string; type?: string } = {},
+): Promise<Response> {
+  const form = new FormData();
+  form.set('name', name);
+  form.set('image', new File([bytes], opts.filename ?? 'emoji.png', { type: opts.type ?? 'image/png' }));
+  const ctx = createExecutionContext();
+  const res = await app.request(
+    '/w/clubhack/emoji',
+    { method: 'POST', headers: { Origin: 'https://app.test', Cookie: cookie }, body: form },
+    env,
+    ctx,
+  );
+  await waitOnExecutionContext(ctx);
+  return res;
 }
 
 /** Generic request with Origin; `body` is JSON-encoded when provided. */
