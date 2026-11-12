@@ -26,7 +26,7 @@ function open(role: 'member' | 'admin', policy: 'admins' | 'everyone' = 'admins'
       const method = init?.method ?? 'GET';
       if (method !== 'GET') calls.push({ url, method, body: init?.body });
       const ok = (b: unknown, status = 200) => new Response(JSON.stringify(b), { status });
-      if (url.endsWith('/bootstrap')) return ok(makeBootstrap({ workspace: { id: 'w', slug: 'clubhack', name: 'Club Hack', settings: { customEmojiPolicy: policy } } }, role));
+      if (/\/bootstrap(\?|$)/.test(url)) return ok(makeBootstrap({ workspace: { id: 'w', slug: 'clubhack', name: 'Club Hack', settings: { customEmojiPolicy: policy } } }, role));
       if (url === '/w/clubhack/emoji' && method === 'GET') return ok({ emoji: current });
       if (url === '/w/clubhack/emoji' && method === 'POST') {
         if (init?.body instanceof FormData) current = [...current, em(String(init.body.get('name')))];

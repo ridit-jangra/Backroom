@@ -56,7 +56,10 @@ export type Bootstrap = {
   me: Me & { role: Role };
   channels: ChannelSummary[];
   members: MemberSummary[];
+  /** Omitted when the request's `?emojiRev=` matches `emojiRev` (P3-R20): keep the held list. */
   customEmoji?: CustomEmoji[];
+  /** P3-R20: revision of the custom emoji list; send it back as `?emojiRev=` on the next bootstrap. */
+  emojiRev?: number;
 };
 
 export type InviteSummary = {

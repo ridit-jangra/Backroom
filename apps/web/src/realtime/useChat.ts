@@ -37,6 +37,8 @@ const TICK_MS = 1_000;
 const ACTIVITY_EVERY_MS = 60_000;
 /** P2-R28: a frame naming a user missing from bootstrap.members refetches bootstrap at most this often. */
 export const MEMBER_REFRESH_MS = 10_000;
+/** emoji.update frames arriving within this window are applied as one state change. */
+export const EMOJI_COALESCE_MS = 50;
 
 /** User IDs a hub frame refers to (authors, typers, presence). */
 function frameUserIds(f: HubFrame): string[] {
@@ -99,14 +101,35 @@ function startSession(
   }
   const sendFrame = (f: ClientFrame): boolean => alive && socket.send(f);
 
-  const dispatch = (e: ChatEvent) => {
-    if (!alive) return;
-    const next = reduce(state, e, Date.now());
+  /** Applies events in order and publishes once. */
+  const apply = (events: ChatEvent[]) => {
+    if (!alive || events.length === 0) return;
+    const now = Date.now();
+    let next = state;
+    for (const e of events) next = reduce(next, e, now);
     if (next === state) return;
     state = next;
     publish(next);
     maybeMarkRead();
   };
+
+  /** emoji.update frames waiting to be applied together (a bulk import sends one per emoji). */
+  let emojiQueue: ChatEvent[] = [];
+  let emojiTimer: ReturnType<typeof setTimeout> | null = null;
+  const takeEmojiQueue = (): ChatEvent[] => {
+    if (emojiTimer !== null) clearTimeout(emojiTimer);
+    emojiTimer = null;
+    const q = emojiQueue;
+    emojiQueue = [];
+    return q;
+  };
+  const queueEmojiUpdate = (f: ChatEvent) => {
+    emojiQueue.push(f);
+    emojiTimer ??= setTimeout(() => apply(takeEmojiQueue()), EMOJI_COALESCE_MS);
+  };
+
+  /** Any other event first applies queued emoji updates, so the reducer always sees frames in arrival order. */
+  const dispatch = (e: ChatEvent) => apply(emojiQueue.length > 0 ? [...takeEmojiQueue(), e] : [e]);
 
   /** mark_read for the viewed channel when it has unread messages, at most once per MARK_READ_INTERVAL_MS per channel. */
   function maybeMarkRead() {
@@ -122,10 +145,17 @@ function startSession(
     }
   }
 
+  /** P3-R20: rev of the custom emoji list in `state`, sent back so an unchanged list is not re-sent. */
+  let emojiRev: number | null = null;
+
   const loadBootstrap = async (): Promise<boolean> => {
     try {
-      const b = await api<Bootstrap>(`/w/${encodeURIComponent(slug)}/bootstrap`);
+      const q = emojiRev === null ? '' : `?emojiRev=${emojiRev}`;
+      const b = await api<Bootstrap>(`/w/${encodeURIComponent(slug)}/bootstrap${q}`);
+      if (!alive) return false;
       dispatch({ t: 'local.bootstrap', bootstrap: b });
+      // Only a response that carries the list (or confirms ours) may set the rev we claim to hold.
+      if (typeof b.emojiRev === 'number' && (b.customEmoji !== undefined || emojiRev === b.emojiRev)) emojiRev = b.emojiRev;
       return alive;
     } catch (err) {
       if (!alive) return false;
@@ -240,6 +270,10 @@ function startSession(
     // Where the open thread lives, read before `stale` drops its page.
     const tid = state.openThreadId;
     const threadChannel = tid ? (state.threads[tid]?.parent.channelId ?? state.openChannelId) : null;
+    if (f.t === 'emoji.update') {
+      queueEmojiUpdate(f);
+      return;
+    }
     dispatch(f);
     checkMembers(f);
     if (f.t === 'ack') outbox.ack(f.clientId);
@@ -304,6 +338,7 @@ function startSession(
     stop() {
       alive = false;
       clearInterval(tick);
+      takeEmojiQueue();
       window.removeEventListener('keydown', onActivity);
       window.removeEventListener('pointerdown', onActivity);
       window.removeEventListener('focus', onFocus);

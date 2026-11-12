@@ -8,7 +8,7 @@
 
 **Tech Stack:** Node 26, npm workspaces, TypeScript 6.0.3, Hono 4.13.18, zod 4.6.7, Wrangler 4.160.1 (Workers, Durable Objects, D1, **R2**, static assets), Vitest 4.1.12 + `@cloudflare/vitest-pool-workers` 0.23.0, React 19.3.1, Vite 8.3.8, `@testing-library/react` 16.3.3. New, verified on the npm registry 2026-11-12:
 - `emoji-datasource` 16.0.0 (MIT, published 2025-09-24): 1,911 records, `emoji.json` + `categories.json`. Each record has `short_name`, `short_names[]`, `unified`, `name`, `category`, `sort_order`, `skin_variations{}`, `obsoleted_by?`.
-- `@discordapp/twemoji` 16.0.1 (code MIT, graphics CC-BY-4.0, published 2025-07-01): `dist/svg/*.svg`, 3,846 files (9.16 MB, the largest 47,772 B). It covers all 3,786 images emoji-datasource 16 needs (checked).
+- `@discordapp/twemoji` 16.0.1 (code MIT, graphics CC-BY-4.0, published 2025-07-01): `dist/svg/*.svg`, 3,846 files (9.16 MB, the largest 47,772 B). It covers all 3,526 images the generated table references (checked; P3-R1).
 - `fflate` 0.8.3 (MIT, published 2026-05-16, no dependencies): `unzipSync(data, { filter })`, `zipSync` for tests.
 - `@types/node` 26.6.6 (MIT): only for `packages/emoji` tests.
 
@@ -74,7 +74,7 @@ Out of scope:
   - `Content-Security-Policy: default-src 'none'; sandbox`
   - `ETag`; `If-None-Match` ⇒ `304`
   - Only for active members of the emoji's workspace.
-- **Twemoji art:** served from our origin at `/twemoji/<img>.svg`, never from a CDN, copied into `apps/web/public/twemoji/` (git-ignored) before `vite build`/`dev`. The copy has 3,786 files and must be ≤ 19,000 files in total with each file ≤ 26,214,400 bytes (§13).
+- **Twemoji art:** served from our origin at `/twemoji/<img>.svg`, never from a CDN, copied into `apps/web/public/twemoji/` (git-ignored) before `vite build`/`dev`. The copy has 3,526 files and must be ≤ 19,000 files in total with each file ≤ 26,214,400 bytes (§13).
 - **Attribution:** exact copy "Emoji graphics by Twemoji, CC-BY 4.0" on the About page (`/about`), with links to `https://github.com/jdecked/twemoji` and `https://creativecommons.org/licenses/by/4.0/`.
 - `run_worker_first` becomes `["/auth/*", "/me", "/w/*", "/invites/*", "/health", "/channels/*", "/messages/*", "/emoji/*", "/ws"]`. Static Twemoji live under `/twemoji/` precisely so they never collide with `/emoji/*`.
 - **Linear time:** shortcode scanning, like the Phase 2 tokenizer (Task 10 of Phase 2), is linear in body length. A 100,000-char body tokenizes in < 50 ms.
@@ -171,7 +171,7 @@ it('search ranks prefix matches first and reports the matched alias', () => {
     - `':heart::skin-tone-3:'` ⇒ `heart` `{ index: 0, length: 7 }`, then the standalone `skin-tone-3` swatch `{ index: 7, length: 13 }` (heart takes no tone)
     - `':a'.repeat(50_000)` (`a` is a real code) and `':'.repeat(100_000)` each finish in < 50 ms
   - `parseReactionCode and formatShortcode round-trip; reject ":wave:", "Wave", "wave::skin-tone-7", 65-char names`.
-  `test/copy.test.ts`: `copies exactly the needed SVGs within asset limits` — into `mkdtempSync`: `count` 3,786, every file ≤ 26,214,400 bytes, `1f44d.svg` and `23-20e3.svg` exist.
+  `test/copy.test.ts`: `copies exactly the needed SVGs within asset limits` — into `mkdtempSync`: `count` 3,526, every file ≤ 26,214,400 bytes, `1f44d.svg` and `23-20e3.svg` exist.
 - [ ] **Step 2: Run** `npm install && npm test -w packages/emoji` → FAIL (modules missing).
 - [ ] **Step 3: Implement** both scripts, `types.ts`, `shortcodes.ts`, `search.ts` and `index.ts` per Interfaces; add the root `postinstall` and the `.gitignore` lines.
 - [ ] **Step 4: Run** `npm install && npm test -w packages/emoji` → PASS. Run `git status --short` → `src/generated/` is not listed.
@@ -535,7 +535,7 @@ it('wire compatibility both ways', () => {
   - `works when localStorage throws` — `vi.spyOn(Storage.prototype, 'getItem'/'setItem')` throwing ⇒ defaults, and no exception escapes.
 - [ ] **Step 2: Run** `npm test -w apps/web` → FAIL.
 - [ ] **Step 3: Implement** per Interfaces.
-- [ ] **Step 4: Run** `npm test -w apps/web` → PASS. Run `npm run build -w apps/web && find apps/web/dist/twemoji -name '*.svg' | wc -l && find apps/web/dist -type f | wc -l` → `3786`, then a number below `20000`; `apps/web/dist/_headers` exists.
+- [ ] **Step 4: Run** `npm test -w apps/web` → PASS. Run `npm run build -w apps/web && find apps/web/dist/twemoji -name '*.svg' | wc -l && find apps/web/dist -type f | wc -l` → `3526`, then a number below `20000`; `apps/web/dist/_headers` exists.
 - [ ] **Step 5: Commit** `git add -A && git commit -m "feat(web): twemoji assets, emoji rendering in messages, About page"`
 
 ### Task 9: Emoji picker and composer `:` autocomplete
@@ -732,7 +732,7 @@ it('wire compatibility both ways', () => {
 - Produces: a README section "Emoji & reactions (Phase 3)":
   - what works;
   - operator step `npx wrangler r2 bucket create backroom` before the first deploy;
-  - that `npm install` generates the emoji table and `npm run build` copies 3,786 Twemoji SVGs into `apps/web/dist/twemoji/`;
+  - that `npm install` generates the emoji table and `npm run build` copies 3,526 Twemoji SVGs into `apps/web/dist/twemoji/`;
   - the `run_worker_first` list from Global Constraints;
   - the custom emoji limits and `PATCH /w/:slug/settings`;
   - the Twemoji CC-BY 4.0 attribution;

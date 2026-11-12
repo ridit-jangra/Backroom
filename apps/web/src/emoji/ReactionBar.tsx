@@ -4,6 +4,7 @@ import { useEmoji } from './EmojiContext';
 import { EmojiImg } from './EmojiImg';
 
 const MAX_NAMES = 10;
+const DELETED_TITLE = 'This emoji was deleted';
 
 /** "You" first, then the others in reaction order; at most 10 names, then "and N others". */
 export function reactionTooltip(userIds: string[], me: string, members: MemberSummary[], emoji: string): string {
@@ -41,15 +42,17 @@ export function ReactionBar({
         const tip = reactionTooltip(r.userIds, me, members, r.emoji);
         const p = parseReactionCode(r.emoji);
         const res = p ? resolve(p.name, p.tone) : null;
+        // A code that no longer resolves (its custom emoji was deleted) cannot be added to, only removed from.
+        const gone = res === null && !mine;
         return (
           <button
             key={r.emoji}
             type="button"
             className="reaction"
             aria-pressed={mine}
-            title={tip}
-            aria-label={tip}
-            disabled={!connected}
+            title={gone ? DELETED_TITLE : tip}
+            aria-label={gone ? `${tip} (${DELETED_TITLE.toLowerCase()})` : tip}
+            disabled={!connected || gone}
             onClick={() => onToggle(r.emoji, !mine)}
           >
             {res ? <EmojiImg e={res} /> : `:${r.emoji}:`} <span className="reaction-count">{r.userIds.length}</span>

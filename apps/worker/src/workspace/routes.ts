@@ -12,8 +12,13 @@ import { getBootstrap, getMe } from './bootstrap';
 
 export const workspaceRoutes = new Hono<AppEnv>();
 
+/** `?emojiRev=N` (P3-R20): the rev of the custom emoji list the client holds; anything that is not a plain integer is ignored. */
+const EMOJI_REV_RE = /^\d{1,15}$/;
+
 workspaceRoutes.get('/w/:slug/bootstrap', requireSession, async (c) => {
-  return c.json(await getBootstrap(c.env.DB, c.req.param('slug'), c.var.session!.userId));
+  const rev = c.req.query('emojiRev');
+  const held = rev !== undefined && EMOJI_REV_RE.test(rev) ? Number(rev) : null;
+  return c.json(await getBootstrap(c.env.DB, c.req.param('slug'), c.var.session!.userId, held));
 });
 
 workspaceRoutes.get('/me', requireSession, async (c) => c.json(await getMe(c.env.DB, c.var.session!.userId)));
@@ -65,7 +70,7 @@ workspaceRoutes.patch('/w/:slug/settings', requireSession, async (c) => {
   if (role !== 'owner') throw new ApiError(403, 'forbidden', 'Only the owner can change workspace settings.');
   const { customEmojiPolicy } = WorkspaceSettingsPatchBody.parse(await readJson(c));
   const row = await c.env.DB.prepare(
-    `UPDATE workspaces SET settings_json = json_set(COALESCE(settings_json, '{}'), '$.customEmojiPolicy', ?) WHERE id = ? RETURNING settings_json AS settingsJson`,
+    `UPDATE workspaces SET settings_json = json_set(CASE WHEN json_valid(settings_json) THEN settings_json ELSE '{}' END, '$.customEmojiPolicy', ?) WHERE id = ? RETURNING settings_json AS settingsJson`,
   )
     .bind(customEmojiPolicy, workspaceId)
     .first<{ settingsJson: string | null }>();

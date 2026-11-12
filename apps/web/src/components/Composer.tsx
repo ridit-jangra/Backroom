@@ -210,46 +210,48 @@ export function Composer({
           ))}
         </ul>
       )}
-      <textarea
-        ref={area}
-        aria-label={placeholder}
-        aria-controls={listOpen ? listboxId : undefined}
-        aria-expanded={listOpen}
-        aria-activedescendant={
-          open ? optionId(matches[activeIdx]!.id) : emojiOpen ? emojiOptionId(activeIdx) : undefined
-        }
-        placeholder={placeholder}
-        value={text}
-        rows={2}
-        onChange={(e) => {
-          const v = e.target.value;
-          setText(v);
-          setCaret(e.target.selectionStart ?? v.length);
-          setActive(0);
-          setDismissed(false);
-          if (v !== '') {
-            const now = Date.now();
-            if (lastTyping.current === null || now - lastTyping.current >= TYPING_THROTTLE_MS) {
-              lastTyping.current = now;
-              onTyping?.();
-            }
+      <div className="composer-input">
+        <textarea
+          ref={area}
+          aria-label={placeholder}
+          aria-controls={listOpen ? listboxId : undefined}
+          aria-expanded={listOpen}
+          aria-activedescendant={
+            open ? optionId(matches[activeIdx]!.id) : emojiOpen ? emojiOptionId(activeIdx) : undefined
           }
-        }}
-        onSelect={(e) => setCaret(e.currentTarget.selectionStart ?? text.length)}
-        onKeyDown={onKeyDown}
-      />
-      <button
-        type="button"
-        aria-label="Emoji"
-        aria-haspopup="dialog"
-        aria-expanded={pickerOpen}
-        ref={trigger}
-        data-emoji-trigger
-        className="emoji-trigger"
-        onClick={() => setPickerOpen((o) => !o)}
-      >
-        ☺
-      </button>
+          placeholder={placeholder}
+          value={text}
+          rows={2}
+          onChange={(e) => {
+            const v = e.target.value;
+            setText(v);
+            setCaret(e.target.selectionStart ?? v.length);
+            setActive(0);
+            setDismissed(false);
+            if (v !== '') {
+              const now = Date.now();
+              if (lastTyping.current === null || now - lastTyping.current >= TYPING_THROTTLE_MS) {
+                lastTyping.current = now;
+                onTyping?.();
+              }
+            }
+          }}
+          onSelect={(e) => setCaret(e.currentTarget.selectionStart ?? text.length)}
+          onKeyDown={onKeyDown}
+        />
+        <button
+          type="button"
+          aria-label="Emoji"
+          aria-haspopup="dialog"
+          aria-expanded={pickerOpen}
+          ref={trigger}
+          data-emoji-trigger
+          className="emoji-trigger"
+          onClick={() => setPickerOpen((o) => !o)}
+        >
+          ☺
+        </button>
+      </div>
       {pickerOpen && <EmojiPicker label="Insert emoji" trigger={trigger} onPick={insertPicked} onClose={() => setPickerOpen(false)} />}
       {tooLong && <p role="alert">Message is too long (max 40,000 characters).</p>}
     </div>

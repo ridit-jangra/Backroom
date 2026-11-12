@@ -12,6 +12,7 @@ beforeEach(() => {
   localStorage.clear();
 });
 afterEach(() => {
+  vi.useRealTimers();
   cleanup();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
@@ -129,7 +130,8 @@ describe('reactions', () => {
     const ws = await setup([msg(1, { body: 'look :partyparrot:', reactions: [{ emoji: 'partyparrot', userIds: [BOB] }] })], [partyparrot], 'look');
     await vi.waitFor(() => expect(document.querySelectorAll(`img[src="/emoji/${pid}"]`)).toHaveLength(2));
     act(() => ws.receive({ t: 'emoji.update', added: [], removed: [pid] }));
-    expect(document.querySelector('img[src^="/emoji/"]')).toBeNull();
+    // emoji.update frames are coalesced for a moment before they apply.
+    await vi.waitFor(() => expect(document.querySelector('img[src^="/emoji/"]')).toBeNull());
     expect(document.querySelector('.msg-body')!.textContent).toBe('look :partyparrot:');
     expect(document.querySelector('.reaction')!.textContent).toContain(':partyparrot:');
   });
@@ -165,9 +167,6 @@ describe('reactions', () => {
 
   it('a pill toggle that cannot be sent shows the inline error', async () => {
     const ws = await setup([msg(1, { reactions: [{ emoji: '+1', userIds: [BOB] }] })]);
-    vi.spyOn(ws, 'send').mockImplementation(() => {
-      throw new Error('closed');
-    });
     ws.readyState = 3;
     // Not connected state flows from the socket layer; a failed send reports false.
     await userEvent.click(await screen.findByRole('button', { name: 'Bob reacted with :+1:' }));
@@ -178,10 +177,17 @@ describe('reactions', () => {
     const ws = await setup([msg(1)]);
     await userEvent.click(await screen.findByRole('button', { name: 'Add reaction' }));
     expect(screen.getByRole('dialog', { name: 'Add reaction' })).toBeTruthy();
+    vi.useFakeTimers({ shouldAdvanceTime: true });
     act(() => ws.serverClose(1006));
     await vi.waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
-    act(() => FakeWebSocket.instances.at(-1)!.open());
-    await screen.findByRole('button', { name: 'Add reaction' });
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    // backoffDelay(0, r) is at most 1 s: the socket reconnects with a new instance.
+    await act(() => vi.advanceTimersByTimeAsync(1_000));
+    expect(FakeWebSocket.instances).toHaveLength(2);
+    const next = FakeWebSocket.instances[1]!;
+    act(() => next.open());
+    expect(frames(next)[0]).toMatchObject({ t: 'hello' });
+    await vi.waitFor(() => expect((screen.getByRole('button', { name: 'Add reaction' }) as HTMLButtonElement).disabled).toBe(false));
     expect(screen.queryByRole('dialog')).toBeNull();
   });
 

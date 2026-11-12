@@ -1,6 +1,6 @@
 import type { Bootstrap, MemberSummary, Me, Role } from '@backroom/protocol';
 import { SUMMARY_COLUMNS, rowToSummary, type SummaryRow } from '../channels/channels';
-import { customEmojiStatement, readSettings, rowToCustomEmoji, type CustomEmojiRow } from '../emoji/custom';
+import { EMOJI_REV_SQL, readSettings, rowToCustomEmoji, type CustomEmojiRow } from '../emoji/custom';
 import { requireMember } from './access';
 
 const DISPLAY = "COALESCE(u.display_name, substr(u.email, 1, instr(u.email, '@') - 1))";
@@ -14,11 +14,15 @@ export async function getMe(db: D1Database, userId: string): Promise<Me> {
   return row;
 }
 
-export async function getBootstrap(db: D1Database, slug: string, userId: string): Promise<Bootstrap> {
+/**
+ * P3-R20: with `heldEmojiRev` equal to the workspace's current `emojiRev`, `customEmoji` is omitted (the client keeps
+ * its list). The rev and the list are read in the same batch, so they always describe the same state.
+ */
+export async function getBootstrap(db: D1Database, slug: string, userId: string, heldEmojiRev: number | null = null): Promise<Bootstrap> {
   const { workspaceId, role } = await requireMember(db, slug, userId);
 
   const [ws, me, channels, members, emoji] = await db.batch([
-    db.prepare('SELECT id, slug, name, settings_json AS settingsJson FROM workspaces WHERE id = ?').bind(workspaceId),
+    db.prepare(`SELECT id, slug, name, settings_json AS settingsJson, ${EMOJI_REV_SQL} AS emojiRev FROM workspaces WHERE id = ?`).bind(workspaceId),
     db.prepare(`SELECT u.id AS id, u.email AS email, ${DISPLAY} AS displayName FROM users u WHERE u.id = ?`).bind(userId),
     db
       .prepare(
@@ -38,15 +42,30 @@ export async function getBootstrap(db: D1Database, slug: string, userId: string)
          ORDER BY LOWER(${DISPLAY}), u.id`,
       )
       .bind(workspaceId),
-    customEmojiStatement(db, workspaceId),
+    db
+      .prepare(
+        `SELECT id, name, r2_key, alias_for, created_by, created_at FROM custom_emoji
+         WHERE workspace_id = ?1 AND ?2 IS NOT (SELECT ${EMOJI_REV_SQL} FROM workspaces WHERE id = ?1)
+         ORDER BY name`,
+      )
+      .bind(workspaceId, heldEmojiRev),
   ]);
-  const { settingsJson, ...workspace } = ws!.results[0] as { id: string; slug: string; name: string; settingsJson: string | null };
+  const { settingsJson, emojiRev: rawRev, ...workspace } = ws!.results[0] as {
+    id: string;
+    slug: string;
+    name: string;
+    settingsJson: string | null;
+    emojiRev: unknown;
+  };
+  const emojiRev = typeof rawRev === 'number' ? rawRev : 0;
+  const unchanged = heldEmojiRev !== null && heldEmojiRev === emojiRev;
 
   return {
     workspace: { ...workspace, settings: readSettings(settingsJson) },
     me: { ...(me!.results[0] as Me), role: role as Role },
     channels: (channels!.results as SummaryRow[]).map(rowToSummary),
-    customEmoji: (emoji!.results as CustomEmojiRow[]).map(rowToCustomEmoji),
+    ...(unchanged ? {} : { customEmoji: (emoji!.results as CustomEmojiRow[]).map(rowToCustomEmoji) }),
+    emojiRev,
     // P2-R28: deactivated members stay listed (flagged) so their old messages keep a name.
     members: (members!.results as (Omit<MemberSummary, 'deactivated'> & { deactivated: number })[]).map(({ deactivated, ...m }) =>
       deactivated ? { ...m, deactivated: true } : m,

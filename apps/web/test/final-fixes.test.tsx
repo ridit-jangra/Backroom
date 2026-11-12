@@ -98,7 +98,7 @@ describe('deactivated and unknown members (P2-R28)', () => {
   });
 
   it('a frame from a user not in members refreshes bootstrap once per 10 s', async () => {
-    const isBootstrap = (u: string) => u.endsWith('/bootstrap');
+    const isBootstrap = (u: string) => /\/bootstrap(\?|$)/.test(u);
     stubApi();
     const ws = await boot();
     await screen.findByRole('button', { name: '#general' });

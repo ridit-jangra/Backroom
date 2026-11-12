@@ -32,6 +32,10 @@ describe('ws frames', () => {
     expect(parseHubFrame('{"t":"message.new"}')).toBeNull();
     expect(parseHubFrame('nope')).toBeNull();
   });
+  it('parseHubFrame returns null for an unknown hub frame type (old clients ignore new frames)', () => {
+    expect(parseHubFrame('{"t":"future_hub_thing"}')).toBeNull();
+    expect(parseHubFrame('{"t":"future_hub_thing","x":1}')).toBeNull();
+  });
   it('parses hello, ping, activity and rejects oversize lastSeen', () => {
     expect(parseClientFrame(JSON.stringify({ t: 'hello', lastSeen: { [GN]: 3 } })).ok).toBe(true);
     expect(parseClientFrame('{"t":"ping"}').ok).toBe(true);

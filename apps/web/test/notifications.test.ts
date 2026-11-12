@@ -96,7 +96,7 @@ describe('notifications', () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(async (url: string) =>
-        url.endsWith('/bootstrap')
+        /\/bootstrap(\?|$)/.test(url)
           ? new Response(JSON.stringify(bootstrap), { status: 200 })
           : new Response(JSON.stringify({ messages: [], hasMore: false }), { status: 200 }),
       ),

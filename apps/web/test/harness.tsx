@@ -53,7 +53,7 @@ export function stubApi(opts: { bootstrap?: () => Bootstrap; pages?: Record<stri
       const custom = opts.route?.(url, init);
       if (custom instanceof Response) return custom;
       if (custom !== undefined) return new Response(JSON.stringify(custom), { status: 200 });
-      if (url.endsWith('/bootstrap')) return new Response(JSON.stringify((opts.bootstrap ?? makeBootstrap)()), { status: 200 });
+      if (/\/bootstrap(\?|$)/.test(url)) return new Response(JSON.stringify((opts.bootstrap ?? makeBootstrap)()), { status: 200 });
       const hist = /^\/channels\/([0-9A-Z]{26})\/messages\?/.exec(url);
       if (hist) return new Response(JSON.stringify(opts.pages?.[hist[1]!] ?? { messages: [], hasMore: false }), { status: 200 });
       return new Response(JSON.stringify({ error: { code: 'not_found', message: 'nf' } }), { status: 404 });

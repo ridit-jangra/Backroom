@@ -17,7 +17,7 @@ import { ApiError } from '../lib/errors';
 import { requireSession } from '../middleware/session';
 import { requireMember } from '../workspace/access';
 import { readJson } from '../lib/http';
-import { createCustomAlias, createCustomEmoji, deleteCustomEmoji, limitReached, listCustomEmoji, readSettings } from './custom';
+import { createCustomAlias, createCustomEmoji, deleteCustomEmoji, limitReached, listCustomEmoji, nameTaken, readSettings } from './custom';
 import { sniffImage } from './image';
 
 export const emojiRoutes = new Hono<AppEnv>();
@@ -122,8 +122,16 @@ emojiRoutes.post('/w/:slug/emoji', requireSession, async (c) => {
 
   if (lookupEmoji(name)) throw new ApiError(409, 'name_taken', 'That name is used by a built-in emoji.');
 
-  const count = await db.prepare('SELECT COUNT(*) AS n FROM custom_emoji WHERE workspace_id = ?').bind(workspaceId).first<{ n: number }>();
-  if ((count?.n ?? 0) >= CUSTOM_EMOJI_LIMIT) throw limitReached();
+  // Name and limit are checked before the R2 PUT; the insert re-checks both (constraint / conditional insert) for races.
+  const pre = await db
+    .prepare(
+      `SELECT COUNT(*) AS n, EXISTS (SELECT 1 FROM custom_emoji WHERE workspace_id = ?1 AND name = ?2) AS taken
+       FROM custom_emoji WHERE workspace_id = ?1`,
+    )
+    .bind(workspaceId, name)
+    .first<{ n: number; taken: number }>();
+  if (pre?.taken) throw nameTaken();
+  if ((pre?.n ?? 0) >= CUSTOM_EMOJI_LIMIT) throw limitReached();
 
   const emoji = await createCustomEmoji(c.env, { workspaceId, userId, name, bytes, mime: sniffed.mime, now: c.var.deps.now() });
 

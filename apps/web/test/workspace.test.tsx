@@ -53,7 +53,7 @@ function stub(opts: { bootstrap?: Bootstrap; pages?: Pages; logout?: number | 'n
     'fetch',
     vi.fn(async (url: string) => {
       calls.push(url);
-      if (url.endsWith('/bootstrap')) return new Response(JSON.stringify(opts.bootstrap ?? makeBootstrap()), { status: 200 });
+      if (/\/bootstrap(\?|$)/.test(url)) return new Response(JSON.stringify(opts.bootstrap ?? makeBootstrap()), { status: 200 });
       if (url === '/me') return new Response(JSON.stringify({ id: ME }), { status: 200 });
       const hist = /^\/channels\/([0-9A-Z]{26})\/messages\?(.*)$/.exec(url);
       if (hist) {
@@ -402,7 +402,7 @@ describe('Fix round 1', () => {
     const impl = ok.getMockImplementation()!;
     let first = true;
     ok.mockImplementation(async (url) => {
-      if (String(url).endsWith('/bootstrap') && first) {
+      if (/\/bootstrap(\?|$)/.test(String(url)) && first) {
         first = false;
         return new Response(JSON.stringify({ error: { code: 'internal', message: 'Server hiccup' } }), { status: 500 });
       }

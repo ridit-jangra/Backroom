@@ -54,12 +54,28 @@ export async function listCustomEmoji(db: D1Database, workspaceId: string): Prom
   return results.map(rowToCustomEmoji);
 }
 
+/** The workspace's current custom emoji revision (P3-R20), as a SQL expression over `settings_json`; 0 when unset or the JSON is corrupt. */
+export const EMOJI_REV_SQL = "COALESCE(CASE WHEN json_valid(settings_json) THEN json_extract(settings_json, '$.emojiRev') END, 0)";
+
+/**
+ * P3-R20: bumps `emojiRev` in the workspace settings. Put it in the same `db.batch` as the custom emoji change.
+ * With `ifRowId`, the bump only happens when that custom_emoji row exists (i.e. a conditional insert actually inserted).
+ */
+export function bumpEmojiRev(db: D1Database, workspaceId: string, ifRowId?: string): D1PreparedStatement {
+  const sql = `UPDATE workspaces
+     SET settings_json = json_set(CASE WHEN json_valid(settings_json) THEN settings_json ELSE '{}' END, '$.emojiRev', ${EMOJI_REV_SQL} + 1)
+     WHERE id = ?1${ifRowId === undefined ? '' : ' AND EXISTS (SELECT 1 FROM custom_emoji WHERE id = ?2)'}`;
+  return ifRowId === undefined ? db.prepare(sql).bind(workspaceId) : db.prepare(sql).bind(workspaceId, ifRowId);
+}
+
 export function emojiKey(workspaceId: string, emojiId: string): string {
   return `ws/${workspaceId}/emoji/${emojiId}`;
 }
 
-const isNameTaken = (e: unknown) =>
-  e instanceof Error && /UNIQUE constraint failed: custom_emoji\.workspace_id, custom_emoji\.name/.test(e.message);
+const NAME_TAKEN_RE = /UNIQUE constraint failed: custom_emoji\.workspace_id, custom_emoji\.name/;
+const isNameTaken = (e: unknown): boolean =>
+  e instanceof Error && (NAME_TAKEN_RE.test(e.message) || (e.cause !== undefined && isNameTaken(e.cause)));
+export const nameTaken = () => new ApiError(409, 'name_taken', 'A custom emoji with that name already exists.');
 
 /**
  * Stores the image in R2, then inserts the row. The insert re-checks the per-workspace limit so
@@ -74,17 +90,19 @@ export async function createCustomEmoji(
   await env.BUCKET.put(key, input.bytes, { httpMetadata: { contentType: input.mime } });
   let inserted: boolean;
   try {
-    const r = await env.DB.prepare(
-      `INSERT INTO custom_emoji (id, workspace_id, name, r2_key, alias_for, created_by, created_at)
-       SELECT ?1, ?2, ?3, ?4, NULL, ?5, ?6
-       WHERE (SELECT COUNT(*) FROM custom_emoji WHERE workspace_id = ?2) < ?7`,
-    )
-      .bind(id, input.workspaceId, input.name, key, input.userId, input.now, CUSTOM_EMOJI_LIMIT)
-      .run();
-    inserted = r.meta.changes === 1;
+    const [r] = await env.DB.batch([
+      env.DB.prepare(
+        `INSERT INTO custom_emoji (id, workspace_id, name, r2_key, alias_for, created_by, created_at)
+         SELECT ?1, ?2, ?3, ?4, NULL, ?5, ?6
+         WHERE (SELECT COUNT(*) FROM custom_emoji WHERE workspace_id = ?2) < ?7`,
+      ).bind(id, input.workspaceId, input.name, key, input.userId, input.now, CUSTOM_EMOJI_LIMIT),
+      bumpEmojiRev(env.DB, input.workspaceId, id),
+    ]);
+    inserted = r!.meta.changes === 1;
   } catch (e) {
     await cleanupObject(env, key);
-    if (isNameTaken(e)) throw new ApiError(409, 'name_taken', 'A custom emoji with that name already exists.');
+    // Fallback for a concurrent upload of the same name; the route's pre-check catches the common case before the PUT.
+    if (isNameTaken(e)) throw nameTaken();
     throw e;
   }
   if (!inserted) {
@@ -123,18 +141,20 @@ export async function createCustomAlias(
   const id = newId(input.now);
   let changes: number;
   try {
-    const r = await db
-      .prepare(
-        `INSERT INTO custom_emoji (id, workspace_id, name, r2_key, alias_for, created_by, created_at)
-         SELECT ?1, ?2, ?3, NULL, ?4, ?5, ?6
-         WHERE (SELECT COUNT(*) FROM custom_emoji WHERE workspace_id = ?2) < ?7
-           AND (?8 = 1 OR EXISTS (SELECT 1 FROM custom_emoji WHERE workspace_id = ?2 AND name = ?4 AND alias_for IS NULL))`,
-      )
-      .bind(id, input.workspaceId, input.name, target, input.userId, input.now, CUSTOM_EMOJI_LIMIT, builtin ? 1 : 0)
-      .run();
-    changes = r.meta.changes;
+    const [r] = await db.batch([
+      db
+        .prepare(
+          `INSERT INTO custom_emoji (id, workspace_id, name, r2_key, alias_for, created_by, created_at)
+           SELECT ?1, ?2, ?3, NULL, ?4, ?5, ?6
+           WHERE (SELECT COUNT(*) FROM custom_emoji WHERE workspace_id = ?2) < ?7
+             AND (?8 = 1 OR EXISTS (SELECT 1 FROM custom_emoji WHERE workspace_id = ?2 AND name = ?4 AND alias_for IS NULL))`,
+        )
+        .bind(id, input.workspaceId, input.name, target, input.userId, input.now, CUSTOM_EMOJI_LIMIT, builtin ? 1 : 0),
+      bumpEmojiRev(db, input.workspaceId, id),
+    ]);
+    changes = r!.meta.changes;
   } catch (e) {
-    if (isNameTaken(e)) throw new ApiError(409, 'name_taken', 'A custom emoji with that name already exists.');
+    if (isNameTaken(e)) throw nameTaken();
     throw e;
   }
   if (changes !== 1) {
@@ -172,6 +192,7 @@ export async function deleteCustomEmoji(
   await env.DB.batch([
     env.DB.prepare('DELETE FROM custom_emoji WHERE id = ?').bind(row.id),
     env.DB.prepare('DELETE FROM custom_emoji WHERE workspace_id = ? AND alias_for = ?').bind(row.workspaceId, row.aliasFor === null ? row.name : ''),
+    bumpEmojiRev(env.DB, row.workspaceId),
   ]);
   const keys = [row.r2Key, ...aliasRows.map((a) => a.r2Key)].filter((k): k is string => k !== null);
   for (const k of keys) await cleanupObject(env, k);

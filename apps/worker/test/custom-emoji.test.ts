@@ -398,3 +398,90 @@ describe('custom emoji aliases, delete, policy', () => {
     await img.arrayBuffer();
   });
 });
+
+describe('emojiRev (P3-R20) and final-review fixes', () => {
+  const rev = async () =>
+    (await env.DB.prepare("SELECT json_extract(settings_json, '$.emojiRev') AS r FROM workspaces WHERE id = ?").bind(CLUBHACK_WS).first<{ r: number | null }>())!.r ?? 0;
+  const boot = async (app: Hono<AppEnv>, cookie: string, q = '') =>
+    (await (await send(app, 'GET', `/w/clubhack/bootstrap${q}`, undefined, cookie)).json()) as { customEmoji?: CustomEmoji[]; emojiRev?: number };
+
+  it('rev bumps on upload, alias and delete, but not on a failed insert', async () => {
+    const s = await setup();
+    expect(await rev()).toBe(0);
+    const e = await created(await uploadEmoji(s.app, s.owner.cookie, 'partyparrot', png(32, 32)));
+    expect(await rev()).toBe(1);
+    await created(await send(s.app, 'POST', '/w/clubhack/emoji', { name: 'pp', aliasFor: 'partyparrot' }, s.owner.cookie));
+    expect(await rev()).toBe(2);
+    expect((await send(s.app, 'POST', '/w/clubhack/emoji', { name: 'x1', aliasFor: 'nope' }, s.owner.cookie)).status).toBe(400);
+    expect((await send(s.app, 'POST', '/w/clubhack/emoji', { name: 'pp', aliasFor: 'tada' }, s.owner.cookie)).status).toBe(409);
+    expect(await rev()).toBe(2);
+    expect((await send(s.app, 'DELETE', `/emoji/${e.id}`, undefined, s.owner.cookie)).status).toBe(200);
+    expect(await rev()).toBe(3);
+  });
+
+  it('rev bump keeps other settings and repairs corrupt settings JSON', async () => {
+    const s = await setup();
+    await env.DB.prepare(`UPDATE workspaces SET settings_json = '{"customEmojiPolicy":"everyone"}' WHERE id = ?`).bind(CLUBHACK_WS).run();
+    await created(await uploadEmoji(s.app, s.alice.cookie, 'mine', png(32, 32)));
+    const row = await env.DB.prepare('SELECT settings_json AS j FROM workspaces WHERE id = ?').bind(CLUBHACK_WS).first<{ j: string }>();
+    expect(JSON.parse(row!.j)).toEqual({ customEmojiPolicy: 'everyone', emojiRev: 1 });
+    await env.DB.prepare(`UPDATE workspaces SET settings_json = '{oops' WHERE id = ?`).bind(CLUBHACK_WS).run();
+    expect((await boot(s.app, s.owner.cookie)).emojiRev).toBe(0);
+    await created(await send(s.app, 'POST', '/w/clubhack/emoji', { name: 'yay', aliasFor: 'tada' }, s.owner.cookie));
+    expect(await rev()).toBe(1);
+  });
+
+  it('bootstrap omits customEmoji only when ?emojiRev matches', async () => {
+    const s = await setup();
+    await created(await uploadEmoji(s.app, s.owner.cookie, 'partyparrot', png(32, 32)));
+    const first = await boot(s.app, s.owner.cookie);
+    expect(first.emojiRev).toBe(1);
+    expect(first.customEmoji?.map((e) => e.name)).toEqual(['partyparrot']);
+    const same = await boot(s.app, s.owner.cookie, '?emojiRev=1');
+    expect(same.emojiRev).toBe(1);
+    expect(same).not.toHaveProperty('customEmoji');
+    const stale = await boot(s.app, s.owner.cookie, '?emojiRev=0');
+    expect(stale.customEmoji?.map((e) => e.name)).toEqual(['partyparrot']);
+    const junk = await boot(s.app, s.owner.cookie, '?emojiRev=abc');
+    expect(junk.customEmoji).toHaveLength(1);
+    await created(await send(s.app, 'POST', '/w/clubhack/emoji', { name: 'pp', aliasFor: 'partyparrot' }, s.owner.cookie));
+    const after = await boot(s.app, s.owner.cookie, '?emojiRev=1');
+    expect(after.emojiRev).toBe(2);
+    expect(after.customEmoji?.map((e) => e.name)).toEqual(['partyparrot', 'pp']);
+  });
+
+  it('an empty workspace with matching rev 0 omits the (empty) list', async () => {
+    const s = await setup();
+    const b = await boot(s.app, s.owner.cookie, '?emojiRev=0');
+    expect(b.emojiRev).toBe(0);
+    expect(b).not.toHaveProperty('customEmoji');
+  });
+
+  it('duplicate upload name is 409 before any R2 put', async () => {
+    const s = await setup();
+    await created(await uploadEmoji(s.app, s.owner.cookie, 'dup', png(32, 32)));
+    const realPut = env.BUCKET.put.bind(env.BUCKET);
+    let puts = 0;
+    env.BUCKET.put = ((...args: Parameters<typeof realPut>) => {
+      puts++;
+      return realPut(...args);
+    }) as typeof env.BUCKET.put;
+    try {
+      const res = await uploadEmoji(s.app, s.owner.cookie, 'dup', png(32, 32));
+      expect(res.status).toBe(409);
+      expect(await errCode(res)).toBe('name_taken');
+      expect(puts).toBe(0);
+    } finally {
+      env.BUCKET.put = realPut;
+    }
+    expect(await objectCount()).toBe(1);
+  });
+
+  it('PATCH settings survives corrupt stored settings JSON', async () => {
+    const s = await setup();
+    await env.DB.prepare(`UPDATE workspaces SET settings_json = 'not json' WHERE id = ?`).bind(CLUBHACK_WS).run();
+    const res = await send(s.app, 'PATCH', '/w/clubhack/settings', { customEmojiPolicy: 'everyone' }, s.owner.cookie);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ settings: { customEmojiPolicy: 'everyone' } });
+  });
+});
