@@ -3,6 +3,7 @@ import type { Hono } from 'hono';
 import type { AppEnv, Deps } from '../src/app';
 import type { Mailer } from '../src/auth/mailer';
 import { newId } from '../src/lib/ids';
+import { fileKey, thumbKeyOf } from '../src/files/store';
 
 export function testDeps(overrides: Partial<Deps> = {}): Deps {
   return {
@@ -137,6 +138,80 @@ export async function uploadEmoji(
   );
   await waitOnExecutionContext(ctx);
   return res;
+}
+
+/**
+ * Raw-body `POST /w/:slug/files` (slug `clubhack`) with Origin, Cookie, Content-Type and Content-Length.
+ * `length: null` omits Content-Length and sends the body as a stream (a Request never adds the header itself).
+ */
+export async function uploadFile(
+  app: Hono<AppEnv>,
+  cookie: string,
+  bytes: Uint8Array,
+  opts: { name?: string; type?: string; slug?: string; length?: string | null } = {},
+): Promise<Response> {
+  const headers: Record<string, string> = {
+    Origin: 'https://app.test',
+    Cookie: cookie,
+    'Content-Type': opts.type ?? 'application/octet-stream',
+  };
+  const length = opts.length === undefined ? String(bytes.length) : opts.length;
+  if (length !== null) headers['Content-Length'] = length;
+  const body: BodyInit =
+    length === null
+      ? new ReadableStream<Uint8Array>({
+          start(c) {
+            c.enqueue(bytes);
+            c.close();
+          },
+        })
+      : bytes;
+  const query = opts.name === undefined ? '' : `?name=${encodeURIComponent(opts.name)}`;
+  const ctx = createExecutionContext();
+  const res = await app.request(`/w/${opts.slug ?? 'clubhack'}/files${query}`, { method: 'POST', headers, body }, env, ctx);
+  await waitOnExecutionContext(ctx);
+  return res;
+}
+
+/**
+ * Direct D1 insert of a file row (workspace defaults to `clubhack`); returns its id. Puts `object` (and a
+ * `webp(10,10)` thumbnail when `thumb`) into R2 under the real keys. `r2Key` overrides the stored key (key-guard tests only).
+ */
+export async function insertFile(opts: {
+  uploaderId: string;
+  workspaceId?: string;
+  name?: string;
+  mime?: string;
+  size?: number;
+  createdAt?: number;
+  object?: Uint8Array;
+  thumb?: boolean;
+  r2Key?: string;
+}): Promise<string> {
+  const ws = opts.workspaceId ?? '01JCLUBHACK0000000000000WS';
+  const createdAt = opts.createdAt ?? 1_800_000_000_000;
+  const id = newId(createdAt);
+  const key = fileKey(ws, id);
+  const thumbKey = opts.thumb ? thumbKeyOf(ws, id) : null;
+  if (opts.object) await env.BUCKET.put(key, opts.object);
+  if (thumbKey) await env.BUCKET.put(thumbKey, webp(10, 10), { httpMetadata: { contentType: 'image/webp' } });
+  await env.DB.prepare(
+    `INSERT INTO files (id, workspace_id, uploader_id, r2_key, thumb_key, name, mime, size, width, height, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?)`,
+  )
+    .bind(
+      id,
+      ws,
+      opts.uploaderId,
+      opts.r2Key ?? key,
+      thumbKey,
+      opts.name ?? 'file.bin',
+      opts.mime ?? 'application/octet-stream',
+      opts.size ?? opts.object?.length ?? 0,
+      createdAt,
+    )
+    .run();
+  return id;
 }
 
 /** Generic request with Origin; `body` is JSON-encoded when provided. */

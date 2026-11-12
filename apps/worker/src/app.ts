@@ -11,6 +11,7 @@ import { messagingRoutes } from './messaging/routes';
 import { workspaceRoutes } from './workspace/routes';
 import { wsRoute } from './hub/ws-route';
 import { emojiRoutes } from './emoji/routes';
+import { fileRoutes } from './files/routes';
 
 
 export interface Deps {
@@ -39,6 +40,7 @@ export function createApp(deps: Deps): Hono<AppEnv> {
   app.route('/', channelRoutes);
   app.route('/', messagingRoutes);
   app.route('/', emojiRoutes);
+  app.route('/', fileRoutes);
   app.route('/', wsRoute);
 
   return app;
