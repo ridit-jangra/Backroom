@@ -1,4 +1,5 @@
 import { extractMentions, type ChannelKind, type Message, type NackCode, type ParsedMentions } from '@backroom/protocol';
+import { fileLinkStatements, validateAttachments, withFiles } from '../files/attach';
 import { newId } from '../lib/ids';
 import { canSeeChannel } from './read';
 import { MESSAGE_COLUMNS, rowToMessage } from './rows';
@@ -39,7 +40,7 @@ function mentionStatements(db: D1Database, messageId: string, m: ParsedMentions)
 }
 
 type Context = {
-  channel: { kind: ChannelKind; archivedAt: number | null } | null;
+  channel: { kind: ChannelKind; archivedAt: number | null; workspaceId: string } | null;
   members: MemberNotify[];
   parent: { channelId: string; parentId: string | null; deletedAt: number | null } | null;
   followers: string[];
@@ -48,7 +49,7 @@ type Context = {
 /** One round trip: channel, all members, the parent (if any) and its thread followers. */
 async function loadContext(db: D1Database, channelId: string, parentId: string | null): Promise<Context> {
   const stmts = [
-    db.prepare('SELECT kind, archived_at AS archivedAt FROM channels WHERE id = ?').bind(channelId),
+    db.prepare('SELECT kind, archived_at AS archivedAt, workspace_id AS workspaceId FROM channels WHERE id = ?').bind(channelId),
     db
       .prepare(
         `SELECT cm.user_id AS userId, cm.notify AS notify
@@ -78,14 +79,13 @@ async function loadContext(db: D1Database, channelId: string, parentId: string |
 
 async function loadMessage(db: D1Database, id: string): Promise<Message | null> {
   const row = await db.prepare(`SELECT ${MESSAGE_COLUMNS} FROM messages WHERE id = ?`).bind(id).first<Record<string, unknown>>();
-  return row ? rowToMessage(row) : null;
+  return row ? (await withFiles(db, [rowToMessage(row)]))[0]! : null;
 }
 
 export async function sendMessage(
   db: D1Database,
   input: SendInput,
 ): Promise<{ ok: true; message: Message; duplicate: boolean; audience: Audience } | Fail> {
-  if (input.fileIds.length > 0) return { ok: false, code: 'invalid' };
   const existing = await findDuplicate(db, input);
   if (existing) return existing;
   const ctx = await loadContext(db, input.channelId, input.parentId);
@@ -98,6 +98,14 @@ export async function sendMessage(
     // A deleted parent is a placeholder: it takes no new replies.
     return { ok: false, code: 'invalid' };
   }
+  if (input.body.trim() === '' && input.fileIds.length === 0) return { ok: false, code: 'invalid' };
+  const files = await validateAttachments(db, {
+    fileIds: input.fileIds,
+    userId: input.userId,
+    workspaceId: ctx.channel.workspaceId,
+    now: input.now,
+  });
+  if (!files) return { ok: false, code: 'invalid' };
 
   const audience: Audience = {
     kind: ctx.channel.kind,
@@ -117,6 +125,7 @@ export async function sendMessage(
       )
       .bind(id, input.userId, input.parentId, input.body, alsoInChannel ? 1 : 0, input.now, input.clientId, input.channelId),
     db.prepare('UPDATE channels SET last_seq = last_seq + 1 WHERE id = ?').bind(input.channelId),
+    ...fileLinkStatements(db, id, files.map((f) => f.id)),
     ...mentionStatements(db, id, audience.mentions),
   ];
   if (input.parentId) {
@@ -151,9 +160,9 @@ export async function sendMessage(
   } catch {
     return (await findDuplicate(db, input)) ?? { ok: false, code: 'failed' };
   }
-  const message = await loadMessage(db, id);
-  if (!message) return { ok: false, code: 'failed' };
-  return { ok: true, message, duplicate: false, audience };
+  const row = await db.prepare(`SELECT ${MESSAGE_COLUMNS} FROM messages WHERE id = ?`).bind(id).first<Record<string, unknown>>();
+  if (!row) return { ok: false, code: 'failed' };
+  return { ok: true, message: { ...rowToMessage(row), files }, duplicate: false, audience };
 }
 
 /** A prior send with the same (user, clientId): returns the original with a freshly loaded audience. */
@@ -166,7 +175,8 @@ async function findDuplicate(
     .bind(input.userId, input.clientId)
     .first<Record<string, unknown>>();
   if (!dup) return null;
-  const message = rowToMessage(dup);
+  const [message] = await withFiles(db, [rowToMessage(dup)]);
+  if (!message) return null;
   const fresh = await loadContext(db, message.channelId, message.parentId);
   return {
     ok: true,
@@ -240,6 +250,7 @@ export async function deleteMessage(
     db.prepare("UPDATE messages SET deleted_at = ?, body = '' WHERE id = ? AND deleted_at IS NULL").bind(input.now, input.messageId),
     db.prepare('DELETE FROM mentions WHERE message_id = ?').bind(input.messageId),
     db.prepare('DELETE FROM reactions WHERE message_id = ?').bind(input.messageId),
+    db.prepare('DELETE FROM message_files WHERE message_id = ?').bind(input.messageId),
   ]);
   const message = await loadMessage(db, input.messageId);
   return message ? { ok: true, message } : { ok: false, code: 'failed' };

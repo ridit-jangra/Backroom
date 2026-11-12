@@ -2,7 +2,7 @@ import { env } from 'cloudflare:test';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/app';
 import { deleteMessage, editMessage, sendMessage, type SendInput } from '../src/messaging/store';
-import { GENERAL, captureMailer, insertChannel, resetDb, seedUsers, testDeps } from './helpers';
+import { GENERAL, captureMailer, insertChannel, insertFile, resetDb, seedUsers, testDeps } from './helpers';
 
 beforeEach(resetDb);
 
@@ -140,6 +140,26 @@ describe('sendMessage', () => {
     expect(bobRead!.s).toBe(0);
     expect(r.audience.followers).toEqual([alice]);
     expect(r.message.parentId).toBe(p.message.id);
+  });
+
+  it('attachments: blank body needs files, at most 10, files 23 h or older are not attachable', async () => {
+    const { input, alice } = await setup();
+    const now = 1_800_000_000_000;
+    const H = 3_600_000;
+    expect(await sendMessage(env.DB, input({ body: '  ', now }))).toEqual({ ok: false, code: 'invalid' });
+    const text = await sendMessage(env.DB, input({ now }));
+    expect(text.ok && text.message.files).toEqual([]);
+    const old = await insertFile({ uploaderId: alice, createdAt: now - 23.5 * H });
+    expect(await sendMessage(env.DB, input({ body: '', fileIds: [old], now }))).toEqual({ ok: false, code: 'invalid' });
+    const eleven: string[] = [];
+    for (let i = 0; i < 11; i++) eleven.push(await insertFile({ uploaderId: alice, createdAt: now - H + i }));
+    expect(await sendMessage(env.DB, input({ fileIds: eleven, now }))).toEqual({ ok: false, code: 'invalid' });
+    const fresh = await insertFile({ uploaderId: alice, createdAt: now - 22.5 * H, name: 'ok.bin' });
+    const r = await sendMessage(env.DB, input({ body: '', fileIds: [fresh], now }));
+    if (!r.ok) throw new Error(r.code);
+    expect(r.message.files!.map((f) => f.name)).toEqual(['ok.bin']);
+    const links = await env.DB.prepare('SELECT file_id AS f FROM message_files WHERE message_id = ?').bind(r.message.id).all();
+    expect(links.results).toEqual([{ f: fresh }]);
   });
 
   it('own top-level post advances own last_read_seq', async () => {

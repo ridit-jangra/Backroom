@@ -1,10 +1,11 @@
 import { env } from 'cloudflare:test';
 import { beforeEach, describe, expect, it } from 'vitest';
-import type { HistoryPage, Message, ThreadPage } from '@backroom/protocol';
+import type { FileInfo, HistoryPage, Message, ThreadPage } from '@backroom/protocol';
 import { createApp } from '../src/app';
+import { budgetCatchup } from '../src/hub/WorkspaceHub';
 import { catchUp } from '../src/messaging/read';
 import { deleteMessage, sendMessage } from '../src/messaging/store';
-import { GENERAL, captureMailer, insertChannel, resetDb, seedUsers, send, testDeps } from './helpers';
+import { GENERAL, captureMailer, insertChannel, insertFile, resetDb, seedUsers, send, testDeps } from './helpers';
 
 beforeEach(resetDb);
 
@@ -12,7 +13,9 @@ async function setup() {
   const { mailer, sent } = captureMailer();
   const app = createApp(testDeps({ mailer }));
   const [owner, alice, bob] = await seedUsers(app, sent, ['owner@test.dev', 'alice@test.dev', 'bob@test.dev']);
-  const say = async (o: { channelId?: string; userId?: string; parentId?: string | null; alsoInChannel?: boolean; body?: string } = {}) => {
+  const say = async (
+    o: { channelId?: string; userId?: string; parentId?: string | null; alsoInChannel?: boolean; body?: string; fileIds?: string[] } = {},
+  ) => {
     const r = await sendMessage(env.DB, {
       clientId: crypto.randomUUID(),
       channelId: o.channelId ?? GENERAL,
@@ -20,7 +23,7 @@ async function setup() {
       parentId: o.parentId ?? null,
       body: o.body ?? 'hi',
       alsoInChannel: o.alsoInChannel ?? false,
-      fileIds: [],
+      fileIds: o.fileIds ?? [],
       now: 1_000,
     });
     if (!r.ok) throw new Error(r.code);
@@ -215,5 +218,57 @@ describe('reactions on payloads', () => {
     expect(r.ok).toBe(true);
     const n = await env.DB.prepare('SELECT COUNT(*) AS n FROM reactions WHERE message_id = ?').bind(a.id).first<{ n: number }>();
     expect(n!.n).toBe(0);
+  });
+});
+
+describe('files on payloads', () => {
+  it('history, thread and catch-up carry files', async () => {
+    const { say, get, alice } = await setup();
+    const fid = await insertFile({ uploaderId: alice.userId, name: 'a.png', mime: 'image/png', size: 7, thumb: true });
+    const infoA: FileInfo = { id: fid, name: 'a.png', mime: 'image/png', size: 7, width: null, height: null, hasThumb: true };
+    const a = await say({ body: '', fileIds: [fid] });
+    expect(a.files).toEqual([infoA]);
+    const b = await say();
+    const reply = await say({ parentId: a.id });
+    const page = (await (await get(`/channels/${GENERAL}/messages`)).json()) as HistoryPage;
+    expect(page.messages.find((m) => m.id === a.id)!.files).toEqual([infoA]);
+    expect(page.messages.find((m) => m.id === b.id)!.files).toEqual([]);
+    const th = (await (await get(`/messages/${a.id}/thread`)).json()) as ThreadPage;
+    expect(th.parent.files).toEqual([infoA]);
+    expect(th.replies.find((m) => m.id === reply.id)!.files).toEqual([]);
+    const cu = await catchUp(env.DB, [GENERAL], { [GENERAL]: 0 });
+    expect(cu.messages.find((m) => m.id === a.id)!.files).toEqual([infoA]);
+    expect(cu.messages.find((m) => m.id === b.id)!.files).toEqual([]);
+    expect(cu.messages.find((m) => m.id === reply.id)!.files).toEqual([]);
+  });
+
+  it('catch-up budget counts file metadata', () => {
+    const base: Message = {
+      id: '01JAAAAAAAAAAAAAAAAAAAAAAA',
+      channelId: GENERAL,
+      seq: 1,
+      userId: '01JBBBBBBBBBBBBBBBBBBBBBBB',
+      parentId: null,
+      body: '',
+      alsoInChannel: false,
+      createdAt: 1,
+      editedAt: null,
+      deletedAt: null,
+      replyCount: 0,
+      lastReplyAt: null,
+    };
+    const files: FileInfo[] = Array.from({ length: 10 }, (_, i) => ({
+      id: `01JF${String(i).padStart(22, '0')}`,
+      name: 'n'.repeat(255),
+      mime: 'application/octet-stream',
+      size: 1,
+      width: null,
+      height: null,
+      hasThumb: false,
+    }));
+    const bytes = new TextEncoder().encode(JSON.stringify(base)).byteLength + 1;
+    const r = budgetCatchup([{ ...base, files }], [], bytes + 10);
+    expect(r.stale).toContain(GENERAL);
+    expect(r.messages).toEqual([]);
   });
 });

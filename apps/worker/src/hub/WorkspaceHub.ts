@@ -20,6 +20,7 @@ import { notifyTargets } from '../messaging/notify';
 import { MESSAGE_COLUMNS, rowToMessage } from '../messaging/rows';
 import { deleteMessage, editMessage, sendMessage, type Audience } from '../messaging/store';
 import { toggleReaction } from '../emoji/reactions';
+import { withFiles } from '../files/attach';
 import { addChannel, channelsOf, getAtt, removeChannel, setAtt } from './attachment';
 
 export type MembershipChange =
@@ -302,7 +303,7 @@ export class WorkspaceHub extends DurableObject<Env> {
       const row = await this.env.DB.prepare(`SELECT ${MESSAGE_COLUMNS} FROM messages WHERE id = ?`)
         .bind(outcome.messageId)
         .first<Record<string, unknown>>();
-      if (row) return { t: 'ack', clientId, message: rowToMessage(row) };
+      if (row) return { t: 'ack', clientId, message: (await withFiles(this.env.DB, [rowToMessage(row)]))[0]! };
     } catch {
       console.error(JSON.stringify({ level: 'error', code: 'ack_reload_failed' }));
     }
@@ -311,7 +312,9 @@ export class WorkspaceHub extends DurableObject<Env> {
 
   /** Notification fan-out for a freshly stored message (Task 6). */
   private notify(message: Message, audience: Audience): void {
-    const preview = Array.from(message.body).slice(0, 140).join('');
+    // A file-only message previews its file names instead of an empty body.
+    const text = message.body.trim() !== '' ? message.body : (message.files ?? []).map((f) => f.name).join(', ');
+    const preview = Array.from(text).slice(0, 140).join('');
     for (const { userId, kind } of notifyTargets(audience, message, (u) => this.isActive(u))) {
       const frame: HubFrame = {
         t: 'notify',
