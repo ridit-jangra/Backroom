@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState, type KeyboardEvent } from 'react';
+import { useId, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import { MAX_BODY, TYPING_THROTTLE_MS, type MemberSummary } from '@backroom/protocol';
 import { decodeMentions, encodeMentions } from '../text/tokenize';
 
@@ -20,6 +20,10 @@ export function Composer({
   onTyping?: () => void;
   onCancel?: () => void;
 }) {
+  // P2-R25: per-instance ids so two composers (channel + thread) can coexist.
+  const uid = useId();
+  const listboxId = `${uid}-listbox`;
+  const optionId = (memberId: string) => `${uid}-opt-${memberId}`;
   const init = useMemo(() => decodeMentions(initial ?? '', members), []); // eslint-disable-line react-hooks/exhaustive-deps
   const [text, setText] = useState(init.text);
   const picked = useRef<Map<string, string>>(init.picked);
@@ -96,11 +100,11 @@ export function Composer({
   return (
     <div className="composer">
       {open && (
-        <ul id="mention-listbox" role="listbox" aria-label="Mention suggestions" className="mention-list">
+        <ul id={listboxId} role="listbox" aria-label="Mention suggestions" className="mention-list">
           {matches.map((m, i) => (
             <li
               key={m.id}
-              id={`mention-opt-${m.id}`}
+              id={optionId(m.id)}
               role="option"
               aria-selected={i === active}
               className={i === active ? 'active' : undefined}
@@ -117,9 +121,9 @@ export function Composer({
       <textarea
         ref={area}
         aria-label={placeholder}
-        aria-controls={open ? 'mention-listbox' : undefined}
+        aria-controls={open ? listboxId : undefined}
         aria-expanded={open}
-        aria-activedescendant={open ? `mention-opt-${matches[Math.min(active, matches.length - 1)]!.id}` : undefined}
+        aria-activedescendant={open ? optionId(matches[Math.min(active, matches.length - 1)]!.id) : undefined}
         placeholder={placeholder}
         value={text}
         rows={2}

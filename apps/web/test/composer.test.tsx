@@ -118,10 +118,26 @@ describe('Composer', () => {
     const ta = screen.getByLabelText('M2') as HTMLTextAreaElement;
     fireEvent.change(ta, { target: { value: '@an', selectionStart: 3 } });
     expect(ta.getAttribute('aria-expanded')).toBe('true');
-    expect(ta.getAttribute('aria-controls')).toBe('mention-listbox');
+    const listbox = screen.getByRole('listbox');
+    expect(listbox.id).not.toBe('');
+    expect(ta.getAttribute('aria-controls')).toBe(listbox.id);
     fireEvent.keyDown(ta, { key: 'ArrowDown' });
-    expect(ta.getAttribute('aria-activedescendant')).toBe('mention-opt-01HZZZZZZZZZZZZZZZZZZZZZZC');
+    const anna = screen.getByRole('option', { name: 'Anna' });
+    expect(anna.id).toContain('01HZZZZZZZZZZZZZZZZZZZZZZC');
+    expect(ta.getAttribute('aria-activedescendant')).toBe(anna.id);
+    expect(document.getElementById(anna.id)).toBe(anna);
     fireEvent.keyDown(ta, { key: 'Enter' });
     expect(ta.value).toBe('@Anna ');
+  });
+  it('two composers get distinct listbox ids (P2-R25)', () => {
+    render(<Composer placeholder="C1" members={members} onSubmit={() => {}} />);
+    render(<Composer placeholder="C2" members={members} onSubmit={() => {}} />);
+    const a = screen.getByLabelText('C1');
+    const b = screen.getByLabelText('C2');
+    fireEvent.change(a, { target: { value: '@b', selectionStart: 2 } });
+    fireEvent.change(b, { target: { value: '@b', selectionStart: 2 } });
+    const ids = screen.getAllByRole('listbox').map((l) => l.id);
+    expect(new Set(ids).size).toBe(2);
+    expect(a.getAttribute('aria-controls')).not.toBe(b.getAttribute('aria-controls'));
   });
 });

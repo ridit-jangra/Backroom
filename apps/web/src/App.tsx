@@ -12,6 +12,18 @@ function Redirect({ to }: { to: string }) {
   return null;
 }
 
+/** Placeholder until the admin page lands (Task 13). */
+function Admin({ slug }: { slug: string }) {
+  return (
+    <main className="card">
+      <h1>Admin</h1>
+      <p>
+        <a href={`/client/${encodeURIComponent(slug)}`}>Back to the workspace</a>
+      </p>
+    </main>
+  );
+}
+
 export function App() {
   const [path, setPath] = useState(location.pathname);
   useEffect(() => {
@@ -25,8 +37,11 @@ export function App() {
   if (path === '/verify') return <Verify />;
   const invite = /^\/invite\/([^/]+)$/.exec(path);
   if (invite) return <Invite token={decodeURIComponent(invite[1]!)} />;
-  const ws = /^\/client\/([^/]+)$/.exec(path);
-  if (ws) return <Workspace slug={decodeURIComponent(ws[1]!)} />;
+  // P2-R11: the admin route wins over the channel route, and channel segments must be wire IDs.
+  const admin = /^\/client\/([^/]+)\/admin$/.exec(path);
+  if (admin) return <Admin slug={decodeURIComponent(admin[1]!)} />;
+  const ws = /^\/client\/([^/]+)(?:\/([0-9A-Z]{26}))?$/.exec(path);
+  if (ws) return <Workspace key={ws[1]} slug={decodeURIComponent(ws[1]!)} channelId={ws[2]} />;
   return (
     <main className="card">
       <h1>Not found</h1>
