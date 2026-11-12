@@ -30,6 +30,10 @@ export function Workspace({ slug, channelId }: { slug: string; channelId?: strin
   const customEmoji = useMemo(() => Object.values(state.customEmoji), [state.customEmoji]);
 
   useEffect(() => setJumpError(''), [channelId]);
+  // A jump-opened thread only wins while it stays open; any other thread change drops the marker.
+  useEffect(() => {
+    setJumpThreadId((j) => (j !== null && j === state.openThreadId ? j : null));
+  }, [state.openThreadId]);
 
   // With no channel in the URL, land on #general (else the first channel).
   useEffect(() => {

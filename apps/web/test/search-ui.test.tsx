@@ -276,7 +276,7 @@ describe('search UI', () => {
     const panel = await screen.findByRole('complementary', { name: 'Search results' });
     await userEvent.click(await within(panel).findByRole('button', { name: /random/ }));
     await waitFor(() => expect(screen.queryAllByRole('alert').length).toBeGreaterThan(0));
-    expect(screen.getAllByRole('alert').map((a) => a.textContent).join(' ')).toMatch(/too far back|Request failed|Could not/);
+    expect(screen.getAllByRole('alert').map((a) => a.textContent)).toEqual(['That message is too far back to show here.']);
   });
 
   it('join refreshes bootstrap before navigating, posts once for double-click and not again after success', async () => {
@@ -353,6 +353,29 @@ describe('search UI', () => {
     const child = panel.querySelector('p')!;
     child.addEventListener('keydown', (e) => e.preventDefault());
     fireEvent.keyDown(child, { key: 'Escape' });
+    expect(screen.queryByRole('complementary', { name: 'Search results' })).not.toBeNull();
+  });
+
+  it('closing a jump-opened thread and reopening it manually keeps the search panel', async () => {
+    const parent = msg(1, { replyCount: 1 });
+    const reply = msg(2, { parentId: parent.id });
+    const route: Route = (url) => {
+      if (url.startsWith('/w/clubhack/search')) return { results: [hit(reply)], nextCursor: null };
+      if (url === `/messages/${parent.id}/thread`) return { parent, replies: [reply] };
+      return undefined;
+    };
+    stubApi({ route, pages: { [GEN]: [parent] } });
+    await boot();
+    await screen.findByRole('searchbox');
+    await search('zebra');
+    const panel = await screen.findByRole('complementary', { name: 'Search results' });
+    await userEvent.click(within(panel).getByRole('button', { name: /general/ }));
+    const thread = await screen.findByRole('complementary', { name: 'Thread' });
+    expect(screen.queryByRole('complementary', { name: 'Search results' })).toBeNull();
+    await userEvent.click(within(thread).getByRole('button', { name: 'Close' }));
+    await screen.findByRole('complementary', { name: 'Search results' });
+    await userEvent.click(await screen.findByRole('button', { name: /1 repl/i }));
+    await screen.findByRole('complementary', { name: 'Thread' });
     expect(screen.queryByRole('complementary', { name: 'Search results' })).not.toBeNull();
   });
 });
