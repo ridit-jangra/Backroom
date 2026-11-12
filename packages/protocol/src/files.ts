@@ -46,15 +46,12 @@ export const thumbUrl = (id: string): string => `/files/${id}/thumb`;
 
 // Lone surrogates (String.prototype.toWellFormed is ES2024; lib is ES2023).
 const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
-// C0/C1 controls, bidi and invisible format controls (name-spoofing vectors).
-const STRIPPED = new RegExp(
-  '[\\u0000-\\u001F\\u007F-\\u009F\\u200B-\\u200F\\u202A-\\u202E\\u2028\\u2029\\u2060-\\u2064\\u2066-\\u2069\\uFEFF]',
-  'g',
-);
+// C0/C1 controls plus every Unicode format (Cf) character: bidi, zero-width, soft hyphen, tags, etc.
+const STRIPPED = /[\u0000-\u001F\u007F-\u009F\p{Cf}\u2028\u2029]/gu;
 
 export function sanitizeFileName(raw: string): string {
   const s = raw
-    .replace(LONE_SURROGATE, '�')
+    .replace(LONE_SURROGATE, '\uFFFD')
     .replace(STRIPPED, '')
     .replace(/[/\\]/g, '_')
     .trim();
