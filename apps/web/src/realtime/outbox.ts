@@ -63,16 +63,12 @@ export class Outbox {
     if (this.items.delete(clientId)) this.emit();
   }
 
-  /** Resend every 'sending' entry after a (re)connect. */
+  /** Resend every 'sending' entry after a (re)connect, without counting an attempt. */
   flush(): void {
     let changed = false;
     for (const it of this.items.values()) {
       if (it.status !== 'sending') continue;
-      if (it.attempts >= MAX_ATTEMPTS) {
-        it.status = 'failed';
-      } else {
-        this.transmit(it);
-      }
+      this.transmit(it, false);
       changed = true;
     }
     if (changed) this.emit();
@@ -91,7 +87,7 @@ export class Outbox {
     if (changed) this.emit();
   }
 
-  private transmit(it: PendingSend): void {
+  private transmit(it: PendingSend, countAttempt = true): void {
     const frame: ClientFrame = {
       t: 'send',
       clientId: it.clientId,
@@ -101,8 +97,9 @@ export class Outbox {
       ...(it.alsoInChannel ? { alsoInChannel: true } : {}),
     };
     // Count only real transmissions so an offline period does not burn attempts.
-    if (this.opts.send(frame)) it.attempts += 1;
-    it.lastSentAt = this.now();
+    const sentOk = this.opts.send(frame);
+    if (sentOk && countAttempt) it.attempts += 1;
+    if (sentOk || countAttempt) it.lastSentAt = this.now();
   }
 
   private emit(): void {

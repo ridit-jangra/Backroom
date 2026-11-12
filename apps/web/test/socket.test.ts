@@ -152,4 +152,110 @@ describe('HubSocket', () => {
     vi.advanceTimersByTime(120_000);
     expect(FakeWebSocket.instances).toHaveLength(1);
   });
+
+  it('stale probe result after the socket reopened is ignored', async () => {
+    let resolve!: (v: boolean) => void;
+    const { s, onAuthLost } = make(() => new Promise<boolean>((r) => (resolve = r)));
+    s.start();
+    inst(0).serverClose(1006);
+    vi.advanceTimersByTime(1000);
+    inst(1).serverClose(1006); // probe starts
+    vi.advanceTimersByTime(2000);
+    inst(2).open();
+    resolve(false);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(onAuthLost).not.toHaveBeenCalled();
+    expect(s.send({ t: 'activity' })).toBe(true);
+  });
+
+  it('pong timeout reconnects immediately without waiting for close', () => {
+    const { s } = make();
+    s.start();
+    const ws = inst(0);
+    ws.open();
+    vi.advanceTimersByTime(40_000);
+    expect(ws.onclose).toBeNull();
+    vi.advanceTimersByTime(1000);
+    expect(FakeWebSocket.instances).toHaveLength(2);
+  });
+
+  it('a throwing WebSocket constructor schedules another reconnect', () => {
+    let n = 0;
+    class Boom extends FakeWebSocket {
+      constructor(u: string) {
+        if (n++ === 0) throw new Error('boom');
+        super(u);
+      }
+    }
+    const { onOpen } = make();
+    const h = new HubSocket({
+      url: 'ws://x',
+      onFrame: () => {},
+      onState: () => {},
+      onOpen,
+      onAuthLost: () => {},
+      probeAuth: async () => true,
+      WebSocketImpl: Boom as unknown as typeof WebSocket,
+      random: () => 0.5,
+    });
+    h.start();
+    expect(FakeWebSocket.instances).toHaveLength(0);
+    vi.advanceTimersByTime(1000);
+    expect(FakeWebSocket.instances).toHaveLength(1);
+  });
+
+  it('stop while CONNECTING closes only once it opens', () => {
+    const { s } = make();
+    s.start();
+    const ws = inst(0);
+    s.stop();
+    expect(ws.closeCalled).toBe(false);
+    ws.open();
+    expect(ws.closeCalled).toBe(true);
+  });
+
+  it('second delay is in the 2 s band and attempt resets after open', () => {
+    const { s } = make();
+    s.start();
+    inst(0).serverClose(1006);
+    vi.advanceTimersByTime(1000);
+    inst(1).serverClose(1006);
+    vi.advanceTimersByTime(1499);
+    expect(FakeWebSocket.instances).toHaveLength(2);
+    vi.advanceTimersByTime(1);
+    expect(FakeWebSocket.instances).toHaveLength(3);
+    inst(2).open();
+    inst(2).serverClose(1006);
+    vi.advanceTimersByTime(750);
+    expect(FakeWebSocket.instances).toHaveLength(4);
+  });
+
+  it('stop with a pending reconnect timer prevents reconnect', () => {
+    const { s } = make();
+    s.start();
+    inst(0).serverClose(1006);
+    s.stop();
+    vi.advanceTimersByTime(120_000);
+    expect(FakeWebSocket.instances).toHaveLength(1);
+  });
+
+  it('events from a replaced socket are ignored', () => {
+    const { s, frames, onOpen } = make();
+    s.start();
+    const old = inst(0);
+    old.serverClose(1006);
+    vi.advanceTimersByTime(1000);
+    old.open();
+    old.receive({ t: 'stale', channelId: 'c' });
+    old.serverClose(1006);
+    expect(onOpen).not.toHaveBeenCalled();
+    expect(frames).toEqual([]);
+    vi.advanceTimersByTime(60_000);
+    expect(FakeWebSocket.instances).toHaveLength(2);
+  });
+
+  it('wsUrl uses wss on https', () => {
+    vi.stubGlobal('location', { protocol: 'https:', host: 'h.example' });
+    expect(wsUrl('x')).toBe('wss://h.example/ws?workspace=x');
+  });
 });

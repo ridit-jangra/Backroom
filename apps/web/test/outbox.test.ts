@@ -96,6 +96,41 @@ describe('Outbox', () => {
     expect((sent[0] as { clientId: string }).clientId).toBe(id);
   });
 
+  it('flapping reconnect flushes do not fail the message; ticks do', () => {
+    const o = make();
+    o.enqueue(msg);
+    for (let i = 0; i < 3; i++) {
+      t += 1000;
+      o.flush();
+    }
+    expect(last[0]).toMatchObject({ status: 'sending', attempts: 1 });
+    expect(sent).toHaveLength(4);
+    for (let i = 0; i < 3; i++) {
+      t += 10_000;
+      o.tick();
+    }
+    expect(last[0]?.status).toBe('failed');
+  });
+
+  it('offline tick leaves attempts at 0', () => {
+    connected = false;
+    const o = make();
+    o.enqueue(msg);
+    t += 10_000;
+    o.tick();
+    expect(last[0]).toMatchObject({ status: 'sending', attempts: 0 });
+  });
+
+  it('ack/nack of unknown id are no-ops', () => {
+    const o = make();
+    const id = o.enqueue(msg);
+    o.ack('nope');
+    o.nack('nope', 'failed');
+    expect(last).toHaveLength(1);
+    expect(last[0]?.clientId).toBe(id);
+    expect(last[0]?.status).toBe('sending');
+  });
+
   it('discard removes the entry', () => {
     const o = make();
     const id = o.enqueue(msg);

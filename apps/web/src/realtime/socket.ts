@@ -29,6 +29,7 @@ export interface HubSocketOptions {
 export class HubSocket {
   private ws: WebSocket | null = null;
   private attempt = 0;
+  private gen = 0;
   private stopped = true;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private pingTimer: ReturnType<typeof setInterval> | null = null;
@@ -45,17 +46,11 @@ export class HubSocket {
 
   stop(): void {
     this.stopped = true;
+    this.gen++;
     this.clearTimers();
     const ws = this.ws;
     this.ws = null;
-    if (ws) {
-      ws.onopen = ws.onmessage = ws.onclose = ws.onerror = null;
-      try {
-        ws.close();
-      } catch {
-        /* already closed */
-      }
-    }
+    if (ws) this.discard(ws);
     this.opts.onState('closed');
   }
 
@@ -73,7 +68,15 @@ export class HubSocket {
   private connect(state: SocketState): void {
     this.opts.onState(state);
     const Impl = this.opts.WebSocketImpl ?? WebSocket;
-    const ws = new Impl(this.opts.url);
+    this.gen++;
+    let ws: WebSocket;
+    try {
+      ws = new Impl(this.opts.url);
+    } catch {
+      this.ws = null;
+      this.scheduleReconnect();
+      return;
+    }
     this.ws = ws;
     ws.onopen = () => {
       if (this.ws !== ws) return;
@@ -114,10 +117,11 @@ export class HubSocket {
     this.opts.onState('reconnecting');
     const delay = backoffDelay(n, (this.opts.random ?? Math.random)());
     if (this.attempt >= 2) {
+      const gen = this.gen;
       void this.opts
         .probeAuth()
         .then((ok) => {
-          if (!ok && !this.stopped) {
+          if (!ok && !this.stopped && this.gen === gen && this.ws === null) {
             this.stopped = true;
             this.clearTimers();
             this.opts.onState('closed');
@@ -144,9 +148,28 @@ export class HubSocket {
       this.clearPong();
       this.pongTimer = setTimeout(() => {
         this.pongTimer = null;
-        if (this.ws === ws) ws.close();
+        if (this.ws !== ws) return;
+        this.ws = null;
+        this.clearTimers();
+        this.discard(ws);
+        if (!this.stopped) this.scheduleReconnect();
       }, PONG_WITHIN_MS);
     }, PING_EVERY_MS);
+  }
+
+  /** Detach handlers and close; a still-connecting socket is closed as soon as it opens. */
+  private discard(ws: WebSocket): void {
+    ws.onmessage = ws.onclose = ws.onerror = null;
+    try {
+      if (ws.readyState === 0) {
+        ws.onopen = () => ws.close();
+      } else {
+        ws.onopen = null;
+        ws.close();
+      }
+    } catch {
+      /* already closed */
+    }
   }
 
   private clearPong(): void {
