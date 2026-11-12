@@ -29,3 +29,12 @@ input { width: 100%; padding: 0.5rem; margin: 0.25rem 0 1rem; border: 1px solid 
 .main header { display: flex; justify-content: space-between; align-items: center; padding: 0.75rem 1rem; border-bottom: 1px solid var(--line); }
 .main section { padding: 1rem; color: var(--muted); }
 @media (max-width: 700px) { .shell { grid-template-columns: 1fr; } }
+.msg-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+.msg-text a { color: var(--accent); }
+.mention { background: color-mix(in srgb, var(--accent) 18%, transparent); border-radius: 3px; padding: 0 0.15rem; font-weight: 600; }
+.mention.me { background: color-mix(in srgb, #e8a900 35%, transparent); }
+.composer { position: relative; }
+.composer textarea { width: 100%; padding: 0.5rem; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: inherit; font: inherit; resize: vertical; }
+.mention-list { position: absolute; bottom: 100%; left: 0; min-width: 12rem; margin: 0 0 0.25rem; padding: 0.25rem 0; list-style: none; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; z-index: 10; }
+.mention-list li { padding: 0.25rem 0.75rem; cursor: pointer; }
+.mention-list li.active, .mention-list li:hover { background: var(--line); }
