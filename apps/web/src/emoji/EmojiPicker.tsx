@@ -115,7 +115,9 @@ export function EmojiPicker({
   };
 
   function pick(c: Cell) {
-    emoji.recordUse(c.code);
+    // Record the canonical target (a custom alias cell records what it points at).
+    const p = parseReactionCode(c.code);
+    emoji.recordUse((p && emoji.canonical(p.name, p.tone)) ?? c.code);
     onPick(c.code);
   }
 

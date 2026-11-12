@@ -150,4 +150,61 @@ describe('reactions', () => {
     expect(lastFrame(ws)).toMatchObject({ t: 'react', messageId: parent.id, emoji: 'tada', on: true });
     expect(within(panel).getAllByRole('button', { name: 'Add reaction' })).toHaveLength(2);
   });
+
+  it('an archived channel shows existing reactions as disabled pills, with no Add reaction', async () => {
+    const RAND = '01JRANDOM'.padEnd(26, '0');
+    stubApi({ pages: { [RAND]: { messages: [msg(1, { channelId: RAND, body: 'old talk', reactions: [{ emoji: '+1', userIds: [BOB] }] })], hasMore: false } } });
+    const ws = await boot(`/client/clubhack/${RAND}`);
+    await screen.findByText('old talk');
+    act(() => ws.receive({ t: 'channel.update', channel: { id: RAND, name: 'random', kind: 'public', topic: null, archivedAt: 9 } }));
+    await screen.findByText('This channel is archived.');
+    const pill = screen.getByRole('button', { name: 'Bob reacted with :+1:' }) as HTMLButtonElement;
+    expect(pill.disabled).toBe(true);
+    expect(screen.queryByRole('button', { name: 'Add reaction' })).toBeNull();
+  });
+
+  it('a pill toggle that cannot be sent shows the inline error', async () => {
+    const ws = await setup([msg(1, { reactions: [{ emoji: '+1', userIds: [BOB] }] })]);
+    vi.spyOn(ws, 'send').mockImplementation(() => {
+      throw new Error('closed');
+    });
+    ws.readyState = 3;
+    // Not connected state flows from the socket layer; a failed send reports false.
+    await userEvent.click(await screen.findByRole('button', { name: 'Bob reacted with :+1:' }));
+    expect(await screen.findByRole('alert')).toBeTruthy();
+  });
+
+  it('an open picker closes when the connection drops and stays closed after reconnect', async () => {
+    const ws = await setup([msg(1)]);
+    await userEvent.click(await screen.findByRole('button', { name: 'Add reaction' }));
+    expect(screen.getByRole('dialog', { name: 'Add reaction' })).toBeTruthy();
+    act(() => ws.serverClose(1006));
+    await vi.waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    act(() => FakeWebSocket.instances.at(-1)!.open());
+    await screen.findByRole('button', { name: 'Add reaction' });
+    expect(screen.queryByRole('dialog')).toBeNull();
+  });
+
+  it('wave and wave::skin-tone-3 are distinct pills that toggle independently', async () => {
+    const m = msg(1, { reactions: [{ emoji: 'wave', userIds: [ME] }, { emoji: 'wave::skin-tone-3', userIds: [BOB] }] });
+    const ws = await setup([m]);
+    const plain = await screen.findByRole('button', { name: 'You reacted with :wave:' });
+    const toned = screen.getByRole('button', { name: 'Bob reacted with :wave::skin-tone-3:' });
+    expect(plain.getAttribute('aria-pressed')).toBe('true');
+    expect(toned.getAttribute('aria-pressed')).toBe('false');
+    await userEvent.click(toned);
+    expect(lastFrame(ws)).toMatchObject({ emoji: 'wave::skin-tone-3', on: true });
+    await userEvent.click(plain);
+    expect(lastFrame(ws)).toMatchObject({ emoji: 'wave', on: false });
+  });
+
+  it('picking a custom alias records its canonical target as frequent', async () => {
+    await setup([msg(1)], [partyparrot, pp]);
+    await userEvent.click(await screen.findByRole('button', { name: 'Add reaction' }));
+    const dialog = screen.getByRole('dialog', { name: 'Add reaction' });
+    await userEvent.type(within(dialog).getByLabelText('Search emoji'), 'pp');
+    await userEvent.click(within(dialog).getByRole('button', { name: ':pp:' }));
+    const uses = Object.keys(JSON.parse(localStorage.getItem(`backroom:emoji:${ME}`)!).uses);
+    expect(uses).toEqual(['partyparrot']);
+  });
 });

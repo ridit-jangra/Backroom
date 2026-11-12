@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { MemberSummary, Message, Role } from '@backroom/protocol';
 import type { PendingSend } from '../realtime/outbox';
 import type { ChannelWindow } from '../state/chat';
@@ -55,6 +55,10 @@ export function MessageRow({
   const [pickerOpen, setPickerOpen] = useState(false);
   const addRef = useRef<HTMLButtonElement>(null);
   const emoji = useEmoji();
+  // A pick that is open when the socket drops must not pop back open after reconnect.
+  useEffect(() => {
+    if (!connected) setPickerOpen(false);
+  }, [connected]);
   const [sendError, setSendError] = useState(false);
   const offlineTitle = connected ? undefined : 'Reconnecting…';
   const deleted = message.deletedAt !== null;
@@ -64,6 +68,7 @@ export function MessageRow({
   const replies = message.replyCount;
   const reactions = message.reactions ?? [];
   const canReact = !!onReact && !deleted;
+  const showReactions = !deleted && reactions.length > 0;
 
   // P3-R9: compare against the canonical code, so an alias pick toggles the reaction it names.
   function react(emojiCode: string, on: boolean) {
@@ -72,7 +77,8 @@ export function MessageRow({
   function pickReaction(code: string) {
     setPickerOpen(false);
     const p = parseReactionCode(code);
-    const canon = p ? emoji.canonical(p.name, p.tone) : null;
+    if (!p) return;
+    const canon = emoji.canonical(p.name, p.tone);
     if (canon === null) return react(code, true);
     const mine = reactions.find((r) => r.emoji === canon)?.userIds.includes(me) ?? false;
     react(canon, !mine);
@@ -116,8 +122,18 @@ export function MessageRow({
           {message.editedAt !== null && <span className="muted"> (edited)</span>}
         </p>
       )}
-      {canReact && (
-        <ReactionBar reactions={reactions} me={me} members={members} connected={connected} onToggle={(e, on) => onReact!(message.id, e, on)} />
+      {showReactions && (
+        <ReactionBar
+          reactions={reactions}
+          me={me}
+          members={members}
+          connected={connected && !!onReact}
+          onToggle={(e, on) => {
+            if (!onReact) return false;
+            react(e, on);
+            return true;
+          }}
+        />
       )}
       {replies > 0 && onOpenThread && (
         <button type="button" className="link replies" onClick={() => onOpenThread(message.id)}>
