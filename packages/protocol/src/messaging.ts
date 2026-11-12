@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import type { ChannelKind, MemberSummary } from './rest';
+import { ReactionSummarySchema } from './emoji';
 
 export const MAX_BODY = 40_000;
 export const CATCHUP_LIMIT = 200;
@@ -30,6 +31,8 @@ export const MessageSchema = z.object({
   deletedAt: z.number().nullable(),
   replyCount: z.number().int(),
   lastReplyAt: z.number().nullable(),
+  /** Absent = unknown (keep what you hold); [] = none. */
+  reactions: z.array(ReactionSummarySchema).optional(),
 });
 export type Message = z.infer<typeof MessageSchema>;
 

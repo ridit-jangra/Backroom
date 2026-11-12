@@ -302,6 +302,9 @@ export function reduce(state: ChatState, e: ChatEvent, now: number): ChatState {
           p.clientId === e.clientId ? { ...p, status: 'failed' as const, error: e.code } : p,
         ),
       };
+    case 'reaction':
+    case 'emoji.update':
+      return state; // TODO(Task 7)
     case 'notify':
     case 'pong':
       return state;

@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import type { CustomEmoji, WorkspaceSettings } from './emoji';
 
 export const AuthStartBody = z.object({
   email: z.string().trim().toLowerCase().email().max(254),
@@ -51,10 +52,11 @@ export type MemberSummary = {
 export type Me = { id: string; email: string; displayName: string };
 
 export type Bootstrap = {
-  workspace: { id: string; slug: string; name: string };
+  workspace: { id: string; slug: string; name: string; settings?: WorkspaceSettings };
   me: Me & { role: Role };
   channels: ChannelSummary[];
   members: MemberSummary[];
+  customEmoji?: CustomEmoji[];
 };
 
 export type InviteSummary = {

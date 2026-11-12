@@ -9,6 +9,7 @@ import {
   NotifyKindSchema,
   PresenceStateSchema,
 } from './messaging';
+import { CustomEmojiSchema, ReactionCode } from './emoji';
 
 const Body = z
   .string()
@@ -35,6 +36,7 @@ export const ClientFrame = z.discriminatedUnion('t', [
   }),
   z.object({ t: z.literal('edit'), messageId: Id, body: Body, clientId: ClientId.optional() }),
   z.object({ t: z.literal('delete'), messageId: Id, clientId: ClientId.optional() }),
+  z.object({ t: z.literal('react'), messageId: Id, emoji: ReactionCode, on: z.boolean(), clientId: ClientId.optional() }),
   z.object({ t: z.literal('mark_read'), channelId: Id, seq: Seq }),
   z.object({ t: z.literal('mark_thread_read'), messageId: Id, seq: Seq }),
   z.object({ t: z.literal('typing'), channelId: Id, parentId: Id.optional() }),
@@ -92,6 +94,15 @@ export const HubFrame = z.union([
   }),
   z.object({ t: z.literal('catchup'), messages: z.array(MessageSchema), presence: z.array(PresenceEntry) }),
   z.object({ t: z.literal('stale'), channelId: z.string() }),
+  z.object({
+    t: z.literal('reaction'),
+    channelId: z.string(),
+    messageId: z.string(),
+    emoji: z.string(),
+    userId: z.string(),
+    on: z.boolean(),
+  }),
+  z.object({ t: z.literal('emoji.update'), added: z.array(CustomEmojiSchema), removed: z.array(z.string()) }),
   z.object({ t: z.literal('pong') }),
 ]);
 export type HubFrame = z.infer<typeof HubFrame>;
