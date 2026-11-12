@@ -2,7 +2,7 @@ import { Hono } from 'hono';
 import { AuthStartBody, AuthVerifyBody, DesktopExchangeBody } from '@backroom/protocol';
 import type { AppEnv } from '../app';
 import { ApiError } from '../lib/errors';
-import { randomToken, sha256Hex } from '../lib/crypto';
+import { randomToken, sha256Base64Url, sha256Hex } from '../lib/crypto';
 import { readJson } from '../lib/http';
 import { hitRateLimit } from '../lib/rateLimit';
 import { checkEligibility, checkEligibilityByInviteId } from './eligibility';
@@ -13,13 +13,6 @@ import { clearSessionCookie, requireSession, setSessionCookie } from '../middlew
 const HOUR_MS = 3_600_000;
 const LINK_TTL_MS = 900_000;
 const DESKTOP_CODE_TTL_MS = 120_000;
-
-async function sha256Base64Url(input: string): Promise<string> {
-  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(input)));
-  let s = '';
-  for (const b of digest) s += String.fromCharCode(b);
-  return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-}
 
 function constantTimeEqual(a: string, b: string): boolean {
   if (a.length !== b.length) return false;
@@ -49,7 +42,8 @@ authRoutes.post('/start', async (c) => {
       const send = (async () => {
         try {
           await db
-            .prepare('INSERT INTO login_tokens (token_hash, email, invite_id, expires_at, desktop_challenge) VALUES (?, ?, ?, ?, ?)',
+            .prepare(
+              'INSERT INTO login_tokens (token_hash, email, invite_id, expires_at, desktop_challenge) VALUES (?, ?, ?, ?, ?)',
             )
             .bind(await sha256Hex(raw), email, inviteId, now + LINK_TTL_MS, desktopChallenge ?? null)
             .run();
