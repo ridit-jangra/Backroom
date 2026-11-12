@@ -1,4 +1,4 @@
-import type { InviteSummary, MemberSummary, Role } from '@backroom/protocol';
+import type { AdminMember, InviteSummary, MemberSummary, Role } from '@backroom/protocol';
 import { randomToken, sha256Hex } from '../lib/crypto';
 import { ApiError } from '../lib/errors';
 import { newId } from '../lib/ids';
@@ -100,4 +100,19 @@ export async function patchMember(
     .bind(actor.workspaceId, targetId)
     .first<MemberSummary>();
   return member!;
+}
+
+/** Every member including deactivated ones (admin view), ordered by display name. */
+export async function listMembers(db: D1Database, workspaceId: string): Promise<AdminMember[]> {
+  const { results } = await db
+    .prepare(
+      `SELECT u.id AS id, COALESCE(u.display_name, substr(u.email, 1, instr(u.email, '@') - 1)) AS displayName,
+              wm.role AS role, u.avatar_key AS avatarKey, wm.deactivated_at AS deactivatedAt
+       FROM workspace_members wm JOIN users u ON u.id = wm.user_id
+       WHERE wm.workspace_id = ?
+       ORDER BY displayName COLLATE NOCASE, u.id`,
+    )
+    .bind(workspaceId)
+    .all<AdminMember>();
+  return results;
 }

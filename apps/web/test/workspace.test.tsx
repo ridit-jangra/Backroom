@@ -466,11 +466,11 @@ describe('navigation', () => {
     expect(push).not.toHaveBeenCalled();
   });
 
-  it('routes /client/:slug/admin before the channel route and rejects odd channel segments', () => {
+  it('routes /client/:slug/admin before the channel route and rejects odd channel segments', async () => {
     stub();
     history.replaceState(null, '', '/client/clubhack/admin');
     render(<App />);
-    expect(screen.getByRole('heading', { name: 'Admin' })).toBeTruthy();
+    expect(await screen.findByText('You need to be an admin to see this page.')).toBeTruthy();
     cleanup();
     history.replaceState(null, '', '/client/clubhack/not-a-channel');
     render(<App />);

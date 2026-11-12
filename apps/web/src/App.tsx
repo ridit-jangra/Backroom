@@ -3,6 +3,7 @@ import { navigate } from './nav';
 import { Login } from './pages/Login';
 import { Verify } from './pages/Verify';
 import { Invite } from './pages/Invite';
+import { Admin } from './pages/Admin';
 import { Workspace } from './pages/Workspace';
 
 export const DEFAULT_WORKSPACE = 'clubhack';
@@ -10,18 +11,6 @@ export const DEFAULT_WORKSPACE = 'clubhack';
 function Redirect({ to }: { to: string }) {
   useEffect(() => navigate(to, { replace: true }), [to]);
   return null;
-}
-
-/** Placeholder until the admin page lands (Task 13). */
-function Admin({ slug }: { slug: string }) {
-  return (
-    <main className="card">
-      <h1>Admin</h1>
-      <p>
-        <a href={`/client/${encodeURIComponent(slug)}`}>Back to the workspace</a>
-      </p>
-    </main>
-  );
 }
 
 export function App() {

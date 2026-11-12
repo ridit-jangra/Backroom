@@ -5,7 +5,7 @@ import { readJson } from '../lib/http';
 import { requireSession } from '../middleware/session';
 import { hubFor } from '../hub/client';
 import { requireAdmin, requireMember } from './access';
-import { createInvite, listInvites, patchMember, revokeInvite } from './invites';
+import { createInvite, listInvites, listMembers, patchMember, revokeInvite } from './invites';
 import { getBootstrap, getMe } from './bootstrap';
 
 export const workspaceRoutes = new Hono<AppEnv>();
@@ -34,6 +34,11 @@ workspaceRoutes.post('/w/:slug/invites', requireSession, async (c) => {
 workspaceRoutes.get('/w/:slug/invites', requireSession, async (c) => {
   const { workspaceId } = await requireAdmin(c.env.DB, c.req.param('slug'), c.var.session!.userId);
   return c.json({ invites: await listInvites(c.env.DB, workspaceId, c.var.deps.now()) });
+});
+
+workspaceRoutes.get('/w/:slug/members', requireSession, async (c) => {
+  const { workspaceId } = await requireAdmin(c.env.DB, c.req.param('slug'), c.var.session!.userId);
+  return c.json({ members: await listMembers(c.env.DB, workspaceId) });
 });
 
 workspaceRoutes.delete('/invites/:id', requireSession, async (c) => {

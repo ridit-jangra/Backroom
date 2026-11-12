@@ -1,6 +1,6 @@
 import { env } from 'cloudflare:test';
 import { beforeEach, describe, expect, it } from 'vitest';
-import type { Bootstrap, InviteSummary, Me, MemberSummary } from '@backroom/protocol';
+import type { AdminMember, Bootstrap, InviteSummary, Me, MemberSummary } from '@backroom/protocol';
 import { createApp } from '../src/app';
 import { captureMailer, resetDb, send, signIn, testDeps } from './helpers';
 
@@ -103,5 +103,19 @@ describe('invites and members', () => {
     expect((await send(app, 'PATCH', `/w/clubhack/members/${a.id}`, { deactivated: true }, a.cookie)).status).toBe(403);
     expect((await send(app, 'PATCH', `/w/clubhack/members/${b.id}`, { deactivated: true }, a.cookie)).status).toBe(200);
     expect((await send(app, 'PATCH', '/w/clubhack/members/ghost', { deactivated: true }, ownerCookie)).status).toBe(404);
+  });
+
+  it('admin lists members including deactivated; plain member gets 403', async () => {
+    const { app, sent, ownerCookie } = await setup();
+    const m = await joinVia(app, sent, ownerCookie, 'zed@test.dev');
+    await send(app, 'PATCH', `/w/clubhack/members/${m.id}`, { deactivated: true }, ownerCookie);
+    const res = await send(app, 'GET', '/w/clubhack/members', undefined, ownerCookie);
+    expect(res.status).toBe(200);
+    const { members } = (await res.json()) as { members: AdminMember[] };
+    expect(members.map((x) => x.displayName)).toEqual(['owner', 'zed']);
+    expect(members.find((x) => x.id === m.id)!.deactivatedAt).toBeTypeOf('number');
+    expect(members[0]!.deactivatedAt).toBeNull();
+    const other = await joinVia(app, sent, ownerCookie, 'amy@test.dev');
+    expect((await send(app, 'GET', '/w/clubhack/members', undefined, other.cookie)).status).toBe(403);
   });
 });
