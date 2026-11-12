@@ -4,6 +4,8 @@ import {
   PING_FRAME,
   PONG_FRAME,
   parseClientFrame,
+  type ChannelInfo,
+  type ChannelSummary,
   type ClientFrame,
   type HubFrame,
   type Message,
@@ -16,7 +18,11 @@ import { catchUp } from '../messaging/read';
 import { notifyTargets } from '../messaging/notify';
 import { MESSAGE_COLUMNS, rowToMessage } from '../messaging/rows';
 import { deleteMessage, editMessage, sendMessage, type Audience } from '../messaging/store';
-import { channelsOf, getAtt, setAtt } from './attachment';
+import { addChannel, channelsOf, getAtt, removeChannel, setAtt } from './attachment';
+
+export type MembershipChange =
+  | { action: 'added'; userIds: string[]; channel: ChannelSummary }
+  | { action: 'removed'; userIds: string[]; channelId: string };
 
 const MAX_FRAME_CHARS = 262_144;
 /**
@@ -423,6 +429,45 @@ export class WorkspaceHub extends DurableObject<Env> {
     const expiry = lastActivityAt + ACTIVE_WINDOW_MS;
     const existing = await this.ctx.storage.getAlarm();
     if (existing === null || expiry < existing) await this.scheduleAlarm(expiry);
+  }
+
+  /* RPC from REST routes (Task 7). D1 is already updated when these run. */
+
+  /** Updates each listed user's socket channel sets and tells those sockets. */
+  async membershipChanged(change: MembershipChange): Promise<void> {
+    for (const userId of new Set(change.userIds)) {
+      for (const ws of this.socketsForUser(userId)) {
+        if (change.action === 'added') {
+          addChannel(ws, change.channel.id);
+          this.sendFrame(ws, { t: 'membership', action: 'added', channel: change.channel });
+        } else {
+          removeChannel(ws, change.channelId);
+          this.sendFrame(ws, { t: 'membership', action: 'removed', channelId: change.channelId });
+        }
+      }
+    }
+  }
+
+  async channelUpdated(channel: ChannelInfo): Promise<void> {
+    const frame: HubFrame = { t: 'channel.update', channel };
+    for (const ws of this.socketsForChannel(channel.id)) this.sendFrame(ws, frame);
+  }
+
+  /** Closes every socket of a deactivated user (4001: the client signs out and does not reconnect). */
+  async disconnectUser(userId: string): Promise<void> {
+    const sockets = this.socketsForUser(userId);
+    if (sockets.length === 0) return;
+    const wasActive = this.isActive(userId);
+    // Mark them away first so the close handler does not announce a second `away`.
+    this.setAnnounced(userId, 'away');
+    for (const ws of sockets) {
+      try {
+        ws.close(4001, 'deactivated');
+      } catch {
+        // already closing
+      }
+    }
+    if (wasActive) this.broadcast({ t: 'presence', userId, state: 'away' });
   }
 
   async webSocketClose(ws: WebSocket, code: number, reason: string, _wasClean: boolean): Promise<void> {

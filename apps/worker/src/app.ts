@@ -6,6 +6,7 @@ import { authRoutes } from './auth/routes';
 import { errorHandler } from './lib/errors';
 import { requireSameOrigin } from './middleware/origin';
 import { loadSession } from './middleware/session';
+import { channelRoutes } from './channels/routes';
 import { messagingRoutes } from './messaging/routes';
 import { workspaceRoutes } from './workspace/routes';
 import { wsRoute } from './hub/ws-route';
@@ -34,6 +35,7 @@ export function createApp(deps: Deps): Hono<AppEnv> {
 
   app.route('/auth', authRoutes);
   app.route('/', workspaceRoutes);
+  app.route('/', channelRoutes);
   app.route('/', messagingRoutes);
   app.route('/', wsRoute);
 

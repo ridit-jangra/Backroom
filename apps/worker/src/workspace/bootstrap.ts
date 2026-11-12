@@ -1,4 +1,5 @@
-import type { Bootstrap, ChannelSummary, MemberSummary, Me, Role } from '@backroom/protocol';
+import type { Bootstrap, MemberSummary, Me, Role } from '@backroom/protocol';
+import { SUMMARY_COLUMNS, rowToSummary, type SummaryRow } from '../channels/channels';
 import { requireMember } from './access';
 
 const DISPLAY = "COALESCE(u.display_name, substr(u.email, 1, instr(u.email, '@') - 1))";
@@ -20,17 +21,7 @@ export async function getBootstrap(db: D1Database, slug: string, userId: string)
     db.prepare(`SELECT u.id AS id, u.email AS email, ${DISPLAY} AS displayName FROM users u WHERE u.id = ?`).bind(userId),
     db
       .prepare(
-        `SELECT c.id AS id, c.name AS name, c.kind AS kind, c.topic AS topic,
-                c.created_by AS createdBy, c.dm_key AS dmKey,
-                c.last_seq AS lastSeq, cm.last_read_seq AS lastReadSeq,
-                (SELECT COUNT(*) FROM messages m
-                  WHERE m.channel_id = c.id AND m.seq > cm.last_read_seq AND m.deleted_at IS NULL
-                    AND (m.parent_id IS NULL OR m.also_in_channel = 1)) AS unreadCount,
-                (SELECT COUNT(*) FROM messages m
-                  WHERE m.channel_id = c.id AND m.seq > cm.last_read_seq AND m.deleted_at IS NULL
-                    AND (m.parent_id IS NULL OR m.also_in_channel = 1)
-                    AND EXISTS (SELECT 1 FROM mentions mn WHERE mn.message_id = m.id
-                                AND (mn.user_id = ?1 OR (mn.kind IN ('channel', 'here') AND m.user_id <> ?1)))) AS mentionCount
+        `SELECT ${SUMMARY_COLUMNS}
          FROM channels c
          JOIN channel_members cm ON cm.channel_id = c.id AND cm.user_id = ?1
          WHERE c.workspace_id = ?2 AND c.archived_at IS NULL
@@ -50,12 +41,7 @@ export async function getBootstrap(db: D1Database, slug: string, userId: string)
   return {
     workspace: ws!.results[0] as { id: string; slug: string; name: string },
     me: { ...(me!.results[0] as Me), role: role as Role },
-    channels: (channels!.results as Array<Omit<ChannelSummary, 'dmUserIds'> & { dmKey: string | null }>).map(
-      ({ dmKey, ...c }) => ({
-        ...c,
-        dmUserIds: c.kind === 'dm' && dmKey ? dmKey.split(',') : null,
-      }),
-    ),
+    channels: (channels!.results as SummaryRow[]).map(rowToSummary),
     members: members!.results as MemberSummary[],
   };
 }

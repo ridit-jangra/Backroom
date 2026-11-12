@@ -3,7 +3,8 @@ import { InviteCreateBody, MemberPatchBody, MePatchBody } from '@backroom/protoc
 import type { AppEnv } from '../app';
 import { readJson } from '../lib/http';
 import { requireSession } from '../middleware/session';
-import { requireAdmin } from './access';
+import { hubFor } from '../hub/client';
+import { requireAdmin, requireMember } from './access';
 import { createInvite, listInvites, patchMember, revokeInvite } from './invites';
 import { getBootstrap, getMe } from './bootstrap';
 
@@ -42,7 +43,12 @@ workspaceRoutes.delete('/invites/:id', requireSession, async (c) => {
 
 workspaceRoutes.patch('/w/:slug/members/:userId', requireSession, async (c) => {
   const patch = MemberPatchBody.parse(await readJson(c));
-  return c.json(
-    await patchMember(c.env.DB, c.req.param('slug'), c.var.session!.userId, c.req.param('userId'), patch, c.var.deps.now()),
-  );
+  const slug = c.req.param('slug');
+  const actorId = c.var.session!.userId;
+  const targetId = c.req.param('userId');
+  // patchMember returns only the member, so the hub's workspace comes from the actor's membership (P2-R9).
+  const { workspaceId } = await requireMember(c.env.DB, slug, actorId);
+  const member = await patchMember(c.env.DB, slug, actorId, targetId, patch, c.var.deps.now());
+  if (patch.deactivated === true) await hubFor(c.env, workspaceId).disconnectUser(targetId);
+  return c.json(member);
 });

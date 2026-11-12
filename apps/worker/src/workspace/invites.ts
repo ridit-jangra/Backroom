@@ -1,5 +1,4 @@
 import type { InviteSummary, MemberSummary, Role } from '@backroom/protocol';
-import { deleteAllSessions } from '../auth/sessions';
 import { randomToken, sha256Hex } from '../lib/crypto';
 import { ApiError } from '../lib/errors';
 import { newId } from '../lib/ids';
@@ -71,19 +70,25 @@ export async function patchMember(
     throw new ApiError(403, 'forbidden', 'You cannot deactivate yourself.');
   }
 
+  // All writes land together or not at all.
+  const writes: D1PreparedStatement[] = [];
   if (patch.role !== undefined) {
-    await db
-      .prepare('UPDATE workspace_members SET role = ? WHERE workspace_id = ? AND user_id = ?')
-      .bind(patch.role, actor.workspaceId, targetId)
-      .run();
+    writes.push(
+      db
+        .prepare('UPDATE workspace_members SET role = ? WHERE workspace_id = ? AND user_id = ?')
+        .bind(patch.role, actor.workspaceId, targetId),
+    );
   }
   if (patch.deactivated !== undefined) {
-    await db
-      .prepare('UPDATE workspace_members SET deactivated_at = ? WHERE workspace_id = ? AND user_id = ?')
-      .bind(patch.deactivated ? now : null, actor.workspaceId, targetId)
-      .run();
-    if (patch.deactivated) await deleteAllSessions(db, targetId);
+    writes.push(
+      db
+        .prepare('UPDATE workspace_members SET deactivated_at = ? WHERE workspace_id = ? AND user_id = ?')
+        .bind(patch.deactivated ? now : null, actor.workspaceId, targetId),
+    );
+    // Same statement as deleteAllSessions, batched with the deactivation.
+    if (patch.deactivated) writes.push(db.prepare('DELETE FROM sessions WHERE user_id = ?').bind(targetId));
   }
+  if (writes.length > 0) await db.batch(writes);
 
   const member = await db
     .prepare(
