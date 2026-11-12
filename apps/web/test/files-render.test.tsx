@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, cleanup, render, screen } from '@testing-library/react';
+import { cleanup, render, screen } from '@testing-library/react';
 import type { FileInfo } from '@backroom/protocol';
 import { FakeWebSocket } from './fakeSocket';
-import { GEN, ME, boot, makeBootstrap, msg, stubApi, id } from './harness';
+import { GEN, ME, msg, id } from './harness';
 import { MessageFiles, fitBox, formatBytes } from '../src/files/MessageFiles';
 import { MessageRow } from '../src/components/MessageList';
 
@@ -67,17 +67,43 @@ describe('MessageFiles', () => {
   });
 });
 
+describe('file edge cases', () => {
+  it('svg renders as a card, not an img', () => {
+    const f = file('01JSVG', { name: 'x.svg', mime: 'image/svg+xml' });
+    const { container } = render(<MessageFiles files={[f]} />);
+    expect(container.querySelector('img')).toBeNull();
+    expect(container.querySelector('.file-card')).not.toBeNull();
+  });
+  it('image without dimensions has no width/height', () => {
+    const f = file('01JNODIM', { name: 'n.png', mime: 'image/png' });
+    const { container } = render(<MessageFiles files={[f]} />);
+    const img = container.querySelector('img')!;
+    expect(img.hasAttribute('width')).toBe(false);
+    expect(img.hasAttribute('height')).toBe(false);
+  });
+  it('extreme aspect ratios clamp to 1px', () => {
+    expect(fitBox(10000, 1)).toEqual({ width: 360, height: 1 });
+  });
+  it('media get an aria-label', () => {
+    const { container } = render(<MessageFiles files={[file('01JV', { name: 'v.mp4', mime: 'video/mp4' })]} />);
+    expect(container.querySelector('video')!.getAttribute('aria-label')).toBe('v.mp4');
+  });
+});
+
 describe('files in the chat', () => {
   it('deleted messages show no files; pending sends show theirs', async () => {
     const f = file('01JHIST', { name: 'hist.txt', mime: 'text/plain' });
     const g = file('01JPEND', { name: 'pend.txt', mime: 'text/plain' });
-    const m = msg(1, { files: [f] });
-    stubApi({ bootstrap: () => makeBootstrap(), pages: { [GEN]: { messages: [m], hasMore: false } } });
-    const ws = await boot();
-    await screen.findByRole('link', { name: 'Download hist.txt' });
-    act(() => ws.receive({ t: 'message.delete', message: { ...m, body: '', deletedAt: 1_700_000_100_000, files: [] } }));
-    await vi.waitFor(() => expect(document.querySelector('.msg-files')).toBeNull());
-    expect(ME).toBeTruthy();
+    const rowProps = {
+      members: [], me: ME, myRole: 'member' as const, showHeader: true, connected: true,
+      onEdit: () => true, onDelete: () => true,
+    };
+    const del = render(<ul><MessageRow {...rowProps} message={msg(1, { files: [f], body: '', deletedAt: 1_700_000_100_000 })} /></ul>);
+    expect(del.container.querySelector('.msg-files')).toBeNull();
+    del.unmount();
+    const live = render(<ul><MessageRow {...rowProps} message={msg(2, { files: [f] })} /></ul>);
+    expect(live.container.querySelector('.msg-files')).not.toBeNull();
+    live.unmount();
     // pending row
     const { PendingRow } = await import('../src/components/MessageList');
     const { container } = render(
@@ -104,5 +130,15 @@ describe('files in the chat', () => {
     expect(spy).toHaveBeenCalledTimes(1);
     expect(spy).toHaveBeenCalledWith({ block: 'center' });
     expect(document.querySelector('li.highlighted')).not.toBeNull();
+    // Same id, bumped nonce: scrolls again and the animation restarts (class removed then re-added).
+    const li = document.querySelector('li')!;
+    const ops: string[] = [];
+    const rm = li.classList.remove.bind(li.classList);
+    const add = li.classList.add.bind(li.classList);
+    li.classList.remove = (...t: string[]) => { ops.push('rm'); rm(...t); };
+    li.classList.add = (...t: string[]) => { ops.push('add'); add(...t); };
+    rerender(<ul><MessageRow {...props} highlighted highlightNonce={1} /></ul>);
+    expect(spy).toHaveBeenCalledTimes(2);
+    expect(ops).toEqual(['rm', 'add']);
   });
 });

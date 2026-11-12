@@ -17,7 +17,7 @@ export function formatBytes(n: number): string {
 export function fitBox(w: number | null, h: number | null, box = 360): { width: number; height: number } | null {
   if (!w || !h) return null;
   const s = Math.min(1, box / Math.max(w, h));
-  return { width: Math.round(w * s), height: Math.round(h * s) };
+  return { width: Math.max(1, Math.round(w * s)), height: Math.max(1, Math.round(h * s)) };
 }
 
 function Entry({ f }: { f: FileInfo }) {
@@ -46,20 +46,20 @@ function Entry({ f }: { f: FileInfo }) {
   if (isInlineMime(f.mime) && f.mime.startsWith('video/')) {
     return (
       <div className="file-entry">
-        <video controls preload="metadata" src={url} /> {download}
+        <video aria-label={f.name} controls preload="metadata" src={url} /> {download}
       </div>
     );
   }
   if (isInlineMime(f.mime) && f.mime.startsWith('audio/')) {
     return (
       <div className="file-entry">
-        <audio controls preload="none" src={url} /> {download}
+        <audio aria-label={f.name} controls preload="none" src={url} /> {download}
       </div>
     );
   }
   return (
     <div className="file-card">
-      <span className="file-name">{f.name}</span> <span className="muted">{formatBytes(f.size)}</span>{' '}
+      <span className="file-name" dir="auto">{f.name}</span> <span className="muted">{formatBytes(f.size)}</span>{' '}
       {f.mime === 'application/pdf' && (
         <>
           <a href={url} target="_blank" rel="noopener noreferrer">
