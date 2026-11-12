@@ -1,7 +1,8 @@
-import { Hono } from 'hono';
-import { FILE_MAX_BYTES, FILES_QUOTA_BYTES, THUMB_MAX_BYTES, THUMB_MAX_SIDE, isRasterImage, sanitizeFileName } from '@backroom/protocol';
+import { type Context, Hono } from 'hono';
+import { type FileInfo, FILE_MAX_BYTES, FILES_QUOTA_BYTES, THUMB_MAX_BYTES, THUMB_MAX_SIDE, isRasterImage, sanitizeFileName } from '@backroom/protocol';
 import type { AppEnv } from '../app';
 import { readCappedBody } from '../lib/body';
+import { newId } from '../lib/ids';
 import { ApiError } from '../lib/errors';
 import { requireSession } from '../middleware/session';
 import { requireMember } from '../workspace/access';
@@ -16,6 +17,23 @@ const notFound = () => new ApiError(404, 'not_found', 'File not found.');
 const invalidThumbnail = () => new ApiError(400, 'invalid_thumbnail', 'Thumbnails must be WebP images of at most 720×720 pixels.');
 const alreadyAttached = () => new ApiError(409, 'already_attached', 'This file is already attached to a message.');
 const alreadyHasThumbnail = () => new ApiError(409, 'already_has_thumbnail', 'This file already has a thumbnail.');
+
+/**
+ * Registers `p` with `waitUntil` so the work after the body has been received (R2 put commit, D1 insert, cleanup)
+ * runs to completion even if the client disconnects: otherwise an abort right after the last byte could leave a
+ * committed R2 object with no D1 row, which neither the quota nor the orphan cron would ever see.
+ * Without an execution context (some unit tests), the caller's own await is all there is.
+ */
+export function surviveDisconnect<T>(c: Context<AppEnv>, p: Promise<T>): Promise<T> {
+  let ctx: { waitUntil(p: Promise<unknown>): void } | undefined;
+  try {
+    ctx = c.executionCtx;
+  } catch {
+    ctx = undefined;
+  }
+  ctx?.waitUntil(p.catch(() => {}));
+  return p;
+}
 
 // The body is never read here: storeUpload streams it straight into R2.
 fileRoutes.post('/w/:slug/files', requireSession, async (c) => {
@@ -49,15 +67,18 @@ fileRoutes.post('/w/:slug/files', requireSession, async (c) => {
     .first<{ used: number }>();
   if ((used?.used ?? 0) + length > FILES_QUOTA_BYTES) throw quotaExceeded();
 
-  const file = await storeUpload(c.env, {
-    workspaceId,
-    userId,
-    name,
-    declaredType: c.req.header('Content-Type') ?? null,
-    length,
-    body,
-    now: c.var.deps.now(),
-  });
+  const file = await surviveDisconnect(
+    c,
+    storeUpload(c.env, {
+      workspaceId,
+      userId,
+      name,
+      declaredType: c.req.header('Content-Type') ?? null,
+      length,
+      body,
+      now: c.var.deps.now(),
+    }),
+  );
   return c.json({ file }, 201);
 });
 
@@ -103,33 +124,49 @@ fileRoutes.post('/files/:id/thumb', requireSession, async (c) => {
     throw invalidThumbnail();
   }
 
-  const key = thumbKeyOf(row.workspaceId, id);
-  await c.env.BUCKET.put(key, bytes, { httpMetadata: { contentType: 'image/webp' } });
-  const r = await db
-    .prepare(
-      `UPDATE files SET thumb_key = ?1
-       WHERE id = ?2 AND thumb_key IS NULL AND NOT EXISTS (SELECT 1 FROM message_files WHERE file_id = ?2)`,
-    )
-    .bind(key, id)
-    .run();
+  const file = await surviveDisconnect(c, storeThumbnail(c.env, { workspaceId: row.workspaceId, id, bytes, now: c.var.deps.now() }));
+  return c.json({ file });
+});
 
-  if (r.meta.changes === 0) {
-    // Lost a race (attach, another thumbnail, or the row is gone). Only remove the object when no row points at it.
-    const now = await db
-      .prepare('SELECT thumb_key AS thumbKey FROM files WHERE id = ?')
-      .bind(id)
-      .first<{ thumbKey: string | null }>();
-    if (!now || now.thumbKey === null) {
-      await c.env.BUCKET.delete(key).catch(() => {
-        console.error(JSON.stringify({ level: 'error', code: 'upload_cleanup_failed' }));
-      });
-    }
+/**
+ * Writes the thumbnail under a fresh unique key, then links it only if the file still has no thumbnail and is
+ * not attached. A loser of any race deletes only its own new object, so the live thumbnail is never touched.
+ */
+async function storeThumbnail(
+  env: AppEnv['Bindings'],
+  input: { workspaceId: string; id: string; bytes: Uint8Array; now: number },
+): Promise<FileInfo> {
+  const db = env.DB;
+  const key = thumbKeyOf(input.workspaceId, input.id, newId(input.now));
+  await env.BUCKET.put(key, input.bytes, { httpMetadata: { contentType: 'image/webp' } });
+  let changes: number;
+  try {
+    const r = await db
+      .prepare(
+        `UPDATE files SET thumb_key = ?1
+         WHERE id = ?2 AND thumb_key IS NULL AND NOT EXISTS (SELECT 1 FROM message_files WHERE file_id = ?2)`,
+      )
+      .bind(key, input.id)
+      .run();
+    changes = r.meta.changes;
+  } catch (e) {
+    await cleanupThumb(env.BUCKET, key);
+    throw e;
+  }
+  if (changes === 0) {
+    await cleanupThumb(env.BUCKET, key);
+    const now = await db.prepare('SELECT thumb_key AS thumbKey FROM files WHERE id = ?').bind(input.id).first<{ thumbKey: string | null }>();
     if (!now) throw notFound();
     if (now.thumbKey !== null) throw alreadyHasThumbnail();
     throw alreadyAttached();
   }
-
-  const file = await db.prepare(`SELECT ${FILE_INFO_COLUMNS} FROM files WHERE id = ?`).bind(id).first<FileInfoRow>();
+  const file = await db.prepare(`SELECT ${FILE_INFO_COLUMNS} FROM files WHERE id = ?`).bind(input.id).first<FileInfoRow>();
   if (!file) throw notFound();
-  return c.json({ file: rowToFileInfo(file) });
-});
+  return rowToFileInfo(file);
+}
+
+async function cleanupThumb(bucket: R2Bucket, key: string): Promise<void> {
+  await bucket.delete(key).catch(() => {
+    console.error(JSON.stringify({ level: 'error', code: 'upload_cleanup_failed' }));
+  });
+}

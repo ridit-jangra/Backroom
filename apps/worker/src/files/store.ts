@@ -9,12 +9,20 @@ export function fileKey(workspaceId: string, fileId: string): string {
   return `ws/${workspaceId}/${fileId}`;
 }
 
-export function thumbKeyOf(workspaceId: string, fileId: string): string {
-  return `${fileKey(workspaceId, fileId)}-thumb`;
+/**
+ * R2 key of a thumbnail: `ws/<workspaceId>/<fileId>-thumb-<thumbId>`, where `thumbId` is a fresh server ULID per
+ * thumbnail upload. A unique key per upload means a losing concurrent upload can delete its own object without
+ * ever touching the live thumbnail; readers always use the stored `files.thumb_key`.
+ */
+export function thumbKeyOf(workspaceId: string, fileId: string, thumbId: string): string {
+  return `${fileKey(workspaceId, fileId)}-thumb-${thumbId}`;
 }
 
-/** Every key a file delete may touch. Never matches `ws/<id>/emoji/<id>`. */
-export const FILE_KEY_RE = /^ws\/[0-9A-Z]{26}\/[0-9A-Z]{26}(-thumb)?$/;
+/**
+ * Every key a file delete may touch: an original or a thumbnail. Only uppercase ULIDs and exactly two slashes,
+ * so it can never match a custom emoji key `ws/<id>/emoji/<id>`.
+ */
+export const FILE_KEY_RE = /^ws\/[0-9A-Z]{26}\/[0-9A-Z]{26}(-thumb-[0-9A-Z]{26})?$/;
 
 /** SELECT list for `files` rows that become `FileInfo` (unprefixed; pair with `rowToFileInfo`). */
 export const FILE_INFO_COLUMNS = 'id, name, mime, size, width, height, thumb_key IS NOT NULL AS hasThumb';
@@ -41,17 +49,41 @@ export function rowToFileInfo(row: FileInfoRow): FileInfo {
   };
 }
 
+/** The upload body itself was bad: shorter or longer than its length, or the client's stream failed. */
+export class UploadStreamError extends Error {
+  constructor(cause: unknown) {
+    super('upload stream failed', { cause });
+    this.name = 'UploadStreamError';
+  }
+}
+
+// workerd's FixedLengthStream length-mismatch errors ("did not see all expected bytes", "too many bytes").
+const isLengthMismatch = (e: unknown): boolean => e instanceof TypeError && /FixedLengthStream/.test(e.message);
+
 /**
  * Streams exactly `length` bytes into R2 without buffering: the native FixedLengthStream gives R2 a known
- * length and errors on a short or long body. On any failure the key is deleted (best effort) and the error rethrown.
+ * length and errors on a short or long body. On any failure the key is deleted (best effort). A failure caused by
+ * the body (length mismatch, or the source stream erroring, e.g. a client disconnect) is thrown as
+ * `UploadStreamError`; anything else (an R2 failure) is rethrown as is.
  */
 export async function putExact(bucket: R2Bucket, key: string, body: ReadableStream, length: number): Promise<void> {
+  const fixed = new FixedLengthStream(length);
+  const abort = new AbortController();
+  let sourceFailed = false;
+  // An explicit, observed pipe (native stream to native stream) so a source failure is known when put rejects.
+  const piped = body.pipeTo(fixed.writable, { signal: abort.signal }).catch(() => {
+    sourceFailed = true;
+  });
   try {
-    await bucket.put(key, body.pipeThrough(new FixedLengthStream(length)));
+    await bucket.put(key, fixed.readable);
   } catch (e) {
+    // Classify before anything else can settle: a later pipe rejection could be our own abort below.
+    const streamFault = sourceFailed || isLengthMismatch(e);
+    abort.abort();
     await bucket.delete(key).catch(() => {});
-    throw e;
+    throw streamFault ? new UploadStreamError(e) : e;
   }
+  await piped;
 }
 
 export const quotaExceeded = () => new ApiError(413, 'quota_exceeded', 'This workspace has used its 2 GB of file storage.');
@@ -76,8 +108,10 @@ export async function storeUpload(
 
   try {
     await putExact(bucket, key, input.body, input.length);
-  } catch {
-    throw new ApiError(400, 'invalid_request', 'The upload did not complete.');
+  } catch (e) {
+    if (e instanceof UploadStreamError) throw new ApiError(400, 'invalid_request', 'The upload did not complete.');
+    console.error(JSON.stringify({ level: 'error', code: 'r2_put_failed' }));
+    throw new ApiError(500, 'upload_failed', 'The file could not be stored. Try again.');
   }
 
   let changes: number;

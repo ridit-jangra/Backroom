@@ -2,13 +2,32 @@ import { createExecutionContext, env, waitOnExecutionContext } from 'cloudflare:
 import { beforeEach, describe, expect, it } from 'vitest';
 import { FILES_QUOTA_BYTES, type FileInfo } from '@backroom/protocol';
 import { createApp } from '../src/app';
-import { fileKey, putExact, storeUpload, thumbKeyOf } from '../src/files/store';
+import { FILE_KEY_RE, UploadStreamError, fileKey, putExact, storeUpload, thumbKeyOf } from '../src/files/store';
 import { captureMailer, insertFile, png, resetDb, seedUsers, testDeps, uploadFile, webp } from './helpers';
 
 beforeEach(resetDb);
 
 const WS = '01JCLUBHACK0000000000000WS';
 const text = (s: string) => new TextEncoder().encode(s);
+
+async function thumbKeys(id: string): Promise<string[]> {
+  return (await env.BUCKET.list({ prefix: `${fileKey(WS, id)}-thumb` })).objects.map((o) => o.key);
+}
+
+async function storedThumbKey(id: string): Promise<string | null> {
+  return (await env.DB.prepare('SELECT thumb_key AS k FROM files WHERE id = ?').bind(id).first<{ k: string | null }>())?.k ?? null;
+}
+
+/** An ExecutionContext that records what the handler hands to waitUntil. */
+function recordingCtx(): { ctx: ExecutionContext; waited: Promise<unknown>[] } {
+  const waited: Promise<unknown>[] = [];
+  const ctx = {
+    waitUntil: (p: Promise<unknown>) => void waited.push(p),
+    passThroughOnException: () => {},
+    props: {},
+  } as unknown as ExecutionContext;
+  return { ctx, waited };
+}
 
 async function setup() {
   const { mailer, sent } = captureMailer();
@@ -159,12 +178,96 @@ describe('file upload', () => {
 
   it('putExact rejects a short stream and leaves no object', async () => {
     const key = `ws/${WS}/01JSHORT000000000000000000`;
-    await expect(putExact(env.BUCKET, key, streamOf(new Uint8Array(50)), 100)).rejects.toBeDefined();
+    await expect(putExact(env.BUCKET, key, streamOf(new Uint8Array(50)), 100)).rejects.toBeInstanceOf(UploadStreamError);
     expect(await env.BUCKET.head(key)).toBeNull();
-    await expect(putExact(env.BUCKET, key, streamOf(new Uint8Array(150)), 100)).rejects.toBeDefined();
+    await expect(putExact(env.BUCKET, key, streamOf(new Uint8Array(150)), 100)).rejects.toBeInstanceOf(UploadStreamError);
     expect(await env.BUCKET.head(key)).toBeNull();
     await putExact(env.BUCKET, key, streamOf(new Uint8Array(100)), 100);
     expect((await env.BUCKET.head(key))?.size).toBe(100);
+  });
+
+  it('the upload work runs under waitUntil, so the row is inserted even if the response is never delivered', async () => {
+    const s = await setup();
+    const { ctx, waited } = recordingCtx();
+    const res = await s.app.request(
+      '/w/clubhack/files?name=a.bin',
+      {
+        method: 'POST',
+        headers: { Origin: 'https://app.test', Cookie: s.alice.cookie, 'Content-Length': '1000' },
+        body: new Uint8Array(1000),
+      },
+      env,
+      ctx,
+    );
+    expect(waited).toHaveLength(1);
+    await Promise.all(waited);
+    expect((await env.DB.prepare('SELECT COUNT(*) AS n FROM files').first<{ n: number }>())?.n).toBe(1);
+    expect(res.status).toBe(201);
+  });
+
+  it('a Content-Length with no body is 400', async () => {
+    const s = await setup();
+    const ctx = createExecutionContext();
+    const res = await s.app.request(
+      '/w/clubhack/files?name=x',
+      { method: 'POST', headers: { Origin: 'https://app.test', Cookie: s.alice.cookie, 'Content-Length': '10' } },
+      env,
+      ctx,
+    );
+    await waitOnExecutionContext(ctx);
+    expect(res.status).toBe(400);
+    expect(await errCode(res)).toBe('invalid_request');
+    expect(await fileKeys()).toEqual([]);
+  });
+
+  it('R2 failures are 500 upload_failed (logged), body failures 400; nothing is left behind', async () => {
+    const s = await setup();
+    const deleted: string[] = [];
+    const failing = {
+      put: async () => {
+        throw new Error('r2 down');
+      },
+      delete: async (k: string) => void deleted.push(k),
+    } as unknown as R2Bucket;
+    const errors: string[] = [];
+    const orig = console.error;
+    console.error = (m: string) => void errors.push(m);
+    try {
+      const err = await storeUpload({ ...env, BUCKET: failing }, {
+        workspaceId: WS,
+        userId: s.alice.userId,
+        name: 'x',
+        declaredType: null,
+        length: 10,
+        body: streamOf(new Uint8Array(10)),
+        now: 1_800_000_000_000,
+      }).catch((e: unknown) => e);
+      expect(err).toMatchObject({ status: 500, code: 'upload_failed' });
+    } finally {
+      console.error = orig;
+    }
+    expect(errors.some((m) => m.includes('r2_put_failed'))).toBe(true);
+    expect(deleted).toHaveLength(1);
+    expect((await env.DB.prepare('SELECT COUNT(*) AS n FROM files').first<{ n: number }>())?.n).toBe(0);
+
+    const broken = new ReadableStream<Uint8Array>({
+      start(c) {
+        c.enqueue(new Uint8Array(10));
+        c.error(new Error('client went away'));
+      },
+    });
+    await expect(putExact(env.BUCKET, `ws/${WS}/01JBROKEN00000000000000000`, broken, 100)).rejects.toBeInstanceOf(UploadStreamError);
+    expect(await fileKeys()).toEqual([]);
+  });
+
+  it('FILE_KEY_RE matches originals and thumbnails only, never emoji keys', () => {
+    const id = '01JFILE0000000000000000000';
+    const t = '01JTHUMB000000000000000000';
+    expect(FILE_KEY_RE.test(fileKey(WS, id))).toBe(true);
+    expect(FILE_KEY_RE.test(thumbKeyOf(WS, id, t))).toBe(true);
+    expect(FILE_KEY_RE.test(`ws/${WS}/emoji/${id}`)).toBe(false);
+    expect(FILE_KEY_RE.test(`${fileKey(WS, id)}-thumb`)).toBe(false);
+    expect(FILE_KEY_RE.test(`${fileKey(WS, id)}/x`)).toBe(false);
   });
 
   it('non-members get 404', async () => {
@@ -209,19 +312,23 @@ describe('thumbnail upload', () => {
     const heavy = await postThumb(s.app, s.alice.cookie, img.id, webp(720, 360, 524_289));
     expect(heavy.status).toBe(413);
     expect(await errCode(heavy)).toBe('too_large');
-    expect(await env.BUCKET.head(thumbKeyOf(WS, img.id))).toBeNull();
+    expect(await thumbKeys(img.id)).toEqual([]);
 
     const ok = await postThumb(s.app, s.alice.cookie, img.id, webp(720, 360));
     expect(ok.status).toBe(200);
     const file = ((await ok.json()) as { file: FileInfo }).file;
     expect(file).toEqual({ ...img, hasThumb: true });
-    expect(await env.BUCKET.head(`ws/${WS}/${img.id}-thumb`)).not.toBeNull();
+    const live = await storedThumbKey(img.id);
+    expect(live).toMatch(new RegExp(`^ws/${WS}/${img.id}-thumb-[0-9A-Z]{26}$`));
+    expect(live).toMatch(FILE_KEY_RE);
+    expect(await thumbKeys(img.id)).toEqual([live]);
 
     // P4-R20: one thumbnail per file.
     const again = await postThumb(s.app, s.alice.cookie, img.id, webp(100, 50));
     expect(again.status).toBe(409);
     expect(await errCode(again)).toBe('already_has_thumbnail');
-    expect((await env.BUCKET.head(thumbKeyOf(WS, img.id)))?.size).toBe(webp(720, 360).length);
+    expect(await thumbKeys(img.id)).toEqual([live]);
+    expect(await storedThumbKey(img.id)).toBe(live);
 
     const txt = await created(await uploadFile(s.app, s.alice.cookie, text('hi'), { name: 'a.txt', type: 'text/plain' }));
     const txtThumb = await postThumb(s.app, s.alice.cookie, txt.id, webp(10, 10));
@@ -233,15 +340,47 @@ describe('thumbnail upload', () => {
     const attached = await postThumb(s.app, s.alice.cookie, img2.id, webp(100, 100));
     expect(attached.status).toBe(409);
     expect(await errCode(attached)).toBe('already_attached');
-    expect(await env.BUCKET.head(thumbKeyOf(WS, img2.id))).toBeNull();
+    expect(await thumbKeys(img2.id)).toEqual([]);
+  });
+
+  it('concurrent thumbnail posts: one wins, the live thumbnail is the winner\'s bytes, the loser leaves nothing', async () => {
+    const s = await setup();
+    const img = await created(await uploadFile(s.app, s.alice.cookie, png(2000, 1000), { name: 'big.png' }));
+    const a = webp(720, 360, 2_000);
+    const b = webp(100, 50, 1_000);
+    const [ra, rb] = await Promise.all([postThumb(s.app, s.alice.cookie, img.id, a), postThumb(s.app, s.alice.cookie, img.id, b)]);
+    expect([ra.status, rb.status].sort()).toEqual([200, 409]);
+    const loser = ra.status === 409 ? ra : rb;
+    expect(await errCode(loser)).toBe('already_has_thumbnail');
+    const live = await storedThumbKey(img.id);
+    expect(await thumbKeys(img.id)).toEqual([live]);
+    const obj = await env.BUCKET.get(live!);
+    expect(new Uint8Array(await obj!.arrayBuffer())).toEqual(ra.status === 200 ? a : b);
+  });
+
+  it('the link UPDATE runs under waitUntil, so it completes even if the response is never delivered', async () => {
+    const s = await setup();
+    const img = await created(await uploadFile(s.app, s.alice.cookie, png(100, 100), { name: 'p.png' }));
+    const { ctx, waited } = recordingCtx();
+    const res = await s.app.request(
+      `/files/${img.id}/thumb`,
+      { method: 'POST', headers: { Origin: 'https://app.test', Cookie: s.alice.cookie }, body: webp(100, 100) },
+      env,
+      ctx,
+    );
+    expect(waited).toHaveLength(1);
+    await Promise.all(waited);
+    expect(await storedThumbKey(img.id)).not.toBeNull();
+    expect(res.status).toBe(200);
   });
 
   it('insertFile stores objects under the real keys', async () => {
     const s = await setup();
     const id = await insertFile({ uploaderId: s.alice.userId, object: text('abc'), thumb: true, mime: 'image/png' });
     expect((await env.BUCKET.head(fileKey(WS, id)))?.size).toBe(3);
-    expect(await env.BUCKET.head(thumbKeyOf(WS, id))).not.toBeNull();
-    const row = await env.DB.prepare('SELECT size, thumb_key FROM files WHERE id = ?').bind(id).first();
-    expect(row).toEqual({ size: 3, thumb_key: thumbKeyOf(WS, id) });
+    const key = await storedThumbKey(id);
+    expect(key).toMatch(FILE_KEY_RE);
+    expect(await env.BUCKET.head(key!)).not.toBeNull();
+    expect((await env.DB.prepare('SELECT size FROM files WHERE id = ?').bind(id).first())?.size).toBe(3);
   });
 });

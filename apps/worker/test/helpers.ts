@@ -192,7 +192,7 @@ export async function insertFile(opts: {
   const createdAt = opts.createdAt ?? 1_800_000_000_000;
   const id = newId(createdAt);
   const key = fileKey(ws, id);
-  const thumbKey = opts.thumb ? thumbKeyOf(ws, id) : null;
+  const thumbKey = opts.thumb ? thumbKeyOf(ws, id, newId(createdAt)) : null;
   if (opts.object) await env.BUCKET.put(key, opts.object);
   if (thumbKey) await env.BUCKET.put(thumbKey, webp(10, 10), { httpMetadata: { contentType: 'image/webp' } });
   await env.DB.prepare(
