@@ -92,3 +92,14 @@ button.link:hover { text-decoration: underline; }
 .emoji { width: 1.375em; height: 1.375em; vertical-align: -0.3em; }
 .msg-text.jumbo .emoji { width: 2.5rem; height: 2.5rem; }
 .sidebar-footer { padding-top: 1rem; font-size: 0.85em; }
+.emoji-trigger { position: absolute; right: 0.5rem; bottom: 0.5rem; border: 0; background: transparent; color: inherit; font-size: 1.1rem; cursor: pointer; }
+.emoji-picker { position: absolute; bottom: 100%; right: 0; width: min(21rem, 100vw - 2rem); margin: 0 0 0.25rem; padding: 0.5rem; background: var(--bg); border: 1px solid var(--line); border-radius: 8px; z-index: 15; }
+.emoji-picker input[type="search"] { width: 100%; margin-bottom: 0.4rem; }
+.emoji-tabs, .emoji-tones { display: flex; gap: 0.15rem; flex-wrap: wrap; }
+.emoji-tabs button, .emoji-tones button, .emoji-grid button { border: 1px solid transparent; background: transparent; color: inherit; border-radius: 4px; cursor: pointer; padding: 0.15rem; font: inherit; }
+.emoji-tabs button[aria-selected="true"], .emoji-tones button[aria-checked="true"] { border-color: var(--fg); }
+.emoji-grid { max-height: 12rem; overflow-y: auto; margin: 0.4rem 0; }
+.emoji-row { display: grid; grid-template-columns: repeat(8, 1fr); }
+.emoji-row [role="gridcell"] { display: contents; }
+.emoji-grid button:hover, .emoji-grid button:focus-visible { background: var(--line); }
+.emoji-empty { margin: 0.75rem 0; text-align: center; }

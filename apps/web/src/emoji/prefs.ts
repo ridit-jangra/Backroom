@@ -1,3 +1,4 @@
+import { REACTION_CODE_RE } from '@backroom/protocol';
 import { DEFAULT_FREQUENT, type SkinTone } from '@backroom/emoji';
 
 /** Per-user emoji preferences, kept only in this browser's localStorage. */
@@ -35,9 +36,12 @@ export function loadPrefs(userId: string): EmojiPrefs {
   const p = parsed as { skinTone?: unknown; uses?: unknown };
   if (!isTone(p.skinTone) || typeof p.uses !== 'object' || p.uses === null || Array.isArray(p.uses)) return defaults();
   // fromEntries defines own properties, so a stored "__proto__" key stays inert.
+  // P3-R17: only well-formed codes, and only the 50 most recent (a hand-edited store can't bloat state).
   const uses: EmojiPrefs['uses'] = Object.fromEntries(
     Object.entries(p.uses)
-      .filter((e): e is [string, { n: number; at: number }] => isUse(e[1]))
+      .filter((e): e is [string, { n: number; at: number }] => REACTION_CODE_RE.test(e[0]) && isUse(e[1]))
+      .sort(([, a], [, b]) => b.at - a.at)
+      .slice(0, MAX_USES)
       .map(([code, u]) => [code, { n: u.n, at: u.at }]),
   );
   return { skinTone: p.skinTone, uses };

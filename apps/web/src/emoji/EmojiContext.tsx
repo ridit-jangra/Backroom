@@ -22,14 +22,17 @@ function builtin(name: string, tone: SkinTone | null): ResolvedEmoji | null {
   return b ? { src: twemojiSrc(b.img), alt: b.char, title: `:${formatShortcode(name, tone)}:` } : null;
 }
 
+/** P3-R17: a custom emoji image must be served from our own /emoji/ route; anything else renders as text. */
+const ownUrl = (u: string | null): string | null => (u !== null && u.startsWith('/emoji/') ? u : null);
+
 function makeResolvers(custom: ReadonlyMap<string, CustomEmoji>) {
   /** A custom emoji's image src: its own url, or its alias target's (built-in or custom). */
   function customSrc(c: CustomEmoji): string | null {
-    if (c.aliasFor === null) return c.url;
+    if (c.aliasFor === null) return ownUrl(c.url);
     const b = resolveBuiltin(c.aliasFor, null);
     if (b) return twemojiSrc(b.img);
     const target = custom.get(c.aliasFor);
-    return target && target.aliasFor === null ? target.url : null;
+    return target && target.aliasFor === null ? ownUrl(target.url) : null;
   }
   function resolve(name: string, tone: SkinTone | null): ResolvedEmoji | null {
     const b = builtin(name, tone);

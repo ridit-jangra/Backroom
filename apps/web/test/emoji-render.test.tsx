@@ -109,3 +109,19 @@ describe('emoji rendering', () => {
     expect(screen.getByRole('link', { name: 'Back to chat' })).toBeTruthy();
   });
 });
+
+describe('custom emoji url hardening (P3-R17b)', () => {
+  it('uses only /emoji/ urls as img src, else renders :name: text', () => {
+    const evil: CustomEmoji = { ...partyparrot, name: 'evil', url: 'https://evil.example/x.png' };
+    const js: CustomEmoji = { ...partyparrot, name: 'jsx', url: 'javascript:alert(1)' };
+    const { container } = render(
+      <EmojiProvider userId={ME} custom={[partyparrot, evil, js]}>
+        <MessageText body=":partyparrot: :evil: :jsx:" members={[]} me={ME} />
+      </EmojiProvider>,
+    );
+    const srcs = [...container.querySelectorAll('img')].map((i) => i.getAttribute('src'));
+    expect(srcs).toEqual([`/emoji/${partypartyparrotId}`]);
+    expect(container.textContent).toContain(':evil:');
+    expect(container.textContent).toContain(':jsx:');
+  });
+});

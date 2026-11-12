@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { Composer } from '../src/components/Composer';
+import { EmojiProvider } from '../src/emoji/EmojiContext';
 
 afterEach(() => {
   cleanup();
@@ -139,5 +140,75 @@ describe('Composer', () => {
     const ids = screen.getAllByRole('listbox').map((l) => l.id);
     expect(new Set(ids).size).toBe(2);
     expect(a.getAttribute('aria-controls')).not.toBe(b.getAttribute('aria-controls'));
+  });
+});
+
+describe('Composer emoji', () => {
+  const ME = '01JME'.padEnd(26, '0');
+  const pid = '01JPARROT'.padEnd(26, '0');
+  const parrot = { id: pid, name: 'thumbparrot', url: `/emoji/${pid}`, aliasFor: null, createdBy: ME, createdAt: 1 };
+  function emojiSetup(custom: (typeof parrot)[] = [], tone?: number) {
+    localStorage.clear();
+    if (tone) localStorage.setItem(`backroom:emoji:${ME}`, JSON.stringify({ skinTone: tone, uses: {} }));
+    const onSubmit = vi.fn();
+    render(
+      <EmojiProvider userId={ME} custom={custom}>
+        <Composer placeholder="Message" members={members} onSubmit={onSubmit} />
+      </EmojiProvider>,
+    );
+    return { onSubmit, ta: screen.getByLabelText('Message') as HTMLTextAreaElement };
+  }
+  const opts = () => screen.queryAllByRole('option').map((o) => o.textContent!.trim());
+
+  it('":thu" suggests matched names and Tab inserts the code', () => {
+    const { onSubmit, ta } = emojiSetup();
+    type(ta, ':thu');
+    expect(screen.getByRole('listbox', { name: 'Emoji suggestions' })).toBeTruthy();
+    expect(opts().slice(0, 2)).toEqual([':thumbsup:', ':thumbsdown:']);
+    fireEvent.keyDown(ta, { key: 'Tab' });
+    expect(ta.value).toBe(':thumbsup: ');
+    fireEvent.keyDown(ta, { key: 'Enter' });
+    expect(onSubmit).toHaveBeenCalledWith(':thumbsup:');
+  });
+
+  it('no suggestions for ":)", "10:30" or a 1-char query', () => {
+    const { ta } = emojiSetup();
+    for (const v of [':)', '10:30', ':t']) {
+      type(ta, v);
+      expect(screen.queryByRole('listbox')).toBeNull();
+    }
+  });
+
+  it('Escape dismisses suggestions', () => {
+    const { ta } = emojiSetup();
+    type(ta, ':thu');
+    fireEvent.keyDown(ta, { key: 'Escape' });
+    expect(screen.queryByRole('listbox')).toBeNull();
+  });
+
+  it('custom emoji are suggested first', () => {
+    const { ta } = emojiSetup([parrot]);
+    type(ta, ':thumb');
+    expect(opts()[0]).toBe(':thumbparrot:');
+    fireEvent.keyDown(ta, { key: 'Enter' });
+    expect(ta.value).toBe(':thumbparrot: ');
+  });
+
+  it('emoji button inserts at the caret', () => {
+    const { ta } = emojiSetup();
+    type(ta, 'hi');
+    fireEvent.click(screen.getByRole('button', { name: 'Emoji' }));
+    expect(screen.getByRole('dialog', { name: 'Insert emoji' })).toBeTruthy();
+    fireEvent.change(screen.getByLabelText('Search emoji'), { target: { value: 'tada' } });
+    fireEvent.keyDown(screen.getByLabelText('Search emoji'), { key: 'Enter' });
+    expect(ta.value).toBe('hi :tada: ');
+    expect(screen.queryByRole('dialog')).toBeNull();
+  });
+
+  it('skin tone preference is applied to toneable suggestions', () => {
+    const { ta } = emojiSetup([], 3);
+    type(ta, ':wav');
+    fireEvent.keyDown(ta, { key: 'Tab' });
+    expect(ta.value).toBe(':wave::skin-tone-3: ');
   });
 });
