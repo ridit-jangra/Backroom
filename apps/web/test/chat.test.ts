@@ -1,4 +1,4 @@
-import { TYPING_TTL_MS, type ChannelSummary, type Message } from '@backroom/protocol';
+import { TYPING_TTL_MS, type ChannelSummary, type CustomEmoji, type Message } from '@backroom/protocol';
 import { describe, expect, it } from 'vitest';
 import type { PendingSend } from '../src/realtime/outbox';
 import { initialChat, isViewing, lastSeenFor, reduce, type ChatEvent, type ChatState } from '../src/state/chat';
@@ -329,5 +329,92 @@ describe('catchup presence (final review)', () => {
     expect(s.presence).toEqual({ [ME]: 'active' });
     s = run(s, { t: 'catchup', messages: [], presence: [] });
     expect(s.presence).toEqual({});
+  });
+});
+
+describe('reactions and custom emoji', () => {
+  const BOB = 'B'.repeat(26);
+  const withWindowAndThread = () => {
+    let s = setup();
+    s = run(s, { t: 'local.history', channelId: 'c1', page: { messages: [msg(1), msg(2, { parentId: 'm1' })], hasMore: false }, mode: 'replace' });
+    return run(s, { t: 'local.thread', page: { parent: msg(1), replies: [msg(2, { parentId: 'm1' })] } });
+  };
+  const rx = (messageId: string, on: boolean, emoji = '+1', userId = BOB): ChatEvent => ({ t: 'reaction', channelId: 'c1', messageId, emoji, userId, on });
+
+  it('reaction on/off updates window and thread copies and is idempotent', () => {
+    let s = withWindowAndThread();
+    s = run(s, rx('m1', true));
+    const again = run(s, rx('m1', true));
+    expect(again).toBe(s);
+    expect(s.windows.c1!.messages[0]!.reactions).toEqual([{ emoji: '+1', userIds: [BOB] }]);
+    expect(s.threads.m1!.parent.reactions).toEqual([{ emoji: '+1', userIds: [BOB] }]);
+    s = run(s, rx('m1', true, '+1', OTHER));
+    s = run(s, rx('m1', true, 'tada'));
+    expect(s.windows.c1!.messages[0]!.reactions).toEqual([{ emoji: '+1', userIds: [BOB, OTHER] }, { emoji: 'tada', userIds: [BOB] }]);
+    s = run(s, rx('m2', true));
+    expect(s.threads.m1!.replies[0]!.reactions).toEqual([{ emoji: '+1', userIds: [BOB] }]);
+    s = run(s, rx('m1', false, '+1', OTHER));
+    s = run(s, rx('m1', false));
+    expect(s.windows.c1!.messages[0]!.reactions).toEqual([{ emoji: 'tada', userIds: [BOB] }]);
+    s = run(s, rx('m1', false, 'tada'));
+    expect(s.windows.c1!.messages[0]!.reactions).toEqual([]);
+    expect(run(s, rx('m1', false))).toBe(s);
+    expect(run(s, rx('nope', true))).toBe(s);
+  });
+
+  it('edit and delete frames without reactions keep the held reactions', () => {
+    let s = withWindowAndThread();
+    s = run(s, rx('m1', true));
+    s = run(s, { t: 'message.edit', message: msg(1, { body: 'e', editedAt: 5 }) });
+    expect(s.windows.c1!.messages[0]!.body).toBe('e');
+    expect(s.windows.c1!.messages[0]!.reactions).toEqual([{ emoji: '+1', userIds: [BOB] }]);
+    s = run(s, { t: 'message.delete', message: msg(1, { body: '', editedAt: 5, deletedAt: 6 }) });
+    expect(s.windows.c1!.messages[0]!.deletedAt).toBe(6);
+    expect(s.windows.c1!.messages[0]!.reactions).toEqual([{ emoji: '+1', userIds: [BOB] }]);
+    expect(s.threads.m1!.parent.reactions).toEqual([{ emoji: '+1', userIds: [BOB] }]);
+  });
+
+  it('a held newer edit still takes the incoming reactions (P3-R13)', () => {
+    let s = withWindowAndThread();
+    s = run(s, { t: 'message.edit', message: msg(1, { body: 'new', editedAt: 9 }) });
+    s = run(s, { t: 'message.edit', message: msg(1, { body: 'old', editedAt: 3, reactions: [{ emoji: 'tada', userIds: [BOB] }] }) });
+    const m = s.windows.c1!.messages[0]!;
+    expect(m.body).toBe('new');
+    expect(m.reactions).toEqual([{ emoji: 'tada', userIds: [BOB] }]);
+  });
+
+  it('history replace takes the server\'s reactions', () => {
+    let s = withWindowAndThread();
+    s = run(s, rx('m1', true));
+    s = run(s, { t: 'local.history', channelId: 'c1', page: { messages: [msg(1, { reactions: [{ emoji: 'tada', userIds: [OTHER] }] })], hasMore: false }, mode: 'replace' });
+    expect(s.windows.c1!.messages[0]!.reactions).toEqual([{ emoji: 'tada', userIds: [OTHER] }]);
+  });
+
+  it('emoji.update adds and removes by id; bootstrap without customEmoji keeps the current set', () => {
+    const ce = (id: string, name: string): CustomEmoji => ({ id, name, url: `/emoji/${id}`, aliasFor: null, createdBy: ME, createdAt: 1 }) as CustomEmoji;
+    let s = setup();
+    s = run(s, { t: 'emoji.update', added: [ce('e1', 'party'), ce('e2', 'wow')], removed: [] });
+    expect(Object.keys(s.customEmoji).sort()).toEqual(['party', 'wow']);
+    s = run(s, { t: 'emoji.update', added: [ce('e3', 'neo')], removed: ['e1'] });
+    expect(Object.keys(s.customEmoji).sort()).toEqual(['neo', 'wow']);
+    s = run(s, { t: 'local.bootstrap', bootstrap: { ...s.bootstrap! } });
+    expect(Object.keys(s.customEmoji).sort()).toEqual(['neo', 'wow']);
+    s = run(s, { t: 'local.bootstrap', bootstrap: { ...s.bootstrap!, customEmoji: [ce('e9', 'only')] } });
+    expect(Object.keys(s.customEmoji)).toEqual(['only']);
+  });
+
+  it('reaction and emoji.update never mutate a deep-frozen state', () => {
+    const deepFreeze = <T>(o: T): T => {
+      if (o && typeof o === 'object' && !Object.isFrozen(o)) { Object.freeze(o); Object.values(o).forEach(deepFreeze); }
+      return o;
+    };
+    let s = withWindowAndThread();
+    s = run(s, rx('m1', true));
+    deepFreeze(s);
+    const snap = JSON.stringify(s);
+    run(s, rx('m1', true, 'tada'));
+    run(s, rx('m1', false));
+    run(s, { t: 'emoji.update', added: [], removed: ['x'] });
+    expect(JSON.stringify(s)).toBe(snap);
   });
 });

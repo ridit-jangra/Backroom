@@ -3,6 +3,7 @@ import {
   extractMentions,
   type Bootstrap,
   type ChannelSummary,
+  type CustomEmoji,
   type HistoryPage,
   type HubFrame,
   type Message,
@@ -22,6 +23,8 @@ export type ChatState = {
   channels: Record<string, ChannelSummary>;
   windows: Record<string, ChannelWindow>;
   threads: Record<string, ThreadPage>;
+  /** Custom emoji by name. */
+  customEmoji: Record<string, CustomEmoji>;
   /** Channels archived while this tab was open: kept read-only so the open view does not vanish. */
   archived: Record<string, { name: string | null; topic: string | null; window: ChannelWindow | undefined }>;
   pending: PendingSend[];
@@ -53,6 +56,7 @@ export function initialChat(me: string): ChatState {
     channels: {},
     windows: {},
     threads: {},
+    customEmoji: {},
     archived: {},
     pending: [],
     presence: {},
@@ -78,9 +82,53 @@ export function lastSeenFor(s: ChatState): Record<string, number> {
 /** Pick between a held message and an incoming copy; a replay never reverts newer edits or deletes. */
 function pick(held: Message | undefined, incoming: Message): Message {
   if (!held) return incoming;
-  if (held.deletedAt !== null && incoming.deletedAt === null) return held;
-  if (held.deletedAt === null && incoming.deletedAt !== null) return incoming;
-  return (held.editedAt ?? 0) > (incoming.editedAt ?? 0) ? held : incoming;
+  let winner: Message;
+  if (held.deletedAt !== null && incoming.deletedAt === null) winner = held;
+  else if (held.deletedAt === null && incoming.deletedAt !== null) winner = incoming;
+  else winner = (held.editedAt ?? 0) > (incoming.editedAt ?? 0) ? held : incoming;
+  // P3-R13: frames without `reactions` (edits, deletes, duplicate acks) never wipe what is held.
+  const reactions = incoming.reactions ?? held.reactions;
+  return winner.reactions === reactions ? winner : { ...winner, reactions };
+}
+
+/** Toggle one user's reaction on a message; the same object when nothing changes. */
+function reactOn(m: Message, emoji: string, userId: string, on: boolean): Message {
+  const list = m.reactions ?? [];
+  const i = list.findIndex((r) => r.emoji === emoji);
+  if (on) {
+    if (i === -1) return { ...m, reactions: [...list, { emoji, userIds: [userId] }] };
+    if (list[i]!.userIds.includes(userId)) return m;
+    return { ...m, reactions: list.map((r, j) => (j === i ? { ...r, userIds: [...r.userIds, userId] } : r)) };
+  }
+  if (i === -1 || !list[i]!.userIds.includes(userId)) return m;
+  const userIds = list[i]!.userIds.filter((u) => u !== userId);
+  const reactions =
+    userIds.length === 0 ? list.filter((_, j) => j !== i) : list.map((r, j) => (j === i ? { ...r, userIds } : r));
+  return { ...m, reactions };
+}
+
+function applyReaction(s: ChatState, f: Extract<HubFrame, { t: 'reaction' }>): ChatState {
+  const upd = (m: Message): Message => (m.id === f.messageId ? reactOn(m, f.emoji, f.userId, f.on) : m);
+  const mapAll = (list: Message[]): Message[] => {
+    const out = list.map(upd);
+    return out.some((m, i) => m !== list[i]) ? out : list;
+  };
+  let windows = s.windows;
+  const w = s.windows[f.channelId];
+  if (w) {
+    const messages = mapAll(w.messages);
+    if (messages !== w.messages) windows = { ...windows, [f.channelId]: { ...w, messages } };
+  }
+  let threads = s.threads;
+  for (const [pid, t] of Object.entries(s.threads)) {
+    const parent = upd(t.parent);
+    const replies = mapAll(t.replies);
+    if (parent !== t.parent || replies !== t.replies) {
+      if (threads === s.threads) threads = { ...threads };
+      threads[pid] = { parent, replies };
+    }
+  }
+  return windows === s.windows && threads === s.threads ? s : { ...s, windows, threads };
 }
 
 function mergeMessages(existing: Message[], incoming: Message[]): Message[] {
@@ -303,8 +351,14 @@ export function reduce(state: ChatState, e: ChatEvent, now: number): ChatState {
         ),
       };
     case 'reaction':
-    case 'emoji.update':
-      return state; // TODO(Task 7)
+      return applyReaction(state, e);
+    case 'emoji.update': {
+      const gone = new Set(e.removed);
+      const customEmoji: Record<string, CustomEmoji> = {};
+      for (const [name, c] of Object.entries(state.customEmoji)) if (!gone.has(c.id)) customEmoji[name] = c;
+      for (const c of e.added) customEmoji[c.name] = c;
+      return { ...state, customEmoji };
+    }
     case 'notify':
     case 'pong':
       return state;
@@ -316,7 +370,10 @@ export function reduce(state: ChatState, e: ChatEvent, now: number): ChatState {
         const merged = { ...c, lastSeq };
         channels[c.id] = isViewing(state, c.id) ? zeroCounts(merged) : merged;
       }
-      return { ...state, me: e.bootstrap.me.id, bootstrap: e.bootstrap, channels };
+      const customEmoji = e.bootstrap.customEmoji
+        ? Object.fromEntries(e.bootstrap.customEmoji.map((c) => [c.name, c]))
+        : state.customEmoji;
+      return { ...state, me: e.bootstrap.me.id, bootstrap: e.bootstrap, channels, customEmoji };
     }
     case 'local.history': {
       const old = state.windows[e.channelId];

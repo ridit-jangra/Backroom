@@ -27,6 +27,7 @@ export type ChatActions = {
   /** False when the frame could not be sent (not connected); the caller keeps the user's input. */
   edit(messageId: string, body: string): boolean;
   remove(messageId: string): boolean;
+  react(messageId: string, emoji: string, on: boolean): boolean;
   typing(channelId: string, parentId?: string | null): void;
   /** Re-fetch bootstrap; after a failed first load this also starts the socket. */
   refresh(): Promise<void>;
@@ -49,6 +50,7 @@ function frameUserIds(f: HubFrame): string[] {
       return [...f.messages.map((m) => m.userId), ...f.presence.map((p) => p.userId)];
     case 'presence':
     case 'typing':
+    case 'reaction':
       return [f.userId];
     default:
       return [];
@@ -194,6 +196,7 @@ function startSession(
     discard: (clientId) => outbox.discard(clientId),
     edit: (messageId, body) => sendFrame({ t: 'edit', messageId, body }),
     remove: (messageId) => sendFrame({ t: 'delete', messageId }),
+    react: (messageId, emoji, on) => sendFrame({ t: 'react', messageId, emoji, on }),
     typing(channelId, parentId = null) {
       sendFrame(parentId ? { t: 'typing', channelId, parentId } : { t: 'typing', channelId });
     },
@@ -341,6 +344,7 @@ export function useChat(slug: string): { state: ChatState; actions: ChatActions;
       discard: (id) => impl.current?.discard(id),
       edit: (id, body) => impl.current?.edit(id, body) ?? false,
       remove: (id) => impl.current?.remove(id) ?? false,
+      react: (id, emoji, on) => impl.current?.react(id, emoji, on) ?? false,
       typing: (cid, pid) => impl.current?.typing(cid, pid),
       refresh: () => impl.current?.refresh() ?? Promise.resolve(),
     }),
