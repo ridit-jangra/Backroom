@@ -59,3 +59,22 @@ describe('ws frames', () => {
     expect(parseClientFrame('{"t":"future_thing"}')).toEqual({ ok: false, code: 'invalid' });
   });
 });
+
+describe('files on the wire', () => {
+  it('send body may be blank only with files; at most 10 files', () => {
+    const base = { t: 'send', clientId: 'c-12345678', channelId: GN };
+    expect(parseClientFrame(JSON.stringify({ ...base, body: '', fileIds: [GN] })).ok).toBe(true);
+    expect(parseClientFrame(JSON.stringify({ ...base, body: '  ' }))).toEqual({ ok: false, clientId: 'c-12345678', code: 'invalid' });
+    expect(parseClientFrame(JSON.stringify({ ...base, body: '', fileIds: [] })).ok).toBe(false);
+    expect(parseClientFrame(JSON.stringify({ ...base, body: 'x', fileIds: Array(11).fill(GN) })).ok).toBe(false);
+    expect(parseClientFrame(JSON.stringify({ t: 'edit', messageId: GN, body: ' ' })).ok).toBe(false);
+  });
+  it('files on messages are optional both ways', () => {
+    const old = { id: GN, channelId: GN, seq: 1, userId: GN, parentId: null, body: 'x', alsoInChannel: false,
+      createdAt: 1, editedAt: null, deletedAt: null, replyCount: 0, lastReplyAt: null };
+    const f = { id: GN, name: 'a.png', mime: 'image/png', size: 3, width: 1, height: 1, hasThumb: false };
+    const r = parseHubFrame(JSON.stringify({ t: 'message.new', message: { ...old, files: [f] } }));
+    expect(r && r.t === 'message.new' && r.message.files).toEqual([f]);
+    expect(parseHubFrame(JSON.stringify({ t: 'message.new', message: old }))).not.toBeNull();
+  });
+});

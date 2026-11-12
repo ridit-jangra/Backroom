@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { ChannelKind, MemberSummary } from './rest';
 import { ReactionSummarySchema } from './emoji';
+import { FileInfoSchema } from './files';
 
 export const MAX_BODY = 40_000;
 export const CATCHUP_LIMIT = 200;
@@ -33,6 +34,8 @@ export const MessageSchema = z.object({
   lastReplyAt: z.number().nullable(),
   /** Absent = unknown (keep what you hold); [] = none. */
   reactions: z.array(ReactionSummarySchema).optional(),
+  /** Absent = unknown (keep what you hold); [] = none. */
+  files: z.array(FileInfoSchema).optional(),
 });
 export type Message = z.infer<typeof MessageSchema>;
 

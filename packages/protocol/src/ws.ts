@@ -9,6 +9,7 @@ import {
   NotifyKindSchema,
   PresenceStateSchema,
 } from './messaging';
+import { MAX_FILES_PER_MESSAGE } from './files';
 import { CustomEmojiSchema, ReactionCode } from './emoji';
 
 const Body = z
@@ -30,8 +31,8 @@ export const ClientFrame = z.discriminatedUnion('t', [
     clientId: ClientId,
     channelId: Id,
     parentId: Id.optional(),
-    body: Body,
-    fileIds: z.array(Id).max(10).optional(),
+    body: z.string().max(MAX_BODY),
+    fileIds: z.array(Id).max(MAX_FILES_PER_MESSAGE).optional(),
     alsoInChannel: z.boolean().optional(),
   }),
   z.object({ t: z.literal('edit'), messageId: Id, body: Body, clientId: ClientId.optional() }),
@@ -42,7 +43,11 @@ export const ClientFrame = z.discriminatedUnion('t', [
   z.object({ t: z.literal('typing'), channelId: Id, parentId: Id.optional() }),
   z.object({ t: z.literal('activity') }),
   z.object({ t: z.literal('ping') }),
-]);
+]).superRefine((f, ctx) => {
+  if (f.t === 'send' && f.body.trim().length === 0 && (f.fileIds === undefined || f.fileIds.length === 0)) {
+    ctx.addIssue({ code: 'custom', path: ['body'], message: 'body must not be blank' });
+  }
+});
 export type ClientFrame = z.infer<typeof ClientFrame>;
 
 export type ParsedClientFrame =
