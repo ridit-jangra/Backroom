@@ -4,9 +4,15 @@ import type { CustomEmoji, WorkspaceSettings } from './emoji';
 export const AuthStartBody = z.object({
   email: z.string().trim().toLowerCase().email().max(254),
   inviteToken: z.string().max(100).optional(),
+  desktopChallenge: z.string().regex(/^[A-Za-z0-9_-]{43}$/).optional(),
 });
 
 export const AuthVerifyBody = z.object({ token: z.string().min(10).max(100) });
+
+export const DesktopExchangeBody = z.object({
+  code: z.string().min(10).max(100),
+  verifier: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
+});
 
 export const InviteCreateBody = z.object({
   maxUses: z.number().int().min(1).max(500).default(50),

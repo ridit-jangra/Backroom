@@ -64,7 +64,7 @@ const SEED_CHANNELS = ['01JCLUBHACK0000000000000GN', '01JCLUBHACK0000000000000RD
 export async function resetDb(): Promise<void> {
   const tables = [
     'message_files', 'files', 'custom_emoji', 'reactions', 'mentions', 'thread_follows', 'messages',
-    'channel_members', 'sessions', 'login_codes', 'login_tokens', 'rate_limits', 'invites',
+    'channel_members', 'sessions', 'desktop_codes', 'login_codes', 'login_tokens', 'rate_limits', 'invites',
     'workspace_members', 'users',
   ];
   await env.DB.batch([

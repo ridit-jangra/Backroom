@@ -9,7 +9,7 @@ const COOKIE_MAX_AGE_S = 30 * 86_400;
 export function setSessionCookie(c: Context<AppEnv>, token: string): void {
   setCookie(c, SESSION_COOKIE, token, {
     httpOnly: true,
-    secure: true,
+    secure: c.env.APP_ORIGIN.startsWith('https:'),
     sameSite: 'Lax',
     path: '/',
     maxAge: COOKIE_MAX_AGE_S,
@@ -19,7 +19,7 @@ export function setSessionCookie(c: Context<AppEnv>, token: string): void {
 export function clearSessionCookie(c: Context<AppEnv>): void {
   setCookie(c, SESSION_COOKIE, '', {
     httpOnly: true,
-    secure: true,
+    secure: c.env.APP_ORIGIN.startsWith('https:'),
     sameSite: 'Lax',
     path: '/',
     maxAge: 0,
