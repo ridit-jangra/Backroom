@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { api, ApiClientError } from '../api';
 import { navigate } from '../nav';
 import { ChannelBrowser } from '../components/ChannelBrowser';
@@ -11,6 +11,7 @@ import { ThreadPanel } from '../components/ThreadPanel';
 import { TypingIndicator } from '../components/TypingIndicator';
 import { channelLabel, notificationPermission, requestNotificationPermission } from '../notifications';
 import { useChat } from '../realtime/useChat';
+import { EmojiProvider } from '../emoji/EmojiContext';
 
 export function Workspace({ slug, channelId }: { slug: string; channelId?: string }) {
   const { state, actions, error, threadError } = useChat(slug);
@@ -19,6 +20,8 @@ export function Workspace({ slug, channelId }: { slug: string; channelId?: strin
   const [dialog, setDialog] = useState<'browse' | 'dm' | 'settings' | null>(null);
   const bootstrap = state.bootstrap;
   const base = `/client/${encodeURIComponent(slug)}`;
+  // Stable while the custom set is unchanged, so messages are not re-tokenized on every render.
+  const customEmoji = useMemo(() => Object.values(state.customEmoji), [state.customEmoji]);
 
   // With no channel in the URL, land on #general (else the first channel).
   useEffect(() => {
@@ -94,131 +97,133 @@ export function Workspace({ slug, channelId }: { slug: string; channelId?: strin
     : [];
 
   return (
-    <div className={`shell${threadOpen ? ' has-thread' : ''}`}>
-      <Sidebar
-        slug={slug}
-        workspaceName={bootstrap.workspace.name}
-        channels={Object.values(state.channels)}
-        members={members}
-        me={me}
-        myRole={myRole}
-        presence={state.presence}
-        activeChannelId={channelId ?? null}
-        notificationPermission={permission}
-        onOpenChannel={(id) => navigate(`${base}/${id}`)}
-        onBrowseChannels={() => setDialog('browse')}
-        onNewMessage={() => setDialog('dm')}
-        onEnableNotifications={() => void enableNotifications()}
-        onAdmin={() => navigate(`${base}/admin`)}
-      />
-      <div className="main">
-        <header>
-          <div className="channel-title">
-            <strong>{channel ? label : archived ? `#${archived.name ?? ''}` : bootstrap.workspace.name}</strong>
-            {archived && <span className="muted topic">Archived</span>}
-            {(channel?.topic ?? archived?.topic) && <span className="muted topic">{channel?.topic ?? archived?.topic}</span>}
-          </div>
-          {channel && !isDm && (
-            <button type="button" onClick={() => setDialog('settings')}>
-              Channel settings
-            </button>
-          )}
-          <button type="button" onClick={signOut}>
-            Sign out
-          </button>
-          {signOutError && <span role="alert">{signOutError}</span>}
-        </header>
-        {state.connection === 'reconnecting' && (
-          <div role="status" className="banner">
-            Reconnecting…
-          </div>
-        )}
-        {channel ? (
-          <>
-            <MessageList
-              key={channel.id}
-              channelWindow={state.windows[channel.id]}
-              pending={state.pending.filter((p) => p.channelId === channel.id && p.parentId === null)}
-              members={members}
-              me={me}
-              myRole={myRole}
-              connected={state.connection === 'open'}
-              onLoadOlder={() => void actions.loadOlder(channel.id)}
-              onOpenThread={(id) => actions.openThread(id)}
-              onEdit={actions.edit}
-              onDelete={actions.remove}
-              onRetry={actions.retry}
-              onDiscard={actions.discard}
-            />
-            <TypingIndicator userIds={typingIds} members={members} />
-            <div className="composer-wrap">
-              <Composer
-                key={channel.id}
-                placeholder={`Message ${label}`}
-                members={members}
-                onSubmit={(body) => actions.send(channel.id, body)}
-                onTyping={() => actions.typing(channel.id)}
-              />
-            </div>
-          </>
-        ) : archived ? (
-          <>
-            <MessageList
-              key={channelId}
-              channelWindow={archived.window}
-              pending={[]}
-              members={members}
-              me=""
-              myRole="member"
-              connected={false}
-              onLoadOlder={() => undefined}
-              onOpenThread={() => undefined}
-              onEdit={() => false}
-              onDelete={() => false}
-              onRetry={actions.retry}
-              onDiscard={actions.discard}
-            />
-            <section className="empty">
-              <p>This channel is archived.</p>
-            </section>
-          </>
-        ) : (
-          <section className="empty">
-            <p>{channelId ? 'This channel isn’t available.' : 'Pick a channel.'}</p>
-          </section>
-        )}
-      </div>
-      {threadOpen && channel && threadId && (
-        <ThreadPanel
-          key={threadId}
-          page={threadPage}
-          pending={state.pending.filter((p) => p.channelId === channel.id && p.parentId === threadId)}
+    <EmojiProvider userId={me} custom={customEmoji}>
+      <div className={`shell${threadOpen ? ' has-thread' : ''}`}>
+        <Sidebar
+          slug={slug}
+          workspaceName={bootstrap.workspace.name}
+          channels={Object.values(state.channels)}
           members={members}
           me={me}
           myRole={myRole}
-          channelLabel={label}
-          isDm={isDm}
-          connected={state.connection === 'open'}
-          typingUserIds={threadTyping}
-          onSend={(body, also) => actions.send(channel.id, body, threadId, also)}
-          onTyping={() => actions.typing(channel.id, threadId)}
-          onMarkRead={(seq) => actions.markThreadRead(threadId, seq)}
-          loadFailed={threadError === threadId}
-          onReload={() => actions.openThread(threadId)}
-          onEdit={actions.edit}
-          onDelete={actions.remove}
-          onRetry={actions.retry}
-          onDiscard={actions.discard}
-          onClose={() => actions.openThread(null)}
+          presence={state.presence}
+          activeChannelId={channelId ?? null}
+          notificationPermission={permission}
+          onOpenChannel={(id) => navigate(`${base}/${id}`)}
+          onBrowseChannels={() => setDialog('browse')}
+          onNewMessage={() => setDialog('dm')}
+          onEnableNotifications={() => void enableNotifications()}
+          onAdmin={() => navigate(`${base}/admin`)}
         />
-      )}
-      {dialog === 'browse' && <ChannelBrowser slug={slug} onJoined={showChannel} onClose={() => setDialog(null)} />}
-      {dialog === 'dm' && (
-        <NewDmDialog slug={slug} members={members} me={me} onOpened={showChannel} onClose={() => setDialog(null)} />
-      )}
-      {dialog === 'settings' && channel && !isDm && (
-        <ChannelSettings channel={channel} canManage={canManage} onClose={() => setDialog(null)} onGone={goGeneral} />
-      )}
-    </div>
+        <div className="main">
+          <header>
+            <div className="channel-title">
+              <strong>{channel ? label : archived ? `#${archived.name ?? ''}` : bootstrap.workspace.name}</strong>
+              {archived && <span className="muted topic">Archived</span>}
+              {(channel?.topic ?? archived?.topic) && <span className="muted topic">{channel?.topic ?? archived?.topic}</span>}
+            </div>
+            {channel && !isDm && (
+              <button type="button" onClick={() => setDialog('settings')}>
+                Channel settings
+              </button>
+            )}
+            <button type="button" onClick={signOut}>
+              Sign out
+            </button>
+            {signOutError && <span role="alert">{signOutError}</span>}
+          </header>
+          {state.connection === 'reconnecting' && (
+            <div role="status" className="banner">
+              Reconnecting…
+            </div>
+          )}
+          {channel ? (
+            <>
+              <MessageList
+                key={channel.id}
+                channelWindow={state.windows[channel.id]}
+                pending={state.pending.filter((p) => p.channelId === channel.id && p.parentId === null)}
+                members={members}
+                me={me}
+                myRole={myRole}
+                connected={state.connection === 'open'}
+                onLoadOlder={() => void actions.loadOlder(channel.id)}
+                onOpenThread={(id) => actions.openThread(id)}
+                onEdit={actions.edit}
+                onDelete={actions.remove}
+                onRetry={actions.retry}
+                onDiscard={actions.discard}
+              />
+              <TypingIndicator userIds={typingIds} members={members} />
+              <div className="composer-wrap">
+                <Composer
+                  key={channel.id}
+                  placeholder={`Message ${label}`}
+                  members={members}
+                  onSubmit={(body) => actions.send(channel.id, body)}
+                  onTyping={() => actions.typing(channel.id)}
+                />
+              </div>
+            </>
+          ) : archived ? (
+            <>
+              <MessageList
+                key={channelId}
+                channelWindow={archived.window}
+                pending={[]}
+                members={members}
+                me=""
+                myRole="member"
+                connected={false}
+                onLoadOlder={() => undefined}
+                onOpenThread={() => undefined}
+                onEdit={() => false}
+                onDelete={() => false}
+                onRetry={actions.retry}
+                onDiscard={actions.discard}
+              />
+              <section className="empty">
+                <p>This channel is archived.</p>
+              </section>
+            </>
+          ) : (
+            <section className="empty">
+              <p>{channelId ? 'This channel isn’t available.' : 'Pick a channel.'}</p>
+            </section>
+          )}
+        </div>
+        {threadOpen && channel && threadId && (
+          <ThreadPanel
+            key={threadId}
+            page={threadPage}
+            pending={state.pending.filter((p) => p.channelId === channel.id && p.parentId === threadId)}
+            members={members}
+            me={me}
+            myRole={myRole}
+            channelLabel={label}
+            isDm={isDm}
+            connected={state.connection === 'open'}
+            typingUserIds={threadTyping}
+            onSend={(body, also) => actions.send(channel.id, body, threadId, also)}
+            onTyping={() => actions.typing(channel.id, threadId)}
+            onMarkRead={(seq) => actions.markThreadRead(threadId, seq)}
+            loadFailed={threadError === threadId}
+            onReload={() => actions.openThread(threadId)}
+            onEdit={actions.edit}
+            onDelete={actions.remove}
+            onRetry={actions.retry}
+            onDiscard={actions.discard}
+            onClose={() => actions.openThread(null)}
+          />
+        )}
+        {dialog === 'browse' && <ChannelBrowser slug={slug} onJoined={showChannel} onClose={() => setDialog(null)} />}
+        {dialog === 'dm' && (
+          <NewDmDialog slug={slug} members={members} me={me} onOpened={showChannel} onClose={() => setDialog(null)} />
+        )}
+        {dialog === 'settings' && channel && !isDm && (
+          <ChannelSettings channel={channel} canManage={canManage} onClose={() => setDialog(null)} onGone={goGeneral} />
+        )}
+      </div>
+    </EmojiProvider>
   );
 }

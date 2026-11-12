@@ -5,6 +5,7 @@ import { Verify } from './pages/Verify';
 import { Invite } from './pages/Invite';
 import { Admin } from './pages/Admin';
 import { Workspace } from './pages/Workspace';
+import { About } from './pages/About';
 
 export const DEFAULT_WORKSPACE = 'clubhack';
 
@@ -24,6 +25,7 @@ export function App() {
   if (path === '/') return <Redirect to={`/client/${DEFAULT_WORKSPACE}`} />;
   if (path === '/login') return <Login />;
   if (path === '/verify') return <Verify />;
+  if (path === '/about') return <About />;
   const invite = /^\/invite\/([^/]+)$/.exec(path);
   if (invite) return <Invite token={decodeURIComponent(invite[1]!)} />;
   // P2-R11: the admin route wins over the channel route, and channel segments must be wire IDs.

@@ -1,12 +1,15 @@
 import type { MemberSummary } from '@backroom/protocol';
 import { useMemo } from 'react';
-import { tokenize } from '../text/tokenize';
+import { isEmojiOnly, tokenize } from '../text/tokenize';
+import { useEmoji } from '../emoji/EmojiContext';
+import { EmojiImg } from '../emoji/EmojiImg';
 
 export function MessageText({ body, members, me }: { body: string; members: MemberSummary[]; me: string }) {
   const names = new Map(members.map((m) => [m.id, m.displayName]));
-  const tokens = useMemo(() => tokenize(body), [body]);
+  const { isKnown, resolve } = useEmoji();
+  const tokens = useMemo(() => tokenize(body, isKnown), [body, isKnown]);
   return (
-    <span className="msg-text">
+    <span className={isEmojiOnly(tokens) ? 'msg-text jumbo' : 'msg-text'}>
       {tokens.map((t, i) => {
         switch (t.kind) {
           case 'text':
@@ -29,6 +32,11 @@ export function MessageText({ body, members, me }: { body: string; members: Memb
                 @{t.which}
               </span>
             );
+          case 'emoji': {
+            // Resolved again at render: a custom emoji deleted since tokenizing falls back to text.
+            const e = resolve(t.name, t.tone);
+            return e ? <EmojiImg key={i} e={e} /> : t.text;
+          }
         }
       })}
     </span>

@@ -50,6 +50,8 @@ export function plainText(body: string, members: MemberSummary[]): string {
           return `@${names.get(t.userId) ?? 'unknown'}`;
         case 'broadcast':
           return `@${t.which}`;
+        case 'emoji':
+          return t.text;
       }
     })
     .join('');

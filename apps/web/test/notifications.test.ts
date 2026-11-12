@@ -3,7 +3,7 @@ import { createElement } from 'react';
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { Bootstrap, HubFrame } from '@backroom/protocol';
-import { notificationText, showNotification } from '../src/notifications';
+import { notificationText, plainText, showNotification } from '../src/notifications';
 import { App } from '../src/App';
 import { FakeWebSocket } from './fakeSocket';
 
@@ -111,5 +111,11 @@ describe('notifications', () => {
     await userEvent.click(button);
     expect(Fake.requestPermission).toHaveBeenCalledTimes(1);
     await waitFor(() => expect(screen.queryByRole('button', { name: 'Enable notifications' })).toBeNull());
+  });
+});
+
+describe('plainText emoji (P3-R4)', () => {
+  it('keeps shortcodes as written', () => {
+    expect(plainText(':wave: hi', [])).toBe(':wave: hi');
   });
 });

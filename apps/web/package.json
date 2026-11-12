@@ -3,11 +3,15 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "predev": "node ../../packages/emoji/scripts/generate.mjs && node ../../packages/emoji/scripts/copy-twemoji.mjs public/twemoji",
     "dev": "vite",
+    "prebuild": "node ../../packages/emoji/scripts/generate.mjs && node ../../packages/emoji/scripts/copy-twemoji.mjs public/twemoji",
     "build": "vite build",
+    "pretest": "node ../../packages/emoji/scripts/generate.mjs",
     "test": "vitest run"
   },
   "dependencies": {
+    "@backroom/emoji": "*",
     "@backroom/protocol": "*",
     "react": "19.3.1",
     "react-dom": "19.3.1"

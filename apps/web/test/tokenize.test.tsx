@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { cleanup, render } from '@testing-library/react';
-import { decodeMentions, encodeMentions, tokenize } from '../src/text/tokenize';
+import { decodeMentions, encodeMentions, isEmojiOnly, JUMBO_MAX, tokenize } from '../src/text/tokenize';
 import { MessageText } from '../src/components/MessageText';
 
 afterEach(cleanup);
@@ -86,5 +86,37 @@ describe('MessageText details', () => {
     expect(container.querySelector('.mention.me')!.textContent).toBe('@Ann Lee');
     expect(container.textContent).toContain('@unknown');
     expect(container.textContent).toContain('@here');
+  });
+});
+
+describe('tokenize emoji', () => {
+  it('shortcodes become emoji tokens; unknown stay text', () => {
+    expect(tokenize('hi :wave::skin-tone-3: :nope:')).toEqual([
+      { kind: 'text', text: 'hi ' },
+      { kind: 'emoji', name: 'wave', tone: 3, text: ':wave::skin-tone-3:' },
+      { kind: 'text', text: ' :nope:' },
+    ]);
+  });
+  it('a code inside a URL stays in the link', () => {
+    // P3-R3: Phase 2 trimLink strips the trailing ':'; the emoji span overlaps the link and is dropped.
+    expect(tokenize('https://ex.com/:smile:')).toEqual([
+      { kind: 'link', text: 'https://ex.com/:smile', href: 'https://ex.com/:smile' },
+      { kind: 'text', text: ':' },
+    ]);
+  });
+  it('custom names are known only through the predicate', () => {
+    expect(tokenize(':partyparrot:')).toEqual([{ kind: 'text', text: ':partyparrot:' }]);
+    expect(tokenize(':partyparrot:', (n) => n === 'partyparrot')).toEqual([
+      { kind: 'emoji', name: 'partyparrot', tone: null, text: ':partyparrot:' },
+    ]);
+  });
+  it('isEmojiOnly: ":+1: :tada:" true; ":+1: hi" false; 24 codes false; ":nope:" false', () => {
+    expect(isEmojiOnly(tokenize(':+1: :tada:'))).toBe(true);
+    expect(isEmojiOnly(tokenize(' :+1:\n'))).toBe(true);
+    expect(isEmojiOnly(tokenize(':+1: hi'))).toBe(false);
+    expect(isEmojiOnly(tokenize(':+1:'.repeat(JUMBO_MAX)))).toBe(true);
+    expect(isEmojiOnly(tokenize(':+1:'.repeat(24)))).toBe(false);
+    expect(isEmojiOnly(tokenize(':nope:'))).toBe(false);
+    expect(isEmojiOnly(tokenize(''))).toBe(false);
   });
 });

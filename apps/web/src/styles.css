@@ -88,3 +88,7 @@ button.link:hover { text-decoration: underline; }
 .check { display: flex; align-items: center; gap: 0.4rem; margin: 0.25rem 0; }
 .check input { width: auto; margin: 0; }
 .dm-pick { border: 1px solid var(--line); border-radius: 6px; max-height: 40vh; overflow-y: auto; }
+
+.emoji { width: 1.375em; height: 1.375em; vertical-align: -0.3em; }
+.msg-text.jumbo .emoji { width: 2.5rem; height: 2.5rem; }
+.sidebar-footer { padding-top: 1rem; font-size: 0.85em; }

@@ -1,10 +1,20 @@
 import { BROADCAST_RE, USER_MENTION_RE, type MemberSummary } from '@backroom/protocol';
+import { findShortcodes, resolveBuiltin, type SkinTone } from '@backroom/emoji';
 
 export type Token =
   | { kind: 'text'; text: string }
   | { kind: 'link'; href: string; text: string }
   | { kind: 'user'; userId: string }
-  | { kind: 'broadcast'; which: 'channel' | 'here' };
+  | { kind: 'broadcast'; which: 'channel' | 'here' }
+  /** `text` is the original `:name:` / `:name::skin-tone-N:` as written. */
+  | { kind: 'emoji'; name: string; tone: SkinTone | null; text: string };
+
+export type IsKnownEmoji = (name: string, tone: SkinTone | null) => boolean;
+
+const builtinKnown: IsKnownEmoji = (n, t) => resolveBuiltin(n, t) !== undefined;
+
+/** At most this many emoji (and nothing but whitespace) render large. */
+export const JUMBO_MAX = 23;
 
 const LINK_RE = /https?:\/\/[^\s<>"]+/g;
 const TRAILING_PUNCT = '.,!?:;\'"';
@@ -40,7 +50,7 @@ function isHttp(text: string): boolean {
 
 type Span = { start: number; end: number; token: Token };
 
-export function tokenize(body: string): Token[] {
+export function tokenize(body: string, isKnownEmoji: IsKnownEmoji = builtinKnown): Token[] {
   const spans: Span[] = [];
   for (const m of body.matchAll(LINK_RE)) {
     const text = trimLink(m[0]);
@@ -58,6 +68,11 @@ export function tokenize(body: string): Token[] {
       token: { kind: 'broadcast', which: m[1] as 'channel' | 'here' },
     });
   }
+  // Linear scan; codes that overlap a link or mention are dropped by the overlap rule below.
+  for (const m of findShortcodes(body, isKnownEmoji)) {
+    const text = body.slice(m.index, m.index + m.length);
+    spans.push({ start: m.index, end: m.index + m.length, token: { kind: 'emoji', name: m.name, tone: m.tone, text } });
+  }
   spans.sort((a, b) => a.start - b.start || b.end - a.end);
 
   const out: Token[] = [];
@@ -70,6 +85,17 @@ export function tokenize(body: string): Token[] {
   }
   if (pos < body.length) out.push({ kind: 'text', text: body.slice(pos) });
   return out;
+}
+
+/** 1..JUMBO_MAX emoji tokens and otherwise only whitespace text. */
+export function isEmojiOnly(tokens: Token[]): boolean {
+  let emoji = 0;
+  for (const t of tokens) {
+    if (t.kind === 'emoji') {
+      if (++emoji > JUMBO_MAX) return false;
+    } else if (t.kind !== 'text' || t.text.trim() !== '') return false;
+  }
+  return emoji > 0;
 }
 
 function escapeRe(s: string): string {

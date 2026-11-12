@@ -1,4 +1,5 @@
 import type { ChannelSummary, MemberSummary, PresenceState, Role } from '@backroom/protocol';
+import { navigate } from '../nav';
 import { channelLabel } from '../notifications';
 
 /** Badge text: the server caps counts at 100 (P2-R27), so anything above 99 shows as "99+". */
@@ -139,6 +140,18 @@ export function Sidebar({
           );
         })}
       </ul>
+      <footer className="sidebar-footer">
+        <a
+          href="/about"
+          onClick={(e) => {
+            if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
+            e.preventDefault();
+            navigate('/about');
+          }}
+        >
+          About
+        </a>
+      </footer>
     </aside>
   );
 }
