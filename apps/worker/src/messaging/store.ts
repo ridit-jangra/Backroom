@@ -48,7 +48,15 @@ type Context = {
 async function loadContext(db: D1Database, channelId: string, parentId: string | null): Promise<Context> {
   const stmts = [
     db.prepare('SELECT kind, archived_at AS archivedAt FROM channels WHERE id = ?').bind(channelId),
-    db.prepare('SELECT user_id AS userId, notify FROM channel_members WHERE channel_id = ?').bind(channelId),
+    db
+      .prepare(
+        `SELECT cm.user_id AS userId, cm.notify AS notify
+         FROM channel_members cm
+         JOIN channels c ON c.id = cm.channel_id
+         JOIN workspace_members wm ON wm.workspace_id = c.workspace_id AND wm.user_id = cm.user_id AND wm.deactivated_at IS NULL
+         WHERE cm.channel_id = ?`,
+      )
+      .bind(channelId),
   ];
   if (parentId) {
     stmts.push(
@@ -65,9 +73,9 @@ async function loadContext(db: D1Database, channelId: string, parentId: string |
   };
 }
 
-async function loadMessage(db: D1Database, id: string): Promise<Message> {
+async function loadMessage(db: D1Database, id: string): Promise<Message | null> {
   const row = await db.prepare(`SELECT ${MESSAGE_COLUMNS} FROM messages WHERE id = ?`).bind(id).first<Record<string, unknown>>();
-  return rowToMessage(row!);
+  return row ? rowToMessage(row) : null;
 }
 
 export async function sendMessage(
@@ -75,6 +83,8 @@ export async function sendMessage(
   input: SendInput,
 ): Promise<{ ok: true; message: Message; duplicate: boolean; audience: Audience } | Fail> {
   if (input.fileIds.length > 0) return { ok: false, code: 'invalid' };
+  const existing = await findDuplicate(db, input);
+  if (existing) return existing;
   const ctx = await loadContext(db, input.channelId, input.parentId);
   if (!ctx.channel || !ctx.members.some((m) => m.userId === input.userId)) return { ok: false, code: 'not_found' };
   if (ctx.channel.archivedAt !== null) return { ok: false, code: 'archived' };
@@ -132,26 +142,36 @@ export async function sendMessage(
   try {
     await db.batch(stmts);
   } catch {
-    const dup = await db
-      .prepare(`SELECT ${MESSAGE_COLUMNS} FROM messages WHERE user_id = ? AND client_id = ?`)
-      .bind(input.userId, input.clientId)
-      .first<Record<string, unknown>>();
-    if (!dup) return { ok: false, code: 'failed' };
-    const message = rowToMessage(dup);
-    const fresh = await loadContext(db, message.channelId, message.parentId);
-    return {
-      ok: true,
-      message,
-      duplicate: true,
-      audience: {
-        kind: fresh.channel?.kind ?? ctx.channel.kind,
-        members: fresh.members,
-        followers: fresh.followers,
-        mentions: keptMentions(message.body, fresh.members, input.userId),
-      },
-    };
+    return (await findDuplicate(db, input)) ?? { ok: false, code: 'failed' };
   }
-  return { ok: true, message: await loadMessage(db, id), duplicate: false, audience };
+  const message = await loadMessage(db, id);
+  if (!message) return { ok: false, code: 'failed' };
+  return { ok: true, message, duplicate: false, audience };
+}
+
+/** A prior send with the same (user, clientId): returns the original with a freshly loaded audience. */
+async function findDuplicate(
+  db: D1Database,
+  input: SendInput,
+): Promise<{ ok: true; message: Message; duplicate: true; audience: Audience } | null> {
+  const dup = await db
+    .prepare(`SELECT ${MESSAGE_COLUMNS} FROM messages WHERE user_id = ? AND client_id = ?`)
+    .bind(input.userId, input.clientId)
+    .first<Record<string, unknown>>();
+  if (!dup) return null;
+  const message = rowToMessage(dup);
+  const fresh = await loadContext(db, message.channelId, message.parentId);
+  return {
+    ok: true,
+    message,
+    duplicate: true,
+    audience: {
+      kind: fresh.channel?.kind ?? 'public',
+      members: fresh.members,
+      followers: fresh.followers,
+      mentions: keptMentions(message.body, fresh.members, input.userId),
+    },
+  };
 }
 
 type Target = {
@@ -191,11 +211,12 @@ export async function editMessage(
   const { members } = await loadContext(db, t.channelId, null);
   const mentions = keptMentions(input.body, members, input.userId);
   await db.batch([
-    db.prepare('UPDATE messages SET body = ?, edited_at = ? WHERE id = ?').bind(input.body, input.now, input.messageId),
+    db.prepare('UPDATE messages SET body = ?, edited_at = ? WHERE id = ? AND deleted_at IS NULL').bind(input.body, input.now, input.messageId),
     db.prepare('DELETE FROM mentions WHERE message_id = ?').bind(input.messageId),
     ...mentionStatements(db, input.messageId, mentions),
   ]);
-  return { ok: true, message: await loadMessage(db, input.messageId) };
+  const message = await loadMessage(db, input.messageId);
+  return message ? { ok: true, message } : { ok: false, code: 'failed' };
 }
 
 export async function deleteMessage(
@@ -206,8 +227,9 @@ export async function deleteMessage(
   if (!t) return { ok: false, code: 'not_found' };
   if (t.userId !== input.userId && t.role !== 'owner' && t.role !== 'admin') return { ok: false, code: 'forbidden' };
   await db.batch([
-    db.prepare("UPDATE messages SET deleted_at = ?, body = '' WHERE id = ?").bind(input.now, input.messageId),
+    db.prepare("UPDATE messages SET deleted_at = ?, body = '' WHERE id = ? AND deleted_at IS NULL").bind(input.now, input.messageId),
     db.prepare('DELETE FROM mentions WHERE message_id = ?').bind(input.messageId),
   ]);
-  return { ok: true, message: await loadMessage(db, input.messageId) };
+  const message = await loadMessage(db, input.messageId);
+  return message ? { ok: true, message } : { ok: false, code: 'failed' };
 }

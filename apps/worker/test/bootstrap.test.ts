@@ -3,9 +3,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/app';
 import type { Bootstrap, Me } from '@backroom/protocol';
 import { sendMessage } from '../src/messaging/store';
-import { captureMailer, resetDb, seedUsers, send, signIn, testDeps } from './helpers';
-
-const GENERAL = '01JCLUBHACK0000000000000GN';
+import { GENERAL, captureMailer, resetDb, seedUsers, send, signIn, testDeps } from './helpers';
 
 async function setup() {
   const { mailer, sent } = captureMailer();

@@ -85,10 +85,11 @@ describe('sendMessage', () => {
     expect(await sendMessage(env.DB, input({ parentId: '01JNOSUCHMESSAGE0000000000' }))).toEqual({ ok: false, code: 'invalid' });
   });
 
-  it('writes mention rows for members only', async () => {
-    const { input, bob } = await setup();
-    const outsider = '01JOUTSIDER00000000000000';
-    const r = await sendMessage(env.DB, input({ body: `<@${bob}> <@${outsider}> @here` }));
+  it('writes mention rows for channel members only, never the author', async () => {
+    const { input, alice, bob, owner } = await setup();
+    // owner is a real workspace member but not in this private channel.
+    const priv = await insertChannel({ name: 'pair', kind: 'private', memberIds: [alice, bob] });
+    const r = await sendMessage(env.DB, input({ channelId: priv, body: `<@${bob}> <@${owner}> <@${alice}> @here` }));
     if (!r.ok) throw new Error(r.code);
     const rows = await env.DB.prepare('SELECT user_id, kind FROM mentions WHERE message_id = ? ORDER BY kind DESC').bind(r.message.id).all();
     expect(rows.results).toEqual([
@@ -97,6 +98,30 @@ describe('sendMessage', () => {
     ]);
     expect(r.audience.mentions.userIds).toEqual([bob]);
     expect(r.audience.mentions.here).toBe(true);
+  });
+
+  it('sender must be an active workspace member; deactivated members are excluded from audience and mentions', async () => {
+    const { input, alice, bob } = await setup();
+    await env.DB.prepare('UPDATE workspace_members SET deactivated_at = 5 WHERE user_id = ?').bind(bob).run();
+    const r = await sendMessage(env.DB, input({ body: `<@${bob}> hi` }));
+    if (!r.ok) throw new Error(r.code);
+    expect(r.audience.members.map((m) => m.userId)).not.toContain(bob);
+    expect(r.audience.mentions.userIds).toEqual([]);
+    expect((await env.DB.prepare('SELECT count(*) AS n FROM mentions WHERE message_id = ?').bind(r.message.id).first<{ n: number }>())!.n).toBe(0);
+    expect(await sendMessage(env.DB, input({ userId: bob }))).toEqual({ ok: false, code: 'not_found' });
+    expect(alice).toBeTruthy();
+  });
+
+  it('resend after the channel is archived still returns the original', async () => {
+    const { input } = await setup();
+    const i = input({});
+    const a = await sendMessage(env.DB, i);
+    if (!a.ok) throw new Error('a');
+    await env.DB.prepare('UPDATE channels SET archived_at = 5 WHERE id = ?').bind(GENERAL).run();
+    const b = await sendMessage(env.DB, i);
+    if (!b.ok) throw new Error(b.code);
+    expect(b.duplicate).toBe(true);
+    expect(b.message.id).toBe(a.message.id);
   });
 
   it('reply increments parent and follows thread', async () => {
@@ -154,17 +179,18 @@ describe('editMessage / deleteMessage', () => {
   });
 
   it('delete clears body, keeps the row, removes mentions; admin may delete others; plain member may not; edit of deleted is not_found', async () => {
-    const { input, alice, bob, owner } = await setup();
-    const r = await sendMessage(env.DB, input({ body: `<@${bob}> @here` }));
+    const { input, alice, bob } = await setup();
+    const r = await sendMessage(env.DB, input({ userId: bob, body: `<@${alice}> @here` }));
     if (!r.ok) throw new Error('r');
-    expect(await deleteMessage(env.DB, { messageId: r.message.id, userId: bob, now: 9 })).toEqual({ ok: false, code: 'forbidden' });
-    const d = await deleteMessage(env.DB, { messageId: r.message.id, userId: owner, now: 9_000 });
+    expect(await deleteMessage(env.DB, { messageId: r.message.id, userId: alice, now: 9 })).toEqual({ ok: false, code: 'forbidden' });
+    await env.DB.prepare("UPDATE workspace_members SET role = 'admin' WHERE user_id = ?").bind(alice).run();
+    const d = await deleteMessage(env.DB, { messageId: r.message.id, userId: alice, now: 9_000 });
     if (!d.ok) throw new Error(d.code);
     expect(d.message.deletedAt).toBe(9_000);
     expect(d.message.body).toBe('');
     expect((await env.DB.prepare('SELECT count(*) AS n FROM messages WHERE id = ?').bind(r.message.id).first<{ n: number }>())!.n).toBe(1);
     expect((await env.DB.prepare('SELECT count(*) AS n FROM mentions WHERE message_id = ?').bind(r.message.id).first<{ n: number }>())!.n).toBe(0);
-    expect(await editMessage(env.DB, { messageId: r.message.id, userId: alice, body: 'x', now: 10 })).toEqual({ ok: false, code: 'not_found' });
+    expect(await editMessage(env.DB, { messageId: r.message.id, userId: bob, body: 'x', now: 10 })).toEqual({ ok: false, code: 'not_found' });
     expect(await deleteMessage(env.DB, { messageId: r.message.id, userId: alice, now: 10 })).toEqual({ ok: false, code: 'not_found' });
   });
 
