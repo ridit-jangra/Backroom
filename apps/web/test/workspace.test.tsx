@@ -338,6 +338,98 @@ describe('Workspace live view', () => {
   });
 });
 
+describe('Fix round 1', () => {
+  afterEach(() => {
+    delete (document as { visibilityState?: unknown }).visibilityState;
+    delete (document as { hasFocus?: unknown }).hasFocus;
+  });
+
+  it('a tab loaded in the background does not mark the open channel read and still notifies', async () => {
+    Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'hidden' });
+    Object.defineProperty(document, 'hasFocus', { configurable: true, value: () => false });
+    const created: string[] = [];
+    vi.stubGlobal(
+      'Notification',
+      class {
+        static permission = 'granted';
+        onclick: (() => void) | null = null;
+        constructor(title: string) {
+          created.push(title);
+        }
+      },
+    );
+    const ws = await boot();
+    const general = await screen.findByRole('button', { name: '#general' });
+    act(() => ws.receive({ t: 'message.new', message: msg(1, { body: 'while away' }) }));
+    await waitFor(() => expect(general.className).toContain('unread'));
+    await new Promise((r) => setTimeout(r, 1100));
+    expect(frames(ws).some((f) => f.t === 'mark_read')).toBe(false);
+    act(() =>
+      ws.receive({ t: 'notify', kind: 'mention', channelId: GEN, messageId: id('01JN'), parentId: null, fromUserId: BOB, preview: 'hi' }),
+    );
+    expect(created).toEqual(['#general']);
+  });
+
+  it('Edit and Delete are disabled while reconnecting', async () => {
+    const ws = await boot({ pages: { [GEN]: { messages: [msg(1, { userId: ME, body: 'mine' })], hasMore: false } } });
+    const row = (await within(log()).findByText('mine')).closest('li')!;
+    expect((within(row).getByRole('button', { name: 'Edit' }) as HTMLButtonElement).disabled).toBe(false);
+    act(() => ws.serverClose(1006));
+    await screen.findByRole('status');
+    for (const name of ['Edit', 'Delete']) {
+      const b = within(row).getByRole('button', { name }) as HTMLButtonElement;
+      expect(b.disabled).toBe(true);
+      expect(b.title).toBe('Reconnecting…');
+    }
+  });
+
+  it('an edit that cannot be sent keeps the editor open with the typed text', async () => {
+    const ws = await boot({ pages: { [GEN]: { messages: [msg(1, { userId: ME, body: 'mine' })], hasMore: false } } });
+    const row = (await within(log()).findByText('mine')).closest('li')!;
+    await userEvent.click(within(row).getByRole('button', { name: 'Edit' }));
+    const box = within(row).getByLabelText('Edit message') as HTMLTextAreaElement;
+    act(() => ws.serverClose(1006));
+    fireEvent.change(box, { target: { value: 'changed' } });
+    fireEvent.keyDown(box, { key: 'Enter' });
+    expect(within(row).getByRole('alert').textContent).toBe('Not connected — try again.');
+    expect((within(row).getByLabelText('Edit message') as HTMLTextAreaElement).value).toBe('changed');
+    expect(frames(ws).some((f) => f.t === 'edit')).toBe(false);
+  });
+
+  it('a failed first bootstrap offers Try again, which loads and starts the socket', async () => {
+    stub();
+    const ok = vi.mocked(globalThis.fetch);
+    const impl = ok.getMockImplementation()!;
+    let first = true;
+    ok.mockImplementation(async (url) => {
+      if (String(url).endsWith('/bootstrap') && first) {
+        first = false;
+        return new Response(JSON.stringify({ error: { code: 'internal', message: 'Server hiccup' } }), { status: 500 });
+      }
+      return impl(url);
+    });
+    history.replaceState(null, '', `/client/clubhack/${GEN}`);
+    render(<App />);
+    expect((await screen.findByRole('alert')).textContent).toBe('Server hiccup');
+    expect(FakeWebSocket.instances).toHaveLength(0);
+    await userEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    await waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1));
+    act(() => sock().open());
+    expect(await screen.findByRole('button', { name: '#general' })).toBeTruthy();
+  });
+
+  it('read markers are re-sent after a reconnect', async () => {
+    const ws = await boot({
+      bootstrap: makeBootstrap({ channels: [chan(GEN, 'general', { lastSeq: 5, lastReadSeq: 3 }), chan(RAND, 'random')] }),
+    });
+    await waitFor(() => expect(frames(ws)).toContainEqual({ t: 'mark_read', channelId: GEN, seq: 5 }));
+    act(() => ws.serverClose(1006));
+    await waitFor(() => expect(FakeWebSocket.instances.length).toBe(2), { timeout: 2500 });
+    act(() => sock(1).open());
+    await waitFor(() => expect(frames(sock(1))).toContainEqual({ t: 'mark_read', channelId: GEN, seq: 5 }));
+  });
+});
+
 describe('Workspace sign out', () => {
   it('stays and shows an alert when logout fails', async () => {
     stub({ logout: 'network' });

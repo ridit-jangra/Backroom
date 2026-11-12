@@ -293,7 +293,7 @@ export function reduce(state: ChatState, e: ChatEvent, now: number): ChatState {
         const merged = { ...c, lastSeq };
         channels[c.id] = isViewing(state, c.id) ? zeroCounts(merged) : merged;
       }
-      return { ...state, bootstrap: e.bootstrap, channels };
+      return { ...state, me: e.bootstrap.me.id, bootstrap: e.bootstrap, channels };
     }
     case 'local.history': {
       const old = state.windows[e.channelId];

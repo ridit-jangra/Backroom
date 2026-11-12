@@ -23,9 +23,11 @@ export type ChatActions = {
   send(channelId: string, body: string, parentId?: string | null, alsoInChannel?: boolean): void;
   retry(clientId: string): void;
   discard(clientId: string): void;
-  edit(messageId: string, body: string): void;
-  remove(messageId: string): void;
+  /** False when the frame could not be sent (not connected); the caller keeps the user's input. */
+  edit(messageId: string, body: string): boolean;
+  remove(messageId: string): boolean;
   typing(channelId: string, parentId?: string | null): void;
+  /** Re-fetch bootstrap; after a failed first load this also starts the socket. */
   refresh(): Promise<void>;
 };
 
@@ -61,12 +63,19 @@ function startSession(
   };
 
   let socket: HubSocket; // assigned below; only used after the first bootstrap resolves
+  let started = false;
+  /** The socket starts after the first bootstrap so `hello.lastSeen` reflects the server's lastSeq values. */
+  async function startup() {
+    if (await loadBootstrap()) {
+      started = true;
+      socket.start();
+    }
+  }
   const sendFrame = (f: ClientFrame): boolean => alive && socket.send(f);
 
   const dispatch = (e: ChatEvent) => {
     if (!alive) return;
-    let next = reduce(state, e, Date.now());
-    if (e.t === 'local.bootstrap' && next.me !== e.bootstrap.me.id) next = { ...next, me: e.bootstrap.me.id };
+    const next = reduce(state, e, Date.now());
     if (next === state) return;
     state = next;
     publish(next);
@@ -150,21 +159,25 @@ function startSession(
     },
     retry: (clientId) => outbox.retry(clientId),
     discard: (clientId) => outbox.discard(clientId),
-    edit(messageId, body) {
-      sendFrame({ t: 'edit', messageId, body });
-    },
-    remove(messageId) {
-      sendFrame({ t: 'delete', messageId });
-    },
+    edit: (messageId, body) => sendFrame({ t: 'edit', messageId, body }),
+    remove: (messageId) => sendFrame({ t: 'delete', messageId }),
     typing(channelId, parentId = null) {
       sendFrame(parentId ? { t: 'typing', channelId, parentId } : { t: 'typing', channelId });
     },
     async refresh() {
-      await loadBootstrap();
+      if (started) {
+        await loadBootstrap();
+        return;
+      }
+      reportError('');
+      await startup();
     },
   };
 
   const onOpen = () => {
+    // The hub may have missed read markers sent just before the drop; let them go out again.
+    markSent.clear();
+    lastMarkAt = Number.NEGATIVE_INFINITY;
     sendFrame({ t: 'hello', lastSeen: lastSeenFor(state) });
     sendFrame({ t: 'activity' });
     lastActivityAt = Date.now();
@@ -226,11 +239,10 @@ function startSession(
   window.addEventListener('focus', onFocus);
   window.addEventListener('blur', onBlur);
   document.addEventListener('visibilitychange', onVisibility);
+  // A tab opened in the background never sees blur/visibilitychange, so read the real focus now.
+  dispatch({ t: 'local.focus', focused: document.visibilityState === 'visible' && document.hasFocus() });
 
-  // The socket starts after the first bootstrap so `hello.lastSeen` reflects the server's lastSeq values.
-  void loadBootstrap().then((ok) => {
-    if (ok) socket.start();
-  });
+  void startup();
 
   return {
     actions,
@@ -273,8 +285,8 @@ export function useChat(slug: string): { state: ChatState; actions: ChatActions;
       send: (cid, body, pid, also) => impl.current?.send(cid, body, pid, also),
       retry: (id) => impl.current?.retry(id),
       discard: (id) => impl.current?.discard(id),
-      edit: (id, body) => impl.current?.edit(id, body),
-      remove: (id) => impl.current?.remove(id),
+      edit: (id, body) => impl.current?.edit(id, body) ?? false,
+      remove: (id) => impl.current?.remove(id) ?? false,
       typing: (cid, pid) => impl.current?.typing(cid, pid),
       refresh: () => impl.current?.refresh() ?? Promise.resolve(),
     }),

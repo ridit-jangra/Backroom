@@ -37,6 +37,13 @@ const run = (s: ChatState, e: ChatEvent, now = 0) => reduce(s, e, now);
 const newMsg = (s: ChatState, m: Message) => run(s, { t: 'message.new', message: m });
 
 describe('chat reducer', () => {
+  it('local.bootstrap sets me from bootstrap.me.id', () => {
+    const s = reduce(initialChat(''), {
+      t: 'local.bootstrap',
+      bootstrap: { workspace: { id: 'w', slug: 'w', name: 'W' }, me: { id: ME, email: 'a@b.c', displayName: 'Me', role: 'member' }, channels: [], members: [] },
+    }, 0);
+    expect(s.me).toBe(ME);
+  });
   it('new message in a background channel increments unread; in the viewed channel it does not', () => {
     let s = setup();
     s = newMsg(s, msg(1));

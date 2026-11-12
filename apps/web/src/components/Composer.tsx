@@ -16,7 +16,8 @@ export function Composer({
   placeholder: string;
   members: MemberSummary[];
   initial?: string;
-  onSubmit: (body: string) => void;
+  /** Return false to keep the text (e.g. not connected). */
+  onSubmit: (body: string) => boolean | void;
   onTyping?: () => void;
   onCancel?: () => void;
 }) {
@@ -59,7 +60,7 @@ export function Composer({
   function submit() {
     const body = encoded.trimEnd();
     if (body === '' || body.length > MAX_BODY) return;
-    onSubmit(body);
+    if (onSubmit(body) === false) return;
     setText('');
     setCaret(0);
     picked.current = new Map();

@@ -27,6 +27,7 @@ export function MessageRow({
   me,
   myRole,
   showHeader,
+  connected,
   onOpenThread,
   onEdit,
   onDelete,
@@ -36,11 +37,16 @@ export function MessageRow({
   me: string;
   myRole: Role;
   showHeader: boolean;
+  /** Edits and deletes need the socket; while it is down the controls are disabled. */
+  connected: boolean;
   onOpenThread?: (messageId: string) => void;
-  onEdit: (messageId: string, body: string) => void;
-  onDelete: (messageId: string) => void;
+  /** Returns false when the edit could not be sent. */
+  onEdit: (messageId: string, body: string) => boolean;
+  onDelete: (messageId: string) => boolean;
 }) {
   const [editing, setEditing] = useState(false);
+  const [sendError, setSendError] = useState(false);
+  const offlineTitle = connected ? undefined : 'Reconnecting…';
   const deleted = message.deletedAt !== null;
   const own = message.userId === me;
   const canEdit = own && !deleted;
@@ -67,10 +73,17 @@ export function MessageRow({
           members={members}
           initial={message.body}
           onSubmit={(body) => {
+            if (body !== message.body && !onEdit(message.id, body)) {
+              setSendError(true);
+              return false;
+            }
+            setSendError(false);
             setEditing(false);
-            if (body !== message.body) onEdit(message.id, body);
           }}
-          onCancel={() => setEditing(false)}
+          onCancel={() => {
+            setSendError(false);
+            setEditing(false);
+          }}
         />
       ) : (
         <p className="msg-body">
@@ -83,10 +96,11 @@ export function MessageRow({
           {replies === 1 ? '1 reply' : `${replies} replies`}
         </button>
       )}
+      {sendError && <p role="alert" className="msg-error">Not connected — try again.</p>}
       {(canEdit || canDelete) && !editing && (
         <div className="msg-actions">
           {canEdit && (
-            <button type="button" className="link" onClick={() => setEditing(true)}>
+            <button type="button" className="link" disabled={!connected} title={offlineTitle} onClick={() => setEditing(true)}>
               Edit
             </button>
           )}
@@ -94,8 +108,10 @@ export function MessageRow({
             <button
               type="button"
               className="link"
+              disabled={!connected}
+              title={offlineTitle}
               onClick={() => {
-                if (globalThis.confirm('Delete this message?')) onDelete(message.id);
+                if (globalThis.confirm('Delete this message?')) setSendError(!onDelete(message.id));
               }}
             >
               Delete
@@ -155,6 +171,7 @@ export function MessageList({
   members,
   me,
   myRole,
+  connected,
   onLoadOlder,
   onOpenThread,
   onEdit,
@@ -167,10 +184,11 @@ export function MessageList({
   members: MemberSummary[];
   me: string;
   myRole: Role;
+  connected: boolean;
   onLoadOlder: () => void;
   onOpenThread: (messageId: string) => void;
-  onEdit: (messageId: string, body: string) => void;
-  onDelete: (messageId: string) => void;
+  onEdit: (messageId: string, body: string) => boolean;
+  onDelete: (messageId: string) => boolean;
   onRetry: (clientId: string) => void;
   onDiscard: (clientId: string) => void;
 }) {
@@ -222,6 +240,7 @@ export function MessageList({
             me={me}
             myRole={myRole}
             showHeader={startsGroup(messages[i - 1], m)}
+            connected={connected}
             onOpenThread={onOpenThread}
             onEdit={onEdit}
             onDelete={onDelete}

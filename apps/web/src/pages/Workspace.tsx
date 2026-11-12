@@ -44,7 +44,15 @@ export function Workspace({ slug, channelId }: { slug: string; channelId?: strin
     setPermission(await requestNotificationPermission());
   }
 
-  if (error) return <p role="alert" className="card">{error}</p>;
+  if (error)
+    return (
+      <div className="card">
+        <p role="alert">{error}</p>
+        <button type="button" onClick={() => void actions.refresh()}>
+          Try again
+        </button>
+      </div>
+    );
   if (!bootstrap) return <p role="status" className="card">Loading…</p>;
 
   const members = bootstrap.members;
@@ -97,6 +105,7 @@ export function Workspace({ slug, channelId }: { slug: string; channelId?: strin
               members={members}
               me={me}
               myRole={myRole}
+              connected={state.connection === 'open'}
               onLoadOlder={() => void actions.loadOlder(channel.id)}
               onOpenThread={(id) => actions.openThread(id)}
               onEdit={actions.edit}
