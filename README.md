@@ -1,6 +1,6 @@
 # Backroom
 
-Backroom is a Slack-style chat app for small communities. It runs entirely on Cloudflare: a Worker serves the API and the React single-page app, and a D1 database stores the data. Sign-in is by emailed magic link; new people join through invite links created by the workspace owner. Phase 1 covers sign-in, the single `clubhack` workspace with its `#general` channel, invites, and the member list. Phase 2 adds real-time messaging (see below).
+Backroom is a Slack-style chat app for small communities. It runs entirely on Cloudflare: a Worker serves the API and the React single-page app, and a D1 database stores the data. Sign-in is by emailed magic link; new people join through invite links created by the workspace owner. Phase 1 covers sign-in, the single `clubhack` workspace with its `#general` channel, invites, and the member list. Phase 2 adds real-time messaging and Phase 3 adds emoji and reactions (see below).
 
 ## Prerequisites
 
@@ -50,7 +50,7 @@ What works:
 - Real-time sending, replies in threads, edits and deletes, `@name` mentions and `@channel` / `@here`.
 - Live unread and mention badges, typing indicators and presence, browser notifications (permission is requested only when you click the button), and automatic reconnect with a "Reconnecting..." banner.
 - Admins manage invites and members from the web app.
-- Not in this phase: reactions, file uploads and search.
+- Not in this phase: file uploads and search. Reactions arrived in Phase 3 (below).
 
 Real time runs over a WebSocket at `GET /ws?workspace=clubhack`. The browser sends its session cookie. Checks run in this order: no valid session gives `401`, then an `Origin` other than `APP_ORIGIN` gives `403`. Each workspace has one `WorkspaceHub` Durable Object that holds the sockets, assigns message sequence numbers and fans out events. Message history, channel and DM management are plain REST routes (`/w/:slug/channels`, `/w/:slug/dms`, `/channels/:id/messages`, `/messages/:id/thread`).
 
@@ -65,6 +65,41 @@ curl -s -o /dev/null -w '%{http_code}\n' --max-time 2 \
 ```
 
 For the real thing, sign in as two different people in two browser windows (one private) and chat in `#general`.
+
+## Emoji & reactions (Phase 3)
+
+What works:
+
+- Every standard Unicode emoji by its `:shortcode:`, including aliases (`:+1:` and `:thumbsup:`) and skin tones (`:wave::skin-tone-3:`), in messages, an emoji picker, composer autocomplete and reactions. All art is Twemoji, served from Backroom's own origin at `/twemoji/<name>.svg`, never from a CDN.
+- Reactions over the existing WebSocket (`react` frame in, `reaction` frame out). Aliases collapse into one reaction; skin tones stay distinct. At most 50 distinct emoji per message. Reacting needs channel membership.
+- Custom emoji, added one at a time or by importing a zip in the browser (the server never unzips). Changes reach open tabs as an `emoji.update` frame.
+
+Custom emoji limits:
+
+- PNG, GIF or JPEG only, detected from the file's magic bytes (the filename and declared type are ignored).
+- At most 131,072 bytes (128 KB), and 32x32 to 4,096x4,096 pixels.
+- Name matches `^[a-z0-9_-]{1,32}$`, is unique per workspace and cannot equal a built-in emoji name or alias.
+- At most 2,000 per workspace.
+- By default only admins may add them. The owner can allow everyone with `PATCH /w/:slug/settings` and body `{"customEmojiPolicy":"everyone"}` (or `"admins"` to switch back). The creator, an admin or the owner may delete an emoji (`DELETE /emoji/:id`); deleting it also deletes aliases pointing to it.
+- Images are served by `GET /emoji/:id` to active workspace members only, with `X-Content-Type-Options: nosniff`, `Content-Security-Policy: default-src 'none'; sandbox` and long-lived private caching.
+
+Build and deploy notes:
+
+- `npm install` generates the emoji table from `emoji-datasource` into `packages/emoji/src/generated/` (git-ignored); `pretest`, `predev` and `prebuild` hooks regenerate it.
+- `npm run build` copies 3,526 Twemoji SVGs into `apps/web/dist/twemoji/`.
+- Before the first deploy, create the R2 bucket that stores custom emoji: `npx wrangler r2 bucket create backroom`. The `r2_buckets` binding `BUCKET` in `apps/worker/wrangler.jsonc` already points at it.
+- `assets.run_worker_first` must now be `["/auth/*", "/me", "/w/*", "/invites/*", "/health", "/channels/*", "/messages/*", "/emoji/*", "/ws"]`. Twemoji live under `/twemoji/`, which is served from static assets and deliberately does not collide with `/emoji/*`.
+
+Check it locally without a browser (replace `<cookie>` with the `backroom_session` value; use a PNG of at least 32x32):
+
+```sh
+curl -s -w '%{http_code}\n' -H 'Origin: http://localhost:8787' -H 'Cookie: backroom_session=<cookie>' \
+  -F name=smoke -F image=@smoke.png http://localhost:8787/w/clubhack/emoji          # 201; again 409
+curl -sI -H 'Cookie: backroom_session=<cookie>' http://localhost:8787/emoji/<id>   # 200 image/png; no cookie 401
+curl -sI http://localhost:8787/twemoji/1f44d.svg                                   # 200 image/svg+xml
+```
+
+Attribution: emoji graphics by Twemoji, CC-BY 4.0. Twemoji is from [jdecked/twemoji](https://github.com/jdecked/twemoji); the graphics are licensed under [CC-BY 4.0](https://creativecommons.org/licenses/by/4.0/), and the code under MIT. The app shows this notice on its About page (`/about`).
 
 ## Running tests
 
@@ -92,6 +127,7 @@ Do not set `RESEND_API_KEY` to `dev` in production; that value switches to the c
 - `apps/worker` - Cloudflare Worker (Hono API, D1 migrations, tests)
 - `apps/web` - React single-page app, built to `apps/web/dist` and served by the Worker as static assets
 - `packages/protocol` - shared types and schemas used by both apps
+- `packages/emoji` - generated emoji table, shortcode helpers and the Twemoji copy script
 - `docs/superpowers` - design spec and implementation plan
 
 ## Links
@@ -99,3 +135,4 @@ Do not set `RESEND_API_KEY` to `dev` in production; that value switches to the c
 - Spec: [docs/superpowers/specs/2026-11-11-backroom-design.md](docs/superpowers/specs/2026-11-11-backroom-design.md)
 - Phase 1 plan: [docs/superpowers/plans/2026-11-11-phase-1-foundation.md](docs/superpowers/plans/2026-11-11-phase-1-foundation.md)
 - Phase 2 plan: [docs/superpowers/plans/2026-11-11-phase-2-messaging.md](docs/superpowers/plans/2026-11-11-phase-2-messaging.md)
+- Phase 3 plan: [docs/superpowers/plans/2026-11-12-phase-3-emoji.md](docs/superpowers/plans/2026-11-12-phase-3-emoji.md)
