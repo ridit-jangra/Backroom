@@ -5,7 +5,10 @@ import { readCappedBody } from '../lib/body';
 import { newId } from '../lib/ids';
 import { ApiError } from '../lib/errors';
 import { requireSession } from '../middleware/session';
+import { MEDIA_SECURITY_HEADERS } from '../lib/media';
 import { requireMember } from '../workspace/access';
+import { type FileAccess, loadFileAccess } from './access';
+import { fileHeaders, parseRange } from './http';
 import { sniffFile } from './sniff';
 import { FILE_INFO_COLUMNS, type FileInfoRow, quotaExceeded, rowToFileInfo, storeUpload, thumbKeyOf } from './store';
 
@@ -170,3 +173,75 @@ async function cleanupThumb(bucket: R2Bucket, key: string): Promise<void> {
     console.error(JSON.stringify({ level: 'error', code: 'upload_cleanup_failed' }));
   });
 }
+
+const hasBody = (o: R2Object | R2ObjectBody): o is R2ObjectBody => 'body' in o;
+
+/** The id check plus §8 visibility; unknown and not visible give the identical 404. */
+async function requireFileAccess(c: Context<AppEnv>): Promise<FileAccess> {
+  const id = c.req.param('id') ?? '';
+  if (!ID_RE.test(id)) throw notFound();
+  const row = await loadFileAccess(c.env.DB, id, c.var.session!.userId);
+  if (!row) throw notFound();
+  return row;
+}
+
+/**
+ * R2 get honouring If-None-Match: a matching etag yields an object without a body (⇒ 304).
+ * A malformed validator makes the conditional get throw; it must not 500 (P3-R16), so serve unconditionally.
+ */
+async function conditionalGet(
+  bucket: R2Bucket,
+  key: string,
+  ifNoneMatch: string | undefined,
+  range?: { offset: number; length: number },
+): Promise<R2Object | R2ObjectBody | null> {
+  if (!ifNoneMatch) return bucket.get(key, { range });
+  try {
+    return await bucket.get(key, { onlyIf: new Headers({ 'If-None-Match': ifNoneMatch }), range });
+  } catch {
+    return bucket.get(key, { range });
+  }
+}
+
+fileRoutes.get('/files/:id', requireSession, async (c) => {
+  const row = await requireFileAccess(c);
+
+  // If-Range always serves the full file: we never compare validators, which is the safe reading of RFC 9110.
+  const range = c.req.header('If-Range') === undefined ? parseRange(c.req.header('Range') ?? null, row.size) : null;
+  if (range === 'unsatisfiable') {
+    // P4-R5: decided before the R2 get, so no etag; the body is the standard {error} shape.
+    const headers = new Headers(MEDIA_SECURITY_HEADERS);
+    headers.set('Accept-Ranges', 'bytes');
+    headers.set('Content-Range', `bytes */${row.size}`);
+    headers.set('Content-Type', 'application/json');
+    return new Response(JSON.stringify({ error: { code: 'range_not_satisfiable', message: 'That range is outside the file.' } }), {
+      status: 416,
+      headers,
+    });
+  }
+
+  const obj = await conditionalGet(c.env.BUCKET, row.r2Key, c.req.header('If-None-Match'), range ?? undefined);
+  if (!obj) throw notFound();
+  const headers = fileHeaders(row, obj.httpEtag);
+  if (!hasBody(obj)) return new Response(null, { status: 304, headers });
+  if (range) {
+    headers.set('Content-Range', `bytes ${range.offset}-${range.offset + range.length - 1}/${row.size}`);
+    headers.set('Content-Length', String(range.length));
+    return new Response(obj.body, { status: 206, headers });
+  }
+  headers.set('Content-Length', String(obj.size));
+  return new Response(obj.body, { status: 200, headers });
+});
+
+// Thumbnails are always served whole (they are ≤ 512 KB): Range is ignored.
+fileRoutes.get('/files/:id/thumb', requireSession, async (c) => {
+  const row = await requireFileAccess(c);
+  // P4-R22: always the stored key (`…-thumb-<ULID>`), never a derived one.
+  if (row.thumbKey === null) throw notFound();
+  const obj = await conditionalGet(c.env.BUCKET, row.thumbKey, c.req.header('If-None-Match'));
+  if (!obj) throw notFound();
+  const headers = fileHeaders({ mime: 'image/webp', name: 'thumbnail.webp' }, obj.httpEtag);
+  if (!hasBody(obj)) return new Response(null, { status: 304, headers });
+  headers.set('Content-Length', String(obj.size));
+  return new Response(obj.body, { status: 200, headers });
+});
