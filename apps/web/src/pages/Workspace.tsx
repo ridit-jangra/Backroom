@@ -1,9 +1,13 @@
 import { useEffect, useState } from 'react';
 import { api, ApiClientError } from '../api';
 import { navigate } from '../nav';
+import { ChannelBrowser } from '../components/ChannelBrowser';
+import { ChannelSettings } from '../components/ChannelSettings';
 import { Composer } from '../components/Composer';
 import { MessageList } from '../components/MessageList';
+import { NewDmDialog } from '../components/NewDmDialog';
 import { Sidebar } from '../components/Sidebar';
+import { ThreadPanel } from '../components/ThreadPanel';
 import { TypingIndicator } from '../components/TypingIndicator';
 import { channelLabel, notificationPermission, requestNotificationPermission } from '../notifications';
 import { useChat } from '../realtime/useChat';
@@ -12,6 +16,7 @@ export function Workspace({ slug, channelId }: { slug: string; channelId?: strin
   const { state, actions, error } = useChat(slug);
   const [signOutError, setSignOutError] = useState('');
   const [permission, setPermission] = useState(notificationPermission);
+  const [dialog, setDialog] = useState<'browse' | 'dm' | 'settings' | null>(null);
   const bootstrap = state.bootstrap;
   const base = `/client/${encodeURIComponent(slug)}`;
 
@@ -60,12 +65,35 @@ export function Workspace({ slug, channelId }: { slug: string; channelId?: strin
   const myRole = bootstrap.me.role;
   const channel = channelId ? state.channels[channelId] : undefined;
   const label = channel ? channelLabel(channel, members, me) : '';
+  const isDm = channel?.kind === 'dm';
+  const isGeneral = channel?.kind === 'public' && channel.name === 'general';
+  const canManage = !!channel && !isGeneral && (channel.createdBy === me || myRole === 'owner' || myRole === 'admin');
+  const threadId = state.openThreadId;
+  const threadPage = threadId ? state.threads[threadId] : undefined;
+  const threadOpen = !!channel && !!threadId && (!threadPage || threadPage.parent.channelId === channel.id);
+  const threadTyping =
+    threadId && channel
+      ? [...new Set(state.typing.filter((t) => t.channelId === channel.id && t.parentId === threadId && t.userId !== me).map((t) => t.userId))]
+      : [];
+
+  /** The channel may be new to this tab (the hub frame can trail the REST reply), so refresh first. */
+  async function showChannel(id: string) {
+    await actions.refresh();
+    setDialog(null);
+    navigate(`${base}/${id}`);
+  }
+  function goGeneral() {
+    setDialog(null);
+    const general = Object.values(state.channels).find((c) => c.kind === 'public' && c.name === 'general');
+    navigate(general ? `${base}/${general.id}` : base);
+  }
+
   const typingIds = channel
     ? [...new Set(state.typing.filter((t) => t.channelId === channel.id && t.parentId === null && t.userId !== me).map((t) => t.userId))]
     : [];
 
   return (
-    <div className="shell">
+    <div className={`shell${threadOpen ? ' has-thread' : ''}`}>
       <Sidebar
         slug={slug}
         workspaceName={bootstrap.workspace.name}
@@ -77,6 +105,8 @@ export function Workspace({ slug, channelId }: { slug: string; channelId?: strin
         activeChannelId={channelId ?? null}
         notificationPermission={permission}
         onOpenChannel={(id) => navigate(`${base}/${id}`)}
+        onBrowseChannels={() => setDialog('browse')}
+        onNewMessage={() => setDialog('dm')}
         onEnableNotifications={() => void enableNotifications()}
         onAdmin={() => navigate(`${base}/admin`)}
       />
@@ -86,6 +116,11 @@ export function Workspace({ slug, channelId }: { slug: string; channelId?: strin
             <strong>{channel ? label : bootstrap.workspace.name}</strong>
             {channel?.topic && <span className="muted topic">{channel.topic}</span>}
           </div>
+          {channel && !isDm && (
+            <button type="button" onClick={() => setDialog('settings')}>
+              Channel settings
+            </button>
+          )}
           <button type="button" onClick={signOut}>
             Sign out
           </button>
@@ -130,6 +165,35 @@ export function Workspace({ slug, channelId }: { slug: string; channelId?: strin
           </section>
         )}
       </div>
+      {threadOpen && channel && threadId && (
+        <ThreadPanel
+          key={threadId}
+          page={threadPage}
+          pending={state.pending.filter((p) => p.channelId === channel.id && p.parentId === threadId)}
+          members={members}
+          me={me}
+          myRole={myRole}
+          channelLabel={label}
+          isDm={isDm}
+          connected={state.connection === 'open'}
+          typingUserIds={threadTyping}
+          onSend={(body, also) => actions.send(channel.id, body, threadId, also)}
+          onTyping={() => actions.typing(channel.id, threadId)}
+          onMarkRead={(seq) => actions.markThreadRead(threadId, seq)}
+          onEdit={actions.edit}
+          onDelete={actions.remove}
+          onRetry={actions.retry}
+          onDiscard={actions.discard}
+          onClose={() => actions.openThread(null)}
+        />
+      )}
+      {dialog === 'browse' && <ChannelBrowser slug={slug} onJoined={showChannel} onClose={() => setDialog(null)} />}
+      {dialog === 'dm' && (
+        <NewDmDialog slug={slug} members={members} me={me} onOpened={showChannel} onClose={() => setDialog(null)} />
+      )}
+      {dialog === 'settings' && channel && !isDm && (
+        <ChannelSettings channel={channel} canManage={canManage} onClose={() => setDialog(null)} onGone={goGeneral} />
+      )}
     </div>
   );
 }
