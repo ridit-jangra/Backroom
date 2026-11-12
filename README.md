@@ -126,10 +126,10 @@ Limits:
 R2 key layout (bucket `BUCKET`):
 
 - original: `ws/<workspaceId>/<fileId>`
-- thumbnail: `ws/<workspaceId>/<fileId>-thumb`
+- thumbnail: `ws/<workspaceId>/<fileId>-thumb-<ULID>`
 - custom emoji (Phase 3): `ws/<workspaceId>/emoji/<id>`
 
-Code that deletes file objects first checks the key against `/^ws\/[0-9A-Z]{26}\/[0-9A-Z]{26}(-thumb)?$/`, which can never match an `emoji/` key, so cleanup and quota never touch emoji. Nothing lists R2 to compute quota or find orphans; both come from D1.
+Code that deletes file objects first checks the key against `/^ws\/[0-9A-Z]{26}\/[0-9A-Z]{26}(-thumb-[0-9A-Z]{26})?$/`, which can never match an `emoji/` key, so cleanup and quota never touch emoji. Nothing lists R2 to compute quota or find orphans; both come from D1.
 
 Cleanup cron: `triggers.crons` is `["0 4 * * *"]` (daily, 04:00 UTC). To run it locally:
 
@@ -140,7 +140,7 @@ curl "http://localhost:8787/cdn-cgi/handler/scheduled?cron=0+4+*+*+*"   # use th
 
 The log shows `orphans_cleaned` with a count. (The older `/__scheduled` path is not in `run_worker_first`, so the static-asset layer answers it with the SPA page; use the `/cdn-cgi/handler/scheduled` path.) Each run is bounded to 10 batches of 100 files.
 
-Search syntax: free text; `"quoted phrases"`; `in:#channel`; `from:@name`; `has:file`; `before:YYYY-MM-DD`; `after:YYYY-MM-DD`. Filters are case-insensitive and a repeated filter keeps the last one. Dates are UTC days. Every term is matched literally, so `OR`, `NEAR(`, `*` and quotes typed by a user are just words, and terms with no letter or digit are ignored. Results come only from messages you can see: public channels and channels or DMs you are in; deleted messages never appear.
+Search syntax: free text; `"quoted phrases"`; `in:#channel`; `from:@name`; `has:file`; `before:YYYY-MM-DD`; `after:YYYY-MM-DD`. Filters are case-insensitive and a repeated filter keeps the last one. Dates are UTC days. Every term is matched literally, so `OR`, `NEAR(`, `*` and quotes typed by a user are just words, and terms with no letter or digit are ignored. Punctuation inside a term splits it into an adjacent-word phrase, so `x.html` matches a file named `x.html` but not one whose tokens are not adjacent (such as `<b>x</b>.html`). Results come only from messages you can see: public channels and channels or DMs you are in; deleted messages never appear.
 
 Serving rules (`GET /files/:id`, `GET /files/:id/thumb`):
 
