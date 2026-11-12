@@ -239,6 +239,7 @@ export async function deleteMessage(
   await db.batch([
     db.prepare("UPDATE messages SET deleted_at = ?, body = '' WHERE id = ? AND deleted_at IS NULL").bind(input.now, input.messageId),
     db.prepare('DELETE FROM mentions WHERE message_id = ?').bind(input.messageId),
+    db.prepare('DELETE FROM reactions WHERE message_id = ?').bind(input.messageId),
   ]);
   const message = await loadMessage(db, input.messageId);
   return message ? { ok: true, message } : { ok: false, code: 'failed' };

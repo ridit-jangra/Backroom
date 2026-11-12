@@ -1,5 +1,6 @@
 import { CATCHUP_LIMIT, type ChannelKind, type HistoryPage, type Message, type ThreadPage } from '@backroom/protocol';
 import { ApiError } from '../lib/errors';
+import { withReactions } from '../emoji/reactions';
 import { MESSAGE_COLUMNS, rowToMessage } from './rows';
 
 export type ChannelRow = {
@@ -57,7 +58,7 @@ export async function listMessages(
     .bind(...binds)
     .all<Record<string, unknown>>();
   const hasMore = results.length > q.limit;
-  const page = results.slice(0, q.limit).map(rowToMessage);
+  const page = await withReactions(db, results.slice(0, q.limit).map(rowToMessage));
   return { messages: forward ? page : page.reverse(), hasMore };
 }
 
@@ -72,7 +73,11 @@ export async function getThread(db: D1Database, messageId: string): Promise<Thre
   ]);
   const parent = p!.results[0] as Record<string, unknown> | undefined;
   if (!parent) return null;
-  return { parent: rowToMessage(parent), replies: (r!.results as Record<string, unknown>[]).map(rowToMessage) };
+  const [pm, ...replies] = await withReactions(db, [
+    rowToMessage(parent),
+    ...(r!.results as Record<string, unknown>[]).map(rowToMessage),
+  ]);
+  return { parent: pm!, replies };
 }
 
 const IN_CHUNK = 90;
@@ -111,5 +116,9 @@ export async function catchUp(
         .bind(id, lastSeen[id]),
     ),
   );
-  return { messages: sets.flatMap((s) => (s.results as Record<string, unknown>[]).map(rowToMessage)), stale };
+  const messages = await withReactions(
+    db,
+    sets.flatMap((s) => (s.results as Record<string, unknown>[]).map(rowToMessage)),
+  );
+  return { messages, stale };
 }

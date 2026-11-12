@@ -183,3 +183,37 @@ describe('catchUp', () => {
     expect(r).toEqual({ messages: [], stale: [] });
   });
 });
+
+describe('reactions on payloads', () => {
+  const react = (m: string, userId: string) =>
+    env.DB.prepare("INSERT INTO reactions (message_id, user_id, emoji, created_at) VALUES (?, ?, '+1', 1)").bind(m, userId).run();
+
+  it('history, thread and catch-up carry reactions', async () => {
+    const { say, get, alice } = await setup();
+    const a = await say();
+    const b = await say();
+    const reply = await say({ parentId: a.id });
+    await react(a.id, alice.userId);
+    await react(reply.id, alice.userId);
+    const want = [{ emoji: '+1', userIds: [alice.userId] }];
+    const page = (await (await get(`/channels/${GENERAL}/messages`)).json()) as HistoryPage;
+    expect(page.messages.find((m) => m.id === a.id)!.reactions).toEqual(want);
+    expect(page.messages.find((m) => m.id === b.id)!.reactions).toEqual([]);
+    const th = (await (await get(`/messages/${a.id}/thread`)).json()) as ThreadPage;
+    expect(th.parent.reactions).toEqual(want);
+    expect(th.replies[0]!.reactions).toEqual(want);
+    const cu = await catchUp(env.DB, [GENERAL], { [GENERAL]: 0 });
+    expect(cu.messages.find((m) => m.id === a.id)!.reactions).toEqual(want);
+    expect(cu.messages.find((m) => m.id === b.id)!.reactions).toEqual([]);
+  });
+
+  it('deleting a message deletes its reactions', async () => {
+    const { say, alice } = await setup();
+    const a = await say();
+    await react(a.id, alice.userId);
+    const r = await deleteMessage(env.DB, { messageId: a.id, userId: alice.userId, now: 5 });
+    expect(r.ok).toBe(true);
+    const n = await env.DB.prepare('SELECT COUNT(*) AS n FROM reactions WHERE message_id = ?').bind(a.id).first<{ n: number }>();
+    expect(n!.n).toBe(0);
+  });
+});

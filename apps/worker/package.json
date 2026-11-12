@@ -3,12 +3,13 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "pretest": "mkdir -p ../web/dist",
+    "pretest": "mkdir -p ../web/dist && node ../../packages/emoji/scripts/generate.mjs",
     "test": "vitest run",
-    "predev": "mkdir -p ../web/dist",
+    "predev": "mkdir -p ../web/dist && node ../../packages/emoji/scripts/generate.mjs",
     "dev": "wrangler dev"
   },
   "dependencies": {
+    "@backroom/emoji": "*",
     "@backroom/protocol": "*",
     "hono": "4.13.18",
     "zod": "4.6.7"

@@ -139,3 +139,20 @@ export async function insertChannel(opts: {
   ]);
   return id;
 }
+
+/** Direct D1 insert of a custom emoji (or alias); returns its id. Workspace defaults to `clubhack`. */
+export async function insertCustomEmoji(opts: {
+  name: string;
+  aliasFor?: string;
+  createdBy?: string;
+  workspaceId?: string;
+}): Promise<string> {
+  const id = newId();
+  const ws = opts.workspaceId ?? '01JCLUBHACK0000000000000WS';
+  await env.DB.prepare(
+    'INSERT INTO custom_emoji (id, workspace_id, name, r2_key, alias_for, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, 1)',
+  )
+    .bind(id, ws, opts.name, opts.aliasFor ? null : `ws/${ws}/emoji/${id}`, opts.aliasFor ?? null, opts.createdBy ?? null)
+    .run();
+  return id;
+}
