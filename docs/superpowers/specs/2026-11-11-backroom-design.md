@@ -51,15 +51,15 @@ Findings (static, partial coverage — minified bundles, dynamic IPC channel nam
 - OS notification-state checks (Focus Assist / macOS notification state) before
   notifying; a dedicated notifications window; Sentry telemetry.
 
-**Adopted:** equivalent fuse hardening; a single narrow preload API; a dedicated
-magic-link login hand-off. **Not adopted:** custom notification window (native
+**Adopted:** a single narrow bridge API (as Tauri capability-scoped commands
+since the G4 switch to Tauri); a dedicated magic-link login hand-off. **Not adopted:** custom notification window (native
 notifications instead), telemetry. Slack's local caches (LevelDB, Local
 Storage, Cookies) were not opened.
 
 ## 3. Architecture
 
 ```
- Browser / Electron ──HTTPS──▶ Worker (Hono router) ──▶ D1 (SQLite + FTS5)
+ Browser / Tauri ────HTTPS──▶ Worker (Hono router) ──▶ D1 (SQLite + FTS5)
         │                         │      │
         └──WebSocket──────────────┘      ├──▶ R2 (files, custom emoji, thumbnails)
                                   ▼      └──▶ Resend (magic-link email)
@@ -74,7 +74,7 @@ Storage, Cookies) were not opened.
 | `WorkspaceHub` (Durable Object, SQLite-backed) | Holds hibernatable sockets for one workspace; assigns per-channel `seq`; validates and persists writes to D1; fans out events; presence and typing | D1 |
 | `packages/protocol` | Shared TypeScript types + zod schemas for REST and WS messages | — |
 | `packages/emoji` | Shortcode table (from `emoji-datasource`), shortcode parse/render, skin tones | — |
-| `apps/desktop` | Electron shell: hardened window, preload bridge, notifications, tray/badge, deep links, keychain session | Hosted web app |
+| `apps/desktop` | Tauri 2 shell: locked-down remote window, capability-scoped commands, notifications, tray/badge, deep links, PKCE desktop login | Hosted web app |
 
 Monorepo with npm workspaces (no global tool installs needed); TypeScript throughout.
 
@@ -224,10 +224,18 @@ state-changing requests require a matching `Origin`.
 - Login token: 32 random bytes, base64url, 15-minute TTL, single use.
 - Session: 32 random bytes; 30-day sliding expiry (renewed when < 15 days left);
   cookie `backroom_session`, `HttpOnly; Secure; SameSite=Lax; Path=/`.
-- Desktop: login starts from the app, which opens the system browser to
-  `/login?desktop=1`; verification redirects to `backroom://auth?code=…`; the
-  app exchanges the code for a session token and stores it with Electron
-  `safeStorage`, sending it as a Bearer token.
+- Desktop (revised 2026-11-13): the in-app login form asks the Rust side for a
+  PKCE-style challenge (`login_challenge()` → SHA-256 of a 32-byte verifier
+  held only in Rust) and sends it with `POST /auth/start`. The emailed link opens
+  in the system browser; `/verify` of a desktop token creates no browser session
+  and instead returns a one-time desktop code (32 bytes, 2-minute TTL, stored
+  hashed), and the page redirects to `backroom://auth?code=…`. The app then loads
+  `APP_URL/desktop-auth#code=…&verifier=…` in its webview, which calls
+  `POST /auth/desktop/exchange {code, verifier}`; the server checks
+  `sha256(verifier)` against the stored challenge and sets the session cookie in
+  the webview. A code injected by another local app fails without the verifier.
+- The session cookie's `Secure` attribute is set only when `APP_ORIGIN` is
+  https (local http dev in WebKit otherwise drops it).
 - Deactivated members: all sessions deleted and sockets closed immediately.
 
 ## 8. Files
@@ -277,22 +285,35 @@ state-changing requests require a matching `Origin`.
 
 ## 11. Desktop app (`apps/desktop`)
 
-- Electron, Linux builds (AppImage, `.deb`) via `electron-builder`.
-- Fuses via `@electron/fuses`: RunAsNode off, NODE_OPTIONS off, CLI inspect off,
-  OnlyLoadAppFromAsar on, cookie encryption on, embedded ASAR integrity on
-  (effective on Windows/macOS later).
-- Main window: loads `APP_URL`; `contextIsolation: true`, `sandbox: true`,
-  `nodeIntegration: false`; `will-navigate`/`setWindowOpenHandler` restrict to
-  the app origin and open everything else in the default browser; permission
-  handler grants only `notifications`.
-- Preload exposes `window.backroomDesktop`:
-  `notify({title, body, channelId})`, `setBadge(count)`,
-  `onNavigate(cb)`, `getPlatform()`. IPC uses fixed literal channel names; the
-  main process verifies `event.senderFrame.origin === APP_ORIGIN`.
-- Native `Notification`; click focuses the window and sends `navigate` to the
-  channel. Tray icon with unread count; `app.setBadgeCount` where supported.
-- Single-instance lock; `backroom://` protocol registered; deep links route to
-  auth hand-off or channel navigation.
+*Revised 2026-11-13 (user decision G4): Tauri 2 replaces Electron.*
+
+- Tauri 2 (Rust + system WebKitGTK 4.1 on Linux); Linux bundles `.deb` and
+  AppImage via `tauri build`. `@tauri-apps/cli` is a dev dependency (no global
+  installs). App URL comes from build-time env `BACKROOM_APP_URL`
+  (default `http://localhost:8787`).
+- Main window is created in Rust and loads the remote `APP_URL`. Navigation
+  lockdown: `on_navigation` allows only the app origin; any other http(s) URL
+  opens in the default browser and is denied in-app; new-window requests are
+  denied in-app and opened in the default browser. No other schemes load.
+- Remote-page IPC is granted by a capability added at runtime whose `remote.urls`
+  is exactly the app origin, permitting only the app's own commands plus
+  event listening. The web app reaches them through `apps/web/src/desktop/bridge.ts`
+  (`@tauri-apps/api`), and is a no-op outside the desktop app.
+- Commands: `notify({title, body, channelId})`, `set_badge(count)`,
+  `platform()`, `login_challenge()`. Command arguments are validated in Rust
+  (lengths, ULID channel ids, count bounds).
+- Native notifications (via the notification plugin / notify-rust); clicking
+  focuses the window and emits `backroom://navigate` with the channel id. Tray
+  icon with Show/Quit menu and unread count in the tooltip; window badge count
+  where the desktop supports it.
+- Single-instance plugin (with deep-link forwarding); `backroom://` scheme via
+  the deep-link plugin. Deep links route to the auth hand-off or channel
+  navigation; anything else is ignored.
+- Session: the normal `backroom_session` cookie inside the webview's persistent
+  data store (the token is never exposed to JS or written by Rust).
+- Not adopted from the Electron design: fuses (no Node runtime exists), preload
+  scripts (replaced by capabilities), `safeStorage`/Bearer storage (replaced by
+  the webview cookie).
 
 ## 12. Error handling and logging
 
@@ -338,8 +359,10 @@ with no code changes.
   files); file disposition headers; custom emoji validation.
 - **E2E (Playwright):** two users sign in via captured magic links, chat,
   thread, react, upload, search; a third user is denied a private channel.
-- **Desktop smoke (Playwright `_electron`):** launches, bridge present, notify
-  and badge calls reach main, deep-link routing, navigation lockdown.
+- **Desktop:** `cargo test` for the pure Rust logic (origin allowlist, deep-link
+  parsing, argument validation, PKCE); a smoke mode (`BACKROOM_SMOKE=1`) that
+  launches under `xvfb-run`, loads the app URL, and exits 0 after the page load
+  finishes on the allowed origin.
 - **CI:** GitHub Actions on push.
 
 ## 15. Deployment
@@ -362,6 +385,6 @@ with no code changes.
 3. **Emoji & reactions:** emoji package, rendering, picker, reactions, custom
    emoji + bulk import.
 4. **Files & search:** uploads/thumbnails/downloads, FTS search UI.
-5. **Desktop:** Electron shell, bridge, notifications, tray/badge, deep links,
-   Linux packaging.
+5. **Desktop:** Tauri 2 shell, bridge, notifications, tray/badge, deep links,
+   desktop login hand-off, Linux packaging.
 6. **Hardening & deploy:** E2E suite, CI, deployment docs, first deploy.
