@@ -5,8 +5,8 @@ import { requireChannelRead, type ChannelRow } from '../messaging/read';
 import { GENERAL_CHANNEL_NAME } from '../workspace/membership';
 
 /**
- * Columns of one member's ChannelSummary row. `?1` is the member's user ID; the query must alias
- * `channels` as `c` and that member's `channel_members` row as `cm`. Shared with bootstrap.
+ * Columns of one member's ChannelSummary row. The query must alias `channels` as `c` and that
+ * member's `channel_members` row as `cm` (the counts are for `cm.user_id`). Shared with bootstrap.
  */
 export const SUMMARY_COLUMNS = `c.id AS id, c.name AS name, c.kind AS kind, c.topic AS topic,
   c.created_by AS createdBy, c.dm_key AS dmKey,
@@ -18,7 +18,7 @@ export const SUMMARY_COLUMNS = `c.id AS id, c.name AS name, c.kind AS kind, c.to
     WHERE m.channel_id = c.id AND m.seq > cm.last_read_seq AND m.deleted_at IS NULL
       AND (m.parent_id IS NULL OR m.also_in_channel = 1)
       AND EXISTS (SELECT 1 FROM mentions mn WHERE mn.message_id = m.id
-                  AND (mn.user_id = ?1 OR (mn.kind IN ('channel', 'here') AND m.user_id <> ?1)))) AS mentionCount`;
+                  AND (mn.user_id = cm.user_id OR (mn.kind IN ('channel', 'here') AND m.user_id <> cm.user_id)))) AS mentionCount`;
 
 export type SummaryRow = Omit<ChannelSummary, 'dmUserIds'> & { dmKey: string | null };
 
@@ -65,6 +65,35 @@ export async function memberSummaryFor(db: D1Database, channelId: string, userId
     .first<SummaryRow>();
   if (!row) throw notFound();
   return rowToSummary(row);
+}
+
+/** Each member's own summary (as bootstrap would give it), in one D1 batch. Non-members are omitted. */
+export async function memberSummariesFor(
+  db: D1Database,
+  channelId: string,
+  userIds: string[],
+): Promise<Record<string, ChannelSummary>> {
+  const ids = [...new Set(userIds)];
+  // One statement per chunk (D1 caps bound parameters at 100), not one per user.
+  const chunks: string[][] = [];
+  for (let i = 0; i < ids.length; i += 90) chunks.push(ids.slice(i, i + 90));
+  if (chunks.length === 0) return {};
+  const sets = await db.batch(
+    chunks.map((chunk) =>
+      db
+        .prepare(
+          `SELECT cm.user_id AS userId, ${SUMMARY_COLUMNS} FROM channels c
+           JOIN channel_members cm ON cm.channel_id = c.id
+           WHERE c.id = ? AND cm.user_id IN (${chunk.map(() => '?').join(',')})`,
+        )
+        .bind(channelId, ...chunk),
+    ),
+  );
+  const out: Record<string, ChannelSummary> = {};
+  for (const set of sets) {
+    for (const { userId, ...row } of set.results as (SummaryRow & { userId: string })[]) out[userId] = rowToSummary(row);
+  }
+  return out;
 }
 
 function toInfo(ch: { id: string; name: string | null; kind: ChannelKind; topic: string | null; archivedAt: number | null }): ChannelInfo {

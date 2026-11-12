@@ -21,7 +21,13 @@ import { deleteMessage, editMessage, sendMessage, type Audience } from '../messa
 import { addChannel, channelsOf, getAtt, removeChannel, setAtt } from './attachment';
 
 export type MembershipChange =
-  | { action: 'added'; userIds: string[]; channel: ChannelSummary }
+  | {
+      action: 'added';
+      userIds: string[];
+      channel: ChannelSummary;
+      /** Per-recipient summaries (their own read position and counts); `channel` is the fallback. */
+      perUser?: Record<string, ChannelSummary>;
+    }
   | { action: 'removed'; userIds: string[]; channelId: string };
 
 const MAX_FRAME_CHARS = 262_144;
@@ -465,7 +471,7 @@ export class WorkspaceHub extends DurableObject<Env> {
         this.connecting.get(ws)?.push(change);
         if (change.action === 'added') {
           addChannel(ws, change.channel.id);
-          this.sendFrame(ws, { t: 'membership', action: 'added', channel: change.channel });
+          this.sendFrame(ws, { t: 'membership', action: 'added', channel: change.perUser?.[userId] ?? change.channel });
         } else {
           removeChannel(ws, change.channelId);
           this.sendFrame(ws, { t: 'membership', action: 'removed', channelId: change.channelId });

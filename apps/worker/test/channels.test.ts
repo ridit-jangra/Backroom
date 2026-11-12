@@ -436,4 +436,59 @@ describe('channels REST', () => {
     bob.send({ t: 'send', clientId: 'c-unarch-0001', channelId: channel.id, body: 'back' });
     expect((await bob.next('ack')).message.channelId).toBe(channel.id);
   });
+
+  it('a repeated DM open keeps the other participant\'s own unread and mention counts', async () => {
+    const s = await setup();
+    const { channel } = await json<{ channel: ChannelSummary }>(
+      await send(s.app, 'POST', '/w/clubhack/dms', { userIds: [s.bob.userId] }, s.alice.cookie),
+    );
+    await seedUnread(channel.id, s.alice.userId, s.bob.userId);
+    const bob = await connect(s.app, s.bob.cookie);
+    expect((await send(s.app, 'POST', '/w/clubhack/dms', { userIds: [s.bob.userId] }, s.alice.cookie)).status).toBe(200);
+    const m = await bob.next('membership');
+    expect(m).toMatchObject({ action: 'added', channel: { id: channel.id, lastSeq: 2, lastReadSeq: 0, unreadCount: 2, mentionCount: 1 } });
+  });
+
+  it('re-adding an existing member keeps their own counts', async () => {
+    const s = await setup();
+    const { channel } = await json<{ channel: ChannelSummary }>(
+      await send(s.app, 'POST', '/w/clubhack/channels', { name: 'crew', private: true }, s.alice.cookie),
+    );
+    await send(s.app, 'POST', `/channels/${channel.id}/members`, { userIds: [s.bob.userId] }, s.alice.cookie);
+    await seedUnread(channel.id, s.alice.userId, s.bob.userId);
+    const bob = await connect(s.app, s.bob.cookie);
+    const res = await send(s.app, 'POST', `/channels/${channel.id}/members`, { userIds: [s.bob.userId, s.carol.userId] }, s.alice.cookie);
+    expect(await res.json()).toEqual({ added: [s.carol.userId] });
+    expect(await bob.next('membership')).toMatchObject({ action: 'added', channel: { id: channel.id, unreadCount: 2, mentionCount: 1 } });
+  });
+
+  it('a leave retried after the channel became invisible still repairs the caller\'s sockets, with the same 404', async () => {
+    const s = await setup();
+    const p = await insertChannel({ name: 'p', kind: 'private', memberIds: [s.alice.userId, s.bob.userId] });
+    const alice = await connect(s.app, s.alice.cookie);
+    const bob = await connect(s.app, s.bob.cookie);
+    // Models the first leave's D1 delete committing while its post-delete hub call failed.
+    await env.DB.prepare('DELETE FROM channel_members WHERE channel_id = ? AND user_id = ?').bind(p, s.bob.userId).run();
+
+    const res = await send(s.app, 'POST', `/channels/${p}/leave`, undefined, s.bob.cookie);
+    const unknown = await send(s.app, 'POST', `/channels/${UNKNOWN}/leave`, undefined, s.bob.cookie);
+    expect(res.status).toBe(404);
+    expect(await res.text()).toBe(await unknown.text());
+    expect(await bob.next('membership')).toEqual({ t: 'membership', action: 'removed', channelId: p });
+
+    alice.send({ t: 'send', clientId: 'c-repair-0001', channelId: p, body: 'secret' });
+    await alice.next('ack');
+    await bob.none('message.new', 200);
+  });
 });
+
+/** Two top-level messages from `authorId` (the first mentions `readerId`), last_seq 2. */
+async function seedUnread(channelId: string, authorId: string, readerId: string) {
+  await env.DB.batch([
+    env.DB.prepare(`INSERT INTO messages (id, channel_id, seq, user_id, body, created_at) VALUES ('01JUNREAD00000000000000001', ?, 1, ?, 'hi', 1)`).bind(channelId, authorId),
+    env.DB.prepare(`INSERT INTO messages (id, channel_id, seq, user_id, body, created_at) VALUES ('01JUNREAD00000000000000002', ?, 2, ?, 'yo', 1)`).bind(channelId, authorId),
+    env.DB.prepare(`INSERT INTO mentions (message_id, user_id, kind) VALUES ('01JUNREAD00000000000000001', ?, 'user')`).bind(readerId),
+    env.DB.prepare('UPDATE channels SET last_seq = 2 WHERE id = ?').bind(channelId),
+  ]);
+}
+
