@@ -12,11 +12,16 @@ import { TypingIndicator } from '../components/TypingIndicator';
 import { channelLabel, notificationPermission, requestNotificationPermission } from '../notifications';
 import { useChat } from '../realtime/useChat';
 import { EmojiProvider } from '../emoji/EmojiContext';
+import { SearchPanel } from '../search/SearchPanel';
+import type { SearchHit } from '@backroom/protocol';
 
 export function Workspace({ slug, channelId }: { slug: string; channelId?: string }) {
   const { state, actions, error, threadError } = useChat(slug);
   const [signOutError, setSignOutError] = useState('');
   const [permission, setPermission] = useState(notificationPermission);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchDraft, setSearchDraft] = useState('');
+  const [jumpError, setJumpError] = useState('');
   const [dialog, setDialog] = useState<'browse' | 'dm' | 'settings' | null>(null);
   const bootstrap = state.bootstrap;
   const base = `/client/${encodeURIComponent(slug)}`;
@@ -94,13 +99,35 @@ export function Workspace({ slug, channelId }: { slug: string; channelId?: strin
     navigate(general ? `${base}/${general.id}` : base);
   }
 
+  async function onJump(hit: SearchHit) {
+    setJumpError('');
+    // A just-joined channel is new to this tab, so refresh before opening it.
+    if (!hit.channel.isMember) await actions.refresh();
+    navigate(`${base}/${hit.channel.id}`);
+    const m = hit.message;
+    const ok = await actions.jumpTo({
+      channelId: hit.channel.id,
+      messageId: m.id,
+      seq: m.seq,
+      parentId: m.parentId,
+      alsoInChannel: m.alsoInChannel,
+    });
+    if (!ok) setJumpError('That message is too far back to show here.');
+  }
+  function submitSearch(e: React.FormEvent) {
+    e.preventDefault();
+    const q = searchDraft.trim();
+    if (q) setSearchQuery(q);
+  }
+  const searchOpen = !!searchQuery && !threadOpen;
+
   const typingIds = channel
     ? [...new Set(state.typing.filter((t) => t.channelId === channel.id && t.parentId === null && t.userId !== me).map((t) => t.userId))]
     : [];
 
   return (
     <EmojiProvider userId={me} custom={customEmoji}>
-      <div className={`shell${threadOpen ? ' has-thread' : ''}`}>
+      <div className={`shell${threadOpen || searchOpen ? ' has-thread' : ''}`}>
         <Sidebar
           slug={slug}
           workspaceName={bootstrap.workspace.name}
@@ -124,6 +151,16 @@ export function Workspace({ slug, channelId }: { slug: string; channelId?: strin
               {archived && <span className="muted topic">Archived</span>}
               {(channel?.topic ?? archived?.topic) && <span className="muted topic">{channel?.topic ?? archived?.topic}</span>}
             </div>
+            <form role="search" onSubmit={submitSearch}>
+              <input
+                type="search"
+                aria-label="Search messages"
+                placeholder="Search"
+                maxLength={256}
+                value={searchDraft}
+                onChange={(e) => setSearchDraft(e.target.value)}
+              />
+            </form>
             {channel && !isDm && (
               <button type="button" onClick={() => setDialog('settings')}>
                 Channel settings
@@ -134,6 +171,7 @@ export function Workspace({ slug, channelId }: { slug: string; channelId?: strin
             </button>
             {signOutError && <span role="alert">{signOutError}</span>}
           </header>
+          {jumpError && <p role="alert" className="banner">{jumpError}</p>}
           {state.connection === 'reconnecting' && (
             <div role="status" className="banner">
               Reconnecting…
@@ -224,6 +262,15 @@ export function Workspace({ slug, channelId }: { slug: string; channelId?: strin
             onClose={() => actions.openThread(null)}
             highlightId={state.highlightId}
             highlightNonce={state.highlightNonce}
+          />
+        )}
+        {searchOpen && (
+          <SearchPanel
+            slug={slug}
+            query={searchQuery}
+            members={members}
+            onJump={onJump}
+            onClose={() => setSearchQuery('')}
           />
         )}
         {dialog === 'browse' && <ChannelBrowser slug={slug} onJoined={showChannel} onClose={() => setDialog(null)} />}
