@@ -262,11 +262,10 @@ describe('search UI', () => {
     expect((await screen.findByText('That message is too far back to show here.')).getAttribute('role')).toBe('alert');
   });
 
-  it('a rejecting jump shows an alert', async () => {
+  it('a rejecting jump shows the alert text', async () => {
     const m = msg(1, { channelId: RAND });
     const route: Route = (url) => {
-      if (url.startsWith('/w/clubhack/search')) return { results: [hit(m, { isMember: false })], nextCursor: null };
-      if (url.startsWith(`/channels/${RAND}/join`)) return {};
+      if (url.startsWith('/w/clubhack/search')) return { results: [hit(m)], nextCursor: null };
       if (url.startsWith(`/channels/${RAND}/messages`)) return new Response('x', { status: 500 });
       return undefined;
     };
@@ -274,7 +273,86 @@ describe('search UI', () => {
     await boot();
     await screen.findByRole('searchbox');
     await search('x');
-    await userEvent.click(await screen.findByRole('button', { name: /Join #random/ }));
-    await waitFor(() => expect(screen.queryAllByRole('alert').length).toBeLessThanOrEqual(1));
+    const panel = await screen.findByRole('complementary', { name: 'Search results' });
+    await userEvent.click(await within(panel).findByRole('button', { name: /random/ }));
+    await waitFor(() => expect(screen.queryAllByRole('alert').length).toBeGreaterThan(0));
+    expect(screen.getAllByRole('alert').map((a) => a.textContent).join(' ')).toMatch(/too far back|Request failed|Could not/);
+  });
+
+  it('join refreshes bootstrap before navigating, posts once for double-click and not again after success', async () => {
+    const ZOO = id('01JZOO');
+    const zm = msg(1, { channelId: ZOO });
+    const log: string[] = [];
+    const route: Route = (url, init) => {
+      if (url.startsWith('/w/clubhack/search')) return { results: [hit(zm, { id: ZOO, name: 'zoo', isMember: false })], nextCursor: null };
+      if (url === `/channels/${ZOO}/join`) log.push('join');
+      if (/\/bootstrap/.test(url)) log.push(`bootstrap@${location.pathname.endsWith(ZOO) ? 'zoo' : 'gen'}`);
+      void init;
+      return url === `/channels/${ZOO}/join` ? {} : undefined;
+    };
+    const posted = stubApi({ route, pages: { [ZOO]: [zm] } });
+    await boot();
+    await screen.findByRole('searchbox');
+    await search('zebra');
+    const btn = await screen.findByRole('button', { name: 'Join #zoo to view' });
+    fireEvent.click(btn);
+    fireEvent.click(btn);
+    await waitFor(() => expect(location.pathname).toBe(`/client/clubhack/${ZOO}`));
+    expect(posted.filter((p) => p.url === `/channels/${ZOO}/join`)).toHaveLength(1);
+    const j = log.indexOf('join');
+    expect(log.slice(j + 1)).toContain('bootstrap@gen');
+    expect(log.slice(j + 1).indexOf('bootstrap@gen')).toBeGreaterThanOrEqual(0);
+    fireEvent.click(screen.getByRole('button', { name: /zoo/ }));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(posted.filter((p) => p.url === `/channels/${ZOO}/join`)).toHaveLength(1);
+  });
+
+  it('manual thread does not hide the search panel; a jump-opened thread does', async () => {
+    const parent = msg(1, { replyCount: 1 });
+    const reply = msg(2, { parentId: parent.id });
+    const route: Route = (url) => {
+      if (url.startsWith('/w/clubhack/search')) return { results: [hit(reply)], nextCursor: null };
+      if (url === `/messages/${parent.id}/thread`) return { parent, replies: [reply] };
+      return undefined;
+    };
+    stubApi({ route, pages: { [GEN]: [parent] } });
+    await boot();
+    await screen.findByRole('searchbox');
+    await search('zebra');
+    await screen.findByRole('complementary', { name: 'Search results' });
+    await userEvent.click(await screen.findByRole('button', { name: /1 repl/i }));
+    await screen.findByRole('complementary', { name: 'Thread' });
+    expect(screen.queryByRole('complementary', { name: 'Search results' })).not.toBeNull();
+    await userEvent.click(within(screen.getByRole('complementary', { name: 'Search results' })).getByRole('button', { name: /general/ }));
+    await waitFor(() => expect(screen.queryByRole('complementary', { name: 'Search results' })).toBeNull());
+    expect(screen.queryByRole('complementary', { name: 'Thread' })).not.toBeNull();
+  });
+
+  it('jumpError clears on a new search', async () => {
+    const many = Array.from({ length: 1500 }, (_, i) => msg(i + 1));
+    const route: Route = (url) =>
+      url.startsWith('/w/clubhack/search') ? { results: [hit(many[0]!)], nextCursor: null } : undefined;
+    stubApi({ route, pages: { [GEN]: many } });
+    await boot();
+    await screen.findByRole('searchbox');
+    await search('old');
+    const panel = await screen.findByRole('complementary', { name: 'Search results' });
+    await userEvent.click(await within(panel).findByRole('button', { name: /general/ }));
+    await screen.findByText('That message is too far back to show here.');
+    await userEvent.type(screen.getByRole('searchbox', { name: 'Search messages' }), ' more{Enter}');
+    await waitFor(() => expect(screen.queryByText('That message is too far back to show here.')).toBeNull());
+  });
+
+  it('Escape inside the panel with defaultPrevented keeps it open', async () => {
+    const route: Route = (url) => (url.startsWith('/w/clubhack/search') ? { results: [], nextCursor: null } : undefined);
+    stubApi({ route });
+    await boot();
+    await screen.findByRole('searchbox');
+    await search('x');
+    const panel = await screen.findByRole('complementary', { name: 'Search results' });
+    const child = panel.querySelector('p')!;
+    child.addEventListener('keydown', (e) => e.preventDefault());
+    fireEvent.keyDown(child, { key: 'Escape' });
+    expect(screen.queryByRole('complementary', { name: 'Search results' })).not.toBeNull();
   });
 });

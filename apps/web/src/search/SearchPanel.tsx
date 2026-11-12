@@ -39,6 +39,7 @@ export function SearchPanel({
   const [joinError, setJoinError] = useState('');
   const [joined, setJoined] = useState<Set<string>>(new Set());
   const ctl = useRef<AbortController | null>(null);
+  const joining = useRef(new Set<string>());
   const panelRef = useRef<HTMLElement | null>(null);
   const names = new Map(members.map((m) => [m.id, m.displayName]));
 
@@ -86,16 +87,20 @@ export function SearchPanel({
   async function open(hit: SearchHit) {
     setJoinError('');
     if (!hit.channel.isMember && hit.channel.kind === 'public' && !joined.has(hit.channel.id)) {
+      if (joining.current.has(hit.channel.id)) return;
+      joining.current.add(hit.channel.id);
       try {
         await api(`/channels/${encodeURIComponent(hit.channel.id)}/join`, { method: 'POST', body: {} });
         setJoined((j) => new Set(j).add(hit.channel.id));
       } catch (e) {
         setJoinError(e instanceof Error ? e.message : 'Could not join.');
         return;
+      } finally {
+        joining.current.delete(hit.channel.id);
       }
     }
     try {
-      await onJump({ ...hit, channel: { ...hit.channel, isMember: true } });
+      await onJump(hit);
     } catch (e) {
       setJoinError(e instanceof Error ? e.message : 'Could not open that message.');
     }

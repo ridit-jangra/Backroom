@@ -21,6 +21,7 @@ export function Workspace({ slug, channelId }: { slug: string; channelId?: strin
   const [permission, setPermission] = useState(notificationPermission);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchDraft, setSearchDraft] = useState('');
+  const [jumpThreadId, setJumpThreadId] = useState<string | null>(null);
   const [jumpError, setJumpError] = useState('');
   const [dialog, setDialog] = useState<'browse' | 'dm' | 'settings' | null>(null);
   const bootstrap = state.bootstrap;
@@ -107,6 +108,7 @@ export function Workspace({ slug, channelId }: { slug: string; channelId?: strin
     if (!hit.channel.isMember) await actions.refresh();
     navigate(`${base}/${hit.channel.id}`);
     const m = hit.message;
+    setJumpThreadId(m.parentId && !m.alsoInChannel ? m.parentId : null);
     const ok = await actions.jumpTo({
       channelId: hit.channel.id,
       messageId: m.id,
@@ -121,10 +123,11 @@ export function Workspace({ slug, channelId }: { slug: string; channelId?: strin
     const q = searchDraft.trim();
     if (!q) return;
     setJumpError('');
+    setJumpThreadId(null);
     actions.openThread(null);
     setSearchQuery(q);
   }
-  const searchOpen = !!searchQuery && !threadOpen;
+  const searchOpen = !!searchQuery && !(threadOpen && threadId === jumpThreadId);
 
   const typingIds = channel
     ? [...new Set(state.typing.filter((t) => t.channelId === channel.id && t.parentId === null && t.userId !== me).map((t) => t.userId))]
