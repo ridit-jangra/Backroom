@@ -307,7 +307,7 @@ describe('search UI', () => {
     expect(posted.filter((p) => p.url === `/channels/${ZOO}/join`)).toHaveLength(1);
   });
 
-  it('manual thread does not hide the search panel; a jump-opened thread does', async () => {
+  it('an open thread replaces the search panel (never four columns); closing it brings the results back', async () => {
     const parent = msg(1, { replyCount: 1 });
     const reply = msg(2, { parentId: parent.id });
     const route: Route = (url) => {
@@ -321,11 +321,12 @@ describe('search UI', () => {
     await search('zebra');
     await screen.findByRole('complementary', { name: 'Search results' });
     await userEvent.click(await screen.findByRole('button', { name: /1 repl/i }));
-    await screen.findByRole('complementary', { name: 'Thread' });
-    expect(screen.queryByRole('complementary', { name: 'Search results' })).not.toBeNull();
-    await userEvent.click(within(screen.getByRole('complementary', { name: 'Search results' })).getByRole('button', { name: /general/ }));
-    await waitFor(() => expect(screen.queryByRole('complementary', { name: 'Search results' })).toBeNull());
-    expect(screen.queryByRole('complementary', { name: 'Thread' })).not.toBeNull();
+    const thread = await screen.findByRole('complementary', { name: 'Thread' });
+    expect(screen.queryByRole('complementary', { name: 'Search results' })).toBeNull();
+    expect(document.querySelectorAll('.shell > aside')).toHaveLength(2);
+    await userEvent.click(within(thread).getByRole('button', { name: 'Close' }));
+    await screen.findByRole('complementary', { name: 'Search results' });
+    expect(screen.queryByRole('complementary', { name: 'Thread' })).toBeNull();
   });
 
   it('jumpError clears on a new search', async () => {
@@ -356,7 +357,7 @@ describe('search UI', () => {
     expect(screen.queryByRole('complementary', { name: 'Search results' })).not.toBeNull();
   });
 
-  it('closing a jump-opened thread and reopening it manually keeps the search panel', async () => {
+  it('closing a jump-opened thread and reopening it manually replaces the search panel again', async () => {
     const parent = msg(1, { replyCount: 1 });
     const reply = msg(2, { parentId: parent.id });
     const route: Route = (url) => {
@@ -376,6 +377,6 @@ describe('search UI', () => {
     await screen.findByRole('complementary', { name: 'Search results' });
     await userEvent.click(await screen.findByRole('button', { name: /1 repl/i }));
     await screen.findByRole('complementary', { name: 'Thread' });
-    expect(screen.queryByRole('complementary', { name: 'Search results' })).not.toBeNull();
+    expect(screen.queryByRole('complementary', { name: 'Search results' })).toBeNull();
   });
 });
