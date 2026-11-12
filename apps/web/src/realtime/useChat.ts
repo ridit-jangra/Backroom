@@ -34,6 +34,26 @@ export type ChatActions = {
 
 const TICK_MS = 1_000;
 const ACTIVITY_EVERY_MS = 60_000;
+/** P2-R28: a frame naming a user missing from bootstrap.members refetches bootstrap at most this often. */
+export const MEMBER_REFRESH_MS = 10_000;
+
+/** User IDs a hub frame refers to (authors, typers, presence). */
+function frameUserIds(f: HubFrame): string[] {
+  switch (f.t) {
+    case 'ack':
+    case 'message.new':
+    case 'message.edit':
+    case 'message.delete':
+      return [f.message.userId];
+    case 'catchup':
+      return [...f.messages.map((m) => m.userId), ...f.presence.map((p) => p.userId)];
+    case 'presence':
+    case 'typing':
+      return [f.userId];
+    default:
+      return [];
+  }
+}
 
 const historyUrl = (channelId: string, before?: number) =>
   `/channels/${encodeURIComponent(channelId)}/messages?${before !== undefined ? `before=${before}&` : ''}limit=${HISTORY_DEFAULT}`;
@@ -52,7 +72,9 @@ function startSession(
 ): { actions: ChatActions; stop: () => void } {
   let alive = true;
   let state = initialChat('');
-  let lastMarkAt = Number.NEGATIVE_INFINITY;
+  /** Last mark_read time per channel: the throttle is per channel so switching channels quickly still marks each one. */
+  const lastMarkAt = new Map<string, number>();
+  let lastMemberRefreshAt = Number.NEGATIVE_INFINITY;
   const markSent = new Map<string, number>();
   let lastActivityAt = Number.NEGATIVE_INFINITY;
   const olderLoading = new Set<string>();
@@ -84,16 +106,16 @@ function startSession(
     maybeMarkRead();
   };
 
-  /** mark_read for the viewed channel when it has unread messages, at most once per MARK_READ_INTERVAL_MS. */
+  /** mark_read for the viewed channel when it has unread messages, at most once per MARK_READ_INTERVAL_MS per channel. */
   function maybeMarkRead() {
     const cid = state.openChannelId;
     if (!cid || !isViewing(state, cid)) return;
     const c = state.channels[cid];
     if (!c || c.lastSeq <= Math.max(c.lastReadSeq, markSent.get(cid) ?? 0)) return;
     const now = Date.now();
-    if (now - lastMarkAt < MARK_READ_INTERVAL_MS) return;
+    if (now - (lastMarkAt.get(cid) ?? Number.NEGATIVE_INFINITY) < MARK_READ_INTERVAL_MS) return;
     if (sendFrame({ t: 'mark_read', channelId: cid, seq: c.lastSeq })) {
-      lastMarkAt = now;
+      lastMarkAt.set(cid, now);
       markSent.set(cid, c.lastSeq);
     }
   }
@@ -188,7 +210,7 @@ function startSession(
   const onOpen = () => {
     // The hub may have missed read markers sent just before the drop; let them go out again.
     markSent.clear();
-    lastMarkAt = Number.NEGATIVE_INFINITY;
+    lastMarkAt.clear();
     sendFrame({ t: 'hello', lastSeen: lastSeenFor(state) });
     sendFrame({ t: 'activity' });
     lastActivityAt = Date.now();
@@ -199,12 +221,31 @@ function startSession(
     if (state.openThreadId) void loadThread(state.openThreadId);
   };
 
+  /** P2-R28: a user unknown to bootstrap (e.g. joined since) triggers a throttled bootstrap refetch. */
+  const checkMembers = (f: HubFrame) => {
+    const members = state.bootstrap?.members;
+    if (!members) return;
+    const ids = frameUserIds(f);
+    if (ids.length === 0 || ids.every((id) => members.some((m) => m.id === id))) return;
+    const now = Date.now();
+    if (now - lastMemberRefreshAt < MEMBER_REFRESH_MS) return;
+    lastMemberRefreshAt = now;
+    void loadBootstrap();
+  };
+
   const onFrame = (f: HubFrame) => {
+    // Where the open thread lives, read before `stale` drops its page.
+    const tid = state.openThreadId;
+    const threadChannel = tid ? (state.threads[tid]?.parent.channelId ?? state.openChannelId) : null;
     dispatch(f);
+    checkMembers(f);
     if (f.t === 'ack') outbox.ack(f.clientId);
     else if (f.t === 'nack') outbox.nack(f.clientId, f.code);
-    else if (f.t === 'stale' && state.openChannelId === f.channelId) void loadLatest(f.channelId);
-    else if (f.t === 'notify') {
+    else if (f.t === 'stale') {
+      if (state.openChannelId === f.channelId) void loadLatest(f.channelId);
+      // `stale` dropped the open thread's page; refetch it or the panel would stay on "Loading…".
+      if (tid && state.openThreadId === tid && threadChannel === f.channelId && !state.threads[tid]) void loadThread(tid);
+    } else if (f.t === 'notify') {
       const text = notificationText(f, { channels: state.channels, members: state.bootstrap?.members ?? [], me: state.me });
       showNotification(f, {
         viewing: isViewing(state, f.channelId),

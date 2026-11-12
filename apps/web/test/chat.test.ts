@@ -202,7 +202,7 @@ describe('chat reducer', () => {
     s = run(s, { t: 'presence', userId: OTHER, state: 'away' });
     s = run(s, { t: 'catchup', messages: [], presence: [{ userId: 'z', state: 'active' }] });
     s = run(s, { t: 'local.connection', state: 'open' });
-    expect(s.presence).toEqual({ [OTHER]: 'away', z: 'active' });
+    expect(s.presence).toEqual({ z: 'active' }); // the catchup snapshot replaces the map
     expect(s.connection).toBe('open');
   });
 
@@ -316,5 +316,18 @@ describe('chat reducer', () => {
     s = newMsg(s, msg(3));
     s = run(s, { t: 'local.history', channelId: 'c1', page: { messages: [msg(1), msg(2)], hasMore: false }, mode: 'replace' });
     expect(s.windows.c1!.messages.map((m) => m.seq)).toEqual([1, 2, 3]);
+  });
+});
+
+describe('catchup presence (final review)', () => {
+  it('replaces the presence map with the snapshot: users absent from it are no longer active', () => {
+    let s = setup();
+    s = run(s, { t: 'presence', userId: OTHER, state: 'active' });
+    s = run(s, { t: 'presence', userId: 'X'.repeat(26), state: 'away' });
+    expect(s.presence[OTHER]).toBe('active');
+    s = run(s, { t: 'catchup', messages: [], presence: [{ userId: ME, state: 'active' }] });
+    expect(s.presence).toEqual({ [ME]: 'active' });
+    s = run(s, { t: 'catchup', messages: [], presence: [] });
+    expect(s.presence).toEqual({});
   });
 });

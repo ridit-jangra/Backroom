@@ -219,12 +219,10 @@ export function reduce(state: ChatState, e: ChatEvent, now: number): ChatState {
     case 'catchup': {
       let s = state;
       for (const m of [...e.messages].sort((a, b) => a.seq - b.seq)) s = applyMessage(s, m);
-      if (e.presence.length > 0) {
-        const presence = { ...s.presence };
-        for (const p of e.presence) presence[p.userId] = p.state;
-        s = { ...s, presence };
-      }
-      return s;
+      // The catchup presence list is a full snapshot: anyone not in it is away (dropped from the map).
+      const presence: Record<string, PresenceState> = {};
+      for (const p of e.presence) presence[p.userId] = p.state;
+      return { ...s, presence };
     }
     case 'read': {
       const c = state.channels[e.channelId];

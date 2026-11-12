@@ -66,6 +66,7 @@ describe('Admin page', () => {
   });
 
   it('revoke removes the invite row', async () => {
+    vi.spyOn(globalThis, 'confirm').mockReturnValue(true);
     const posted = open('admin', [inv('01JA'), inv('01JB', { uses: 7 })]);
     expect(await screen.findByText('7/50')).toBeTruthy();
     const row = screen.getByText('7/50').closest('tr')!;
@@ -73,6 +74,30 @@ describe('Admin page', () => {
     await waitFor(() => expect(screen.queryByText('7/50')).toBeNull());
     expect(screen.getByText('2/50')).toBeTruthy();
     expect(posted.find((p) => p.method === 'DELETE')!.url).toBe(`/invites/${inv('01JB').id}`);
+  });
+
+  it('revoke asks for confirmation; cancelling sends nothing', async () => {
+    const confirm = vi.spyOn(globalThis, 'confirm').mockReturnValue(false);
+    const posted = open('admin', [inv('01JA')]);
+    const row = (await screen.findByText('2/50')).closest('tr')!;
+    await userEvent.click(within(row).getByRole('button', { name: 'Revoke' }));
+    expect(confirm).toHaveBeenCalledWith('Revoke this invite?');
+    expect(posted.some((p) => p.method === 'DELETE')).toBe(false);
+    expect(screen.getByText('2/50')).toBeTruthy();
+  });
+
+  it('revoking the invite whose link is shown clears the link; revoking another keeps it', async () => {
+    vi.spyOn(globalThis, 'confirm').mockReturnValue(true);
+    open('admin', [inv('01JA', { uses: 7 })]);
+    await userEvent.click(await screen.findByRole('button', { name: 'Create invite' }));
+    expect(((await screen.findByLabelText('Invite link')) as HTMLInputElement).value).toBe('https://app.test/invite/secret');
+    // Another invite: the link stays.
+    await userEvent.click(within(screen.getByText('7/50').closest('tr')!).getByRole('button', { name: 'Revoke' }));
+    await waitFor(() => expect(screen.queryByText('7/50')).toBeNull());
+    expect(screen.getByLabelText('Invite link')).toBeTruthy();
+    // The new invite (shown link): the link goes.
+    await userEvent.click(screen.getByRole('button', { name: 'Revoke' }));
+    await waitFor(() => expect(screen.queryByLabelText('Invite link')).toBeNull());
   });
 
   it('owner sees role select, admin does not', async () => {
@@ -100,6 +125,7 @@ describe('Admin page', () => {
   });
 
   it('shows API error messages in an alert', async () => {
+    vi.spyOn(globalThis, 'confirm').mockReturnValue(true);
     stubApi({ bootstrap: () => makeBootstrap({}, 'admin'), route: (url, init) => (url.startsWith('/invites/') ? err(404, 'not_found') : url === '/w/clubhack/invites' && (init?.method ?? 'GET') === 'GET' ? { invites: [inv('01JA')] } : url === '/w/clubhack/members' ? { members: members() } : undefined) });
     history.replaceState(null, '', '/client/clubhack/admin');
     render(<App />);

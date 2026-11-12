@@ -194,6 +194,18 @@ describe('editMessage / deleteMessage', () => {
     expect(await deleteMessage(env.DB, { messageId: r.message.id, userId: alice, now: 10 })).toEqual({ ok: false, code: 'not_found' });
   });
 
+  it('edit and delete in an archived channel give archived, like send', async () => {
+    const { input, alice } = await setup();
+    const ch = await insertChannel({ name: 'old', kind: 'public', memberIds: [alice] });
+    const r = await sendMessage(env.DB, input({ channelId: ch }));
+    if (!r.ok) throw new Error('r');
+    await env.DB.prepare('UPDATE channels SET archived_at = 5 WHERE id = ?').bind(ch).run();
+    expect(await editMessage(env.DB, { messageId: r.message.id, userId: alice, body: 'changed', now: 9 })).toEqual({ ok: false, code: 'archived' });
+    expect(await deleteMessage(env.DB, { messageId: r.message.id, userId: alice, now: 9 })).toEqual({ ok: false, code: 'archived' });
+    const row = await env.DB.prepare('SELECT body, edited_at AS e, deleted_at AS d FROM messages WHERE id = ?').bind(r.message.id).first();
+    expect(row).toEqual({ body: 'hi', e: null, d: null });
+  });
+
   it('author may delete their own message', async () => {
     const { input, alice } = await setup();
     const r = await sendMessage(env.DB, input({}));

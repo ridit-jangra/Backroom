@@ -101,6 +101,37 @@ describe('bootstrap', () => {
     expect(await count(alice!.cookie)).toBe(1);
   });
 
+  it('includes deactivated members flagged deactivated: true; active members carry no flag', async () => {
+    const { mailer, sent } = captureMailer();
+    const app = createApp(testDeps({ mailer }));
+    const [owner, alice] = await seedUsers(app, sent, ['owner@test.dev', 'alice@test.dev']);
+    await env.DB.prepare('UPDATE workspace_members SET deactivated_at = 1 WHERE user_id = ?').bind(alice!.userId).run();
+    const b = (await (await send(app, 'GET', '/w/clubhack/bootstrap', undefined, owner!.cookie)).json()) as Bootstrap;
+    const a = b.members.find((m) => m.id === alice!.userId);
+    expect(a).toMatchObject({ id: alice!.userId, displayName: 'alice', deactivated: true });
+    const o = b.members.find((m) => m.id === owner!.userId)!;
+    expect(o).not.toHaveProperty('deactivated');
+  });
+
+  it('unread and mention counts are capped at 100', async () => {
+    const { app, cookie, userId } = await setup();
+    const stmts = [];
+    for (let i = 1; i <= 150; i++) {
+      stmts.push(
+        env.DB.prepare(
+          'INSERT INTO messages (id, channel_id, seq, user_id, parent_id, body, also_in_channel, created_at) VALUES (?,?,?,?,NULL,?,0,1)',
+        ).bind(`cap${i}`, GENERAL, i, 'u-other', 'x'),
+        env.DB.prepare("INSERT INTO mentions (message_id, user_id, kind) VALUES (?, ?, 'user')").bind(`cap${i}`, userId),
+      );
+    }
+    stmts.push(env.DB.prepare('UPDATE channels SET last_seq = 150 WHERE id = ?').bind(GENERAL));
+    await env.DB.batch(stmts);
+    const b = (await (await send(app, 'GET', '/w/clubhack/bootstrap', undefined, cookie)).json()) as Bootstrap;
+    expect(b.channels[0]!.unreadCount).toBe(100);
+    expect(b.channels[0]!.mentionCount).toBe(100);
+    expect(b.channels[0]!.lastSeq).toBe(150);
+  });
+
   it('non-member gets identical 404 for clubhack and for an unknown slug', async () => {
     const { app, sent } = await setup();
     // A signed-in user who is no longer an active member (membership removed after sign-in).

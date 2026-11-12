@@ -44,6 +44,8 @@ export type MemberSummary = {
   displayName: string;
   role: Role;
   avatarKey: string | null;
+  /** Set (true) only for deactivated members, listed so their messages keep a name (P2-R28). */
+  deactivated?: true;
 };
 
 export type Me = { id: string; email: string; displayName: string };

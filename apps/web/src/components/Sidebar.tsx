@@ -1,6 +1,11 @@
 import type { ChannelSummary, MemberSummary, PresenceState, Role } from '@backroom/protocol';
 import { channelLabel } from '../notifications';
 
+/** Badge text: the server caps counts at 100 (P2-R27), so anything above 99 shows as "99+". */
+export function badgeCount(n: number): string {
+  return n > 99 ? '99+' : String(n);
+}
+
 function ChannelItem({
   c,
   label,
@@ -23,8 +28,8 @@ function ChannelItem({
         {label}
       </button>
       {c.mentionCount > 0 && (
-        <span className="badge" aria-label={`${c.mentionCount} mentions`}>
-          {c.mentionCount}
+        <span className="badge" aria-label={`${badgeCount(c.mentionCount)} mentions`}>
+          {badgeCount(c.mentionCount)}
         </span>
       )}
     </li>
@@ -123,7 +128,7 @@ export function Sidebar({
       )}
       <h3>Members</h3>
       <ul aria-label="Members">
-        {members.map((m) => {
+        {members.filter((m) => !m.deactivated).map((m) => {
           const st = presence[m.id] ?? 'away';
           return (
             <li key={m.id} className="member">

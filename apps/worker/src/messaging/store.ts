@@ -187,6 +187,7 @@ type Target = {
   deletedAt: number | null;
   channelId: string;
   kind: ChannelKind;
+  archivedAt: number | null;
   isMember: number | null;
   role: string | null;
 };
@@ -196,6 +197,7 @@ async function loadTarget(db: D1Database, messageId: string, userId: string): Pr
   const row = await db
     .prepare(
       `SELECT m.id AS id, m.user_id AS userId, m.deleted_at AS deletedAt, m.channel_id AS channelId, c.kind AS kind,
+              c.archived_at AS archivedAt,
               (SELECT 1 FROM channel_members cm WHERE cm.channel_id = c.id AND cm.user_id = ?2) AS isMember,
               (SELECT wm.role FROM workspace_members wm
                 WHERE wm.workspace_id = c.workspace_id AND wm.user_id = ?2 AND wm.deactivated_at IS NULL) AS role
@@ -214,6 +216,7 @@ export async function editMessage(
   const t = await loadTarget(db, input.messageId, input.userId);
   if (!t) return { ok: false, code: 'not_found' };
   if (t.userId !== input.userId) return { ok: false, code: 'forbidden' };
+  if (t.archivedAt !== null) return { ok: false, code: 'archived' };
   const { members } = await loadContext(db, t.channelId, null);
   const mentions = keptMentions(input.body, members, input.userId);
   await db.batch([
@@ -232,6 +235,7 @@ export async function deleteMessage(
   const t = await loadTarget(db, input.messageId, input.userId);
   if (!t) return { ok: false, code: 'not_found' };
   if (t.userId !== input.userId && t.role !== 'owner' && t.role !== 'admin') return { ok: false, code: 'forbidden' };
+  if (t.archivedAt !== null) return { ok: false, code: 'archived' };
   await db.batch([
     db.prepare("UPDATE messages SET deleted_at = ?, body = '' WHERE id = ? AND deleted_at IS NULL").bind(input.now, input.messageId),
     db.prepare('DELETE FROM mentions WHERE message_id = ?').bind(input.messageId),

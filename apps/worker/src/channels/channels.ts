@@ -4,21 +4,26 @@ import { newId } from '../lib/ids';
 import { requireChannelRead, type ChannelRow } from '../messaging/read';
 import { GENERAL_CHANNEL_NAME } from '../workspace/membership';
 
+/** P2-R27: unread/mention counts are capped so a long-unread channel costs at most this many rows. */
+export const COUNT_CAP = 100;
+
 /**
  * Columns of one member's ChannelSummary row. The query must alias `channels` as `c` and that
- * member's `channel_members` row as `cm` (the counts are for `cm.user_id`). Shared with bootstrap.
+ * member's `channel_members` row as `cm` (the counts are for `cm.user_id`, capped at COUNT_CAP). Shared with bootstrap.
  */
 export const SUMMARY_COLUMNS = `c.id AS id, c.name AS name, c.kind AS kind, c.topic AS topic,
   c.created_by AS createdBy, c.dm_key AS dmKey,
   c.last_seq AS lastSeq, cm.last_read_seq AS lastReadSeq,
-  (SELECT COUNT(*) FROM messages m
+  (SELECT COUNT(*) FROM (SELECT 1 FROM messages m
     WHERE m.channel_id = c.id AND m.seq > cm.last_read_seq AND m.deleted_at IS NULL
-      AND (m.parent_id IS NULL OR m.also_in_channel = 1)) AS unreadCount,
-  (SELECT COUNT(*) FROM messages m
+      AND (m.parent_id IS NULL OR m.also_in_channel = 1)
+    LIMIT ${COUNT_CAP})) AS unreadCount,
+  (SELECT COUNT(*) FROM (SELECT 1 FROM messages m
     WHERE m.channel_id = c.id AND m.seq > cm.last_read_seq AND m.deleted_at IS NULL
       AND (m.parent_id IS NULL OR m.also_in_channel = 1)
       AND EXISTS (SELECT 1 FROM mentions mn WHERE mn.message_id = m.id
-                  AND (mn.user_id = cm.user_id OR (mn.kind IN ('channel', 'here') AND m.user_id <> cm.user_id)))) AS mentionCount`;
+                  AND (mn.user_id = cm.user_id OR (mn.kind IN ('channel', 'here') AND m.user_id <> cm.user_id)))
+    LIMIT ${COUNT_CAP})) AS mentionCount`;
 
 export type SummaryRow = Omit<ChannelSummary, 'dmUserIds'> & { dmKey: string | null };
 

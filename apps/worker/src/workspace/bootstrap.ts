@@ -30,9 +30,10 @@ export async function getBootstrap(db: D1Database, slug: string, userId: string)
       .bind(userId, workspaceId),
     db
       .prepare(
-        `SELECT u.id AS id, ${DISPLAY} AS displayName, wm.role AS role, u.avatar_key AS avatarKey
+        `SELECT u.id AS id, ${DISPLAY} AS displayName, wm.role AS role, u.avatar_key AS avatarKey,
+                (wm.deactivated_at IS NOT NULL) AS deactivated
          FROM workspace_members wm JOIN users u ON u.id = wm.user_id
-         WHERE wm.workspace_id = ? AND wm.deactivated_at IS NULL
+         WHERE wm.workspace_id = ?
          ORDER BY LOWER(${DISPLAY}), u.id`,
       )
       .bind(workspaceId),
@@ -42,6 +43,9 @@ export async function getBootstrap(db: D1Database, slug: string, userId: string)
     workspace: ws!.results[0] as { id: string; slug: string; name: string },
     me: { ...(me!.results[0] as Me), role: role as Role },
     channels: (channels!.results as SummaryRow[]).map(rowToSummary),
-    members: members!.results as MemberSummary[],
+    // P2-R28: deactivated members stay listed (flagged) so their old messages keep a name.
+    members: (members!.results as (Omit<MemberSummary, 'deactivated'> & { deactivated: number })[]).map(({ deactivated, ...m }) =>
+      deactivated ? { ...m, deactivated: true } : m,
+    ),
   };
 }

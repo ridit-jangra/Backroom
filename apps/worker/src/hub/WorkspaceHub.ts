@@ -132,13 +132,25 @@ export class WorkspaceHub extends DurableObject<Env> {
     this.connecting.set(server, log);
     try {
       await this.beforeChannelRead?.();
-      const { results } = await this.env.DB.prepare(
-        `SELECT c.id AS id FROM channel_members cm JOIN channels c ON c.id = cm.channel_id
-         WHERE cm.user_id = ? AND c.workspace_id = ? AND c.archived_at IS NULL`,
-      )
-        .bind(userId, workspaceId)
-        .all<{ id: string }>();
-      const ids = new Set(results.map((r) => r.id));
+      // Read membership and channels together: a deactivation that committed after the route's
+      // check (and whose disconnectUser ran before this socket was accepted) is caught here.
+      const [active, channels] = await this.env.DB.batch([
+        this.env.DB.prepare(
+          'SELECT 1 AS ok FROM workspace_members WHERE user_id = ? AND workspace_id = ? AND deactivated_at IS NULL',
+        ).bind(userId, workspaceId),
+        this.env.DB.prepare(
+          `SELECT c.id AS id FROM channel_members cm
+           JOIN channels c ON c.id = cm.channel_id
+           JOIN workspace_members wm ON wm.user_id = cm.user_id AND wm.workspace_id = c.workspace_id
+             AND wm.deactivated_at IS NULL
+           WHERE cm.user_id = ? AND c.workspace_id = ? AND c.archived_at IS NULL`,
+        ).bind(userId, workspaceId),
+      ]);
+      if (active!.results.length === 0) {
+        server.close(4001, 'deactivated');
+        return new Response(null, { status: 101, webSocket: client });
+      }
+      const ids = new Set((channels!.results as { id: string }[]).map((r) => r.id));
       for (const change of log) {
         if (change.action === 'added') ids.add(change.channel.id);
         else ids.delete(change.channelId);

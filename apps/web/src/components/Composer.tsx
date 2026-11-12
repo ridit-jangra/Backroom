@@ -41,7 +41,7 @@ export function Composer({
   const matches = useMemo(() => {
     if (query === undefined || dismissed) return [];
     const q = query.toLowerCase();
-    return members.filter((m) => m.displayName.toLowerCase().startsWith(q)).slice(0, MAX_SUGGESTIONS);
+    return members.filter((m) => !m.deactivated && m.displayName.toLowerCase().startsWith(q)).slice(0, MAX_SUGGESTIONS);
   }, [query, members, dismissed]);
   const open = matches.length > 0;
 

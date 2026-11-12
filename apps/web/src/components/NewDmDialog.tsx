@@ -21,7 +21,7 @@ export function NewDmDialog({
   const [picked, setPicked] = useState<string[]>([]);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
-  const others = members.filter((m) => m.id !== me);
+  const others = members.filter((m) => m.id !== me && !m.deactivated);
   const full = picked.length >= MAX_OTHERS;
 
   async function open() {

@@ -15,6 +15,8 @@ export function Admin({ slug }: { slug: string }) {
   const [maxUses, setMaxUses] = useState('50');
   const [days, setDays] = useState('14');
   const [url, setUrl] = useState('');
+  /** The invite whose link is on screen, so revoking it also hides the (now dead) link. */
+  const [urlInviteId, setUrlInviteId] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const urlInput = useRef<HTMLInputElement>(null);
 
@@ -75,6 +77,7 @@ export function Admin({ slug }: { slug: string }) {
         body: { maxUses: Number(maxUses), expiresInDays: Number(days) },
       });
       setUrl(r.url);
+      setUrlInviteId(r.invite.id);
       setCopied(false);
       setInvites((l) => [...l, r.invite]);
     });
@@ -93,11 +96,18 @@ export function Admin({ slug }: { slug: string }) {
     }
   }
 
-  const revoke = (id: string) =>
-    run(async () => {
+  const revoke = (id: string) => {
+    if (!globalThis.confirm('Revoke this invite?')) return;
+    return run(async () => {
       await api(`/invites/${id}`, { method: 'DELETE' });
       setInvites((l) => l.filter((i) => i.id !== id));
+      if (urlInviteId === id) {
+        setUrl('');
+        setUrlInviteId(null);
+        setCopied(false);
+      }
     });
+  };
 
   const patch = (m: AdminMember, body: { role?: 'admin' | 'member'; deactivated?: boolean }) =>
     run(async () => {

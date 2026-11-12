@@ -378,13 +378,43 @@ describe('channels REST', () => {
     expect(sessions!.n).toBe(0);
   });
 
+  it('a deactivation that lands during connect closes the new socket with 4001', async () => {
+    const s = await setup();
+    // Deactivation commits after the /ws route's membership check, and its disconnectUser ran
+    // before this socket existed: the hub's own read must still refuse the socket.
+    await runInDurableObject(hubStub(), (hub) => {
+      hub.beforeChannelRead = async () => {
+        hub.beforeChannelRead = undefined;
+        await env.DB.prepare('UPDATE workspace_members SET deactivated_at = 1 WHERE user_id = ?').bind(s.bob.userId).run();
+      };
+    });
+    const bob = await connect(s.app, s.bob.cookie);
+    expect(await bob.closed()).toEqual({ code: 4001, reason: 'deactivated' });
+  });
+
   it('a retried leave after a failed hub call still stops delivery to the leaver', async () => {
     const s = await setup();
     const p = await insertChannel({ name: 'p', kind: 'private', memberIds: [s.alice.userId, s.bob.userId] });
     const alice = await connect(s.app, s.alice.cookie);
     const bob = await connect(s.app, s.bob.cookie);
-    const spy = vi.spyOn(WorkspaceHub.prototype, 'membershipChanged').mockImplementationOnce(async () => {
-      throw new Error('hub down');
+    // Fail the first hub call on the caller's side of the RPC: a throw inside the Durable Object is
+    // reported by workerd as an uncaught exception, which only adds noise to the test output.
+    const spy = vi.spyOn(WorkspaceHub.prototype, 'membershipChanged');
+    const realGetByName = env.HUB.getByName.bind(env.HUB);
+    let failNext = true;
+    vi.spyOn(env.HUB, 'getByName').mockImplementation((name) => {
+      const stub = realGetByName(name);
+      if (!failNext) return stub;
+      return new Proxy(stub, {
+        get(target, key) {
+          if (key === 'membershipChanged' && failNext) {
+            failNext = false;
+            return () => Promise.reject(new Error('hub down'));
+          }
+          const v = Reflect.get(target, key);
+          return typeof v === 'function' ? v.bind(target) : v;
+        },
+      });
     });
 
     const first = await send(s.app, 'POST', `/channels/${p}/leave`, undefined, s.bob.cookie);
@@ -393,7 +423,8 @@ describe('channels REST', () => {
     const retry = await send(s.app, 'POST', `/channels/${p}/leave`, undefined, s.bob.cookie);
     expect(retry.status).toBe(200);
     expect(await isMember(p, s.bob.userId)).toBe(false);
-    expect(spy).toHaveBeenCalledTimes(3); // failed call, then before and after the delete
+    expect(failNext).toBe(false); // the first call failed
+    expect(spy).toHaveBeenCalledTimes(2); // the retry's calls, before and after the delete
     expect(await bob.next('membership')).toEqual({ t: 'membership', action: 'removed', channelId: p });
 
     alice.send({ t: 'send', clientId: 'c-retry-00001', channelId: p, body: 'secret' });
