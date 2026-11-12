@@ -29,15 +29,16 @@ export function ChannelSettings({
   const ids = useId();
   const url = `/channels/${encodeURIComponent(channel.id)}`;
 
-  async function run(fn: () => Promise<void>) {
+  /** `named`: the request changes the name, the only case where 400/409 mean a bad or taken name. */
+  async function run(fn: () => Promise<void>, named = false) {
     setError('');
     setBusy(true);
     try {
       await fn();
     } catch (err) {
-      if (err instanceof ApiClientError && err.status === 409) setError(TAKEN);
-      else if (err instanceof ApiClientError && err.status === 400) setError(BAD_NAME);
-      else setError(err instanceof Error ? err.message : 'Something went wrong.');
+      if (named && err instanceof ApiClientError && err.status === 409) setError(TAKEN);
+      else if (named && err instanceof ApiClientError && err.status === 400) setError(BAD_NAME);
+      else setError(err instanceof ApiClientError ? err.message : "Couldn't save changes.");
     } finally {
       setBusy(false);
     }
@@ -56,7 +57,7 @@ export function ChannelSettings({
     void run(async () => {
       await api(url, { method: 'PATCH', body: patch });
       onClose();
-    });
+    }, patch.name !== undefined);
   }
 
   return (
@@ -86,12 +87,18 @@ export function ChannelSettings({
             <button
               type="button"
               disabled={busy}
-              onClick={() =>
+              onClick={() => {
+                const label = `#${channel.name ?? ''}`;
+                const text =
+                  channel.kind === 'private'
+                    ? `Leave ${label}? You'll need an invite to rejoin a private channel.`
+                    : `Leave ${label}?`;
+                if (!globalThis.confirm(text)) return;
                 void run(async () => {
                   await api(`${url}/leave`, { method: 'POST', body: {} });
                   onGone();
-                })
-              }
+                });
+              }}
             >
               Leave channel
             </button>

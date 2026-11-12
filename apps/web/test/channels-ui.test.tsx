@@ -3,7 +3,7 @@ import { act, cleanup, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { ChannelListing } from '@backroom/protocol';
 import { FakeWebSocket } from './fakeSocket';
-import { ANN, BOB, GEN, ME, RAND, boot, chan, err, id, makeBootstrap, stubApi } from './harness';
+import { ANN, BOB, GEN, ME, RAND, boot, chan, err, id, makeBootstrap, msg, stubApi } from './harness';
 
 beforeEach(() => {
   FakeWebSocket.reset();
@@ -140,6 +140,7 @@ describe('Channel settings', () => {
     const posted = stubApi({
       route: (url) => (url === `/channels/${RAND}/leave` ? { ok: true } : undefined),
     });
+    vi.spyOn(globalThis, 'confirm').mockReturnValue(true);
     const ws = await boot(`/client/clubhack/${RAND}`);
     act(() => ws.receive({ t: 'channel.update', channel: { id: RAND, name: 'random', kind: 'public', topic: 'fun times', archivedAt: null } }));
     expect(await screen.findByText('fun times')).toBeTruthy();
@@ -189,5 +190,104 @@ describe('Direct messages', () => {
     );
     const nav = await screen.findByRole('navigation', { name: 'Direct messages' });
     expect(within(nav).getByRole('button', { name: 'Bob' })).toBeTruthy();
+  });
+});
+
+describe('Fix round 1', () => {
+  const openSettings = async (path: string) => {
+    await boot(path);
+    await userEvent.click(await screen.findByRole('button', { name: 'Channel settings' }));
+    return screen.findByRole('dialog', { name: 'Channel settings' });
+  };
+  const mine = () => makeBootstrap({ channels: [chan(GEN, 'general'), chan(RAND, 'random', { createdBy: ME })] });
+
+  it('Leave asks first; declining sends nothing, accepting posts', async () => {
+    const posted = stubApi({ bootstrap: mine, route: (url) => (url === `/channels/${RAND}/leave` ? { ok: true } : undefined) });
+    const confirm = vi.spyOn(globalThis, 'confirm').mockReturnValue(false);
+    const dlg = await openSettings(`/client/clubhack/${RAND}`);
+    await userEvent.click(within(dlg).getByRole('button', { name: 'Leave channel' }));
+    expect(confirm).toHaveBeenCalledWith('Leave #random?');
+    expect(posted).toHaveLength(0);
+    confirm.mockReturnValue(true);
+    await userEvent.click(within(dlg).getByRole('button', { name: 'Leave channel' }));
+    await waitFor(() => expect(posted[0]?.url).toBe(`/channels/${RAND}/leave`));
+  });
+
+  it('a topic 400 shows the server message, and a failed archive/leave a generic one', async () => {
+    stubApi({
+      bootstrap: mine,
+      route: (url, init) => {
+        if (init?.method === 'PATCH') return new Response(JSON.stringify({ error: { code: 'invalid', message: 'Topic is too long.' } }), { status: 400 });
+        if (init?.method === 'POST') throw new TypeError('offline');
+        return undefined;
+      },
+    });
+    vi.spyOn(globalThis, 'confirm').mockReturnValue(true);
+    const dlg = await openSettings(`/client/clubhack/${RAND}`);
+    await userEvent.type(within(dlg).getByLabelText('Topic'), 'x');
+    await userEvent.click(within(dlg).getByRole('button', { name: 'Save' }));
+    expect((await within(dlg).findByRole('alert')).textContent).toBe('Topic is too long.');
+    await userEvent.click(within(dlg).getByRole('button', { name: 'Leave channel' }));
+    await waitFor(() => expect(within(dlg).getByRole('alert').textContent).toBe("Couldn't save changes."));
+    await userEvent.click(within(dlg).getByRole('button', { name: 'Archive channel' }));
+    expect(within(dlg).getByRole('alert').textContent).toBe('Topic is too long.');
+  });
+
+  it('a name 400 on rename still shows the name message', async () => {
+    stubApi({ bootstrap: mine, route: (url, init) => (init?.method === 'PATCH' ? err(400, 'invalid') : undefined) });
+    const dlg = await openSettings(`/client/clubhack/${RAND}`);
+    await userEvent.clear(within(dlg).getByLabelText('Name'));
+    await userEvent.type(within(dlg).getByLabelText('Name'), 'bad name');
+    await userEvent.click(within(dlg).getByRole('button', { name: 'Save' }));
+    expect((await within(dlg).findByRole('alert')).textContent).toBe('Use lowercase letters, numbers, - and _ (max 80).');
+  });
+
+  it('dialog: focus returns to the trigger, Escape works from the body, Tab wraps', async () => {
+    stubApi({ route: (url, init) => (url === '/w/clubhack/channels' && init?.method === 'GET' ? { channels: [] } : undefined) });
+    await boot();
+    const trigger = await screen.findByRole('button', { name: 'Browse channels' });
+    trigger.focus();
+    await userEvent.click(trigger);
+    const dlg = await screen.findByRole('dialog', { name: 'Browse channels' });
+    const close = within(dlg).getByRole('button', { name: 'Close' });
+    close.focus();
+    await userEvent.tab();
+    expect(dlg.contains(document.activeElement)).toBe(true);
+    expect(document.activeElement).toBe(within(dlg).getByLabelText('Name'));
+    await userEvent.tab({ shift: true });
+    expect(document.activeElement).toBe(close);
+    document.body.focus();
+    (document.activeElement as HTMLElement).blur();
+    await userEvent.keyboard('{Escape}');
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    expect(document.activeElement).toBe(trigger);
+  });
+
+  it('browser marks archived channels and offers no Join; Open is disabled while busy', async () => {
+    stubApi({
+      route: (url, init) =>
+        url === '/w/clubhack/channels' && init?.method === 'GET'
+          ? { channels: [listing({ id: DESIGN, name: 'old', archivedAt: 5 }), listing({ id: GEN, name: 'general', isMember: true })] }
+          : undefined,
+    });
+    await boot();
+    await userEvent.click(await screen.findByRole('button', { name: 'Browse channels' }));
+    const list = await screen.findByRole('list', { name: 'Channels' });
+    expect(within(list).getByText('(archived)')).toBeTruthy();
+    expect(within(list).getAllByRole('button')).toHaveLength(1);
+    expect(within(list).getByRole('button', { name: 'Open' })).toBeTruthy();
+  });
+
+  it('a live archive shows Archived and a read-only notice instead of the composer', async () => {
+    stubApi({ pages: { [RAND]: { messages: [msg(1, { channelId: RAND, body: 'old talk' })], hasMore: false } } });
+    const ws = await boot(`/client/clubhack/${RAND}`);
+    await screen.findByText('old talk');
+    expect(screen.getByPlaceholderText('Message #random')).toBeTruthy();
+    act(() => ws.receive({ t: 'channel.update', channel: { id: RAND, name: 'random', kind: 'public', topic: null, archivedAt: 9 } }));
+    expect(await screen.findByText('This channel is archived.')).toBeTruthy();
+    expect(screen.getByText('Archived')).toBeTruthy();
+    expect(screen.queryByPlaceholderText('Message #random')).toBeNull();
+    expect(screen.getByText('old talk')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Channel settings' })).toBeNull();
   });
 });

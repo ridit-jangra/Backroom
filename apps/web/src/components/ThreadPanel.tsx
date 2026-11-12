@@ -23,6 +23,8 @@ export function ThreadPanel({
   onDelete,
   onRetry,
   onDiscard,
+  loadFailed = false,
+  onReload,
   onClose,
 }: {
   /** Undefined while the thread is still loading. */
@@ -37,11 +39,15 @@ export function ThreadPanel({
   typingUserIds: string[];
   onSend: (body: string, alsoInChannel: boolean) => boolean | void;
   onTyping?: () => void;
-  onMarkRead: (seq: number) => void;
+  /** Returns false when the frame could not be sent. */
+  onMarkRead: (seq: number) => boolean;
   onEdit: (messageId: string, body: string) => boolean;
   onDelete: (messageId: string) => boolean;
   onRetry: (clientId: string) => void;
   onDiscard: (clientId: string) => void;
+  /** The thread fetch failed. */
+  loadFailed?: boolean;
+  onReload?: () => void;
   onClose: () => void;
 }) {
   const [also, setAlso] = useState(false);
@@ -55,12 +61,10 @@ export function ThreadPanel({
   useEffect(() => {
     marked.current = 0;
   }, [parentId]);
+  // `marked` only advances when the frame was sent, so a send that failed offline goes out after reconnect.
   useEffect(() => {
-    if (lastSeq > marked.current) {
-      marked.current = lastSeq;
-      onMarkRead(lastSeq);
-    }
-  }, [lastSeq, onMarkRead]);
+    if (connected && lastSeq > marked.current && onMarkRead(lastSeq)) marked.current = lastSeq;
+  }, [lastSeq, connected, onMarkRead]);
 
   const lastReply = replies[replies.length - 1];
   return (
@@ -71,7 +75,14 @@ export function ThreadPanel({
           Close
         </button>
       </div>
-      {!page ? (
+      {!page && loadFailed ? (
+        <div className="thread-loading">
+          <p role="alert">Couldn't load this thread.</p>
+          <button type="button" onClick={onReload}>
+            Retry
+          </button>
+        </div>
+      ) : !page ? (
         <p role="status" className="muted thread-loading">
           Loading…
         </p>
@@ -124,7 +135,11 @@ export function ThreadPanel({
           <Composer
             placeholder="Reply…"
             members={members}
-            onSubmit={(body) => onSend(body, also)}
+            onSubmit={(body) => {
+              const sent = onSend(body, also);
+              if (sent !== false) setAlso(false);
+              return sent;
+            }}
             onTyping={onTyping}
           />
           <label htmlFor={alsoId} className="also">

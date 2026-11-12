@@ -22,6 +22,8 @@ export type ChatState = {
   channels: Record<string, ChannelSummary>;
   windows: Record<string, ChannelWindow>;
   threads: Record<string, ThreadPage>;
+  /** Channels archived while this tab was open: kept read-only so the open view does not vanish. */
+  archived: Record<string, { name: string | null; topic: string | null; window: ChannelWindow | undefined }>;
   pending: PendingSend[];
   presence: Record<string, PresenceState>;
   typing: TypingEntry[];
@@ -51,6 +53,7 @@ export function initialChat(me: string): ChatState {
     channels: {},
     windows: {},
     threads: {},
+    archived: {},
     pending: [],
     presence: {},
     typing: [],
@@ -232,7 +235,21 @@ export function reduce(state: ChatState, e: ChatEvent, now: number): ChatState {
     }
     case 'channel.update': {
       const c = state.channels[e.channel.id];
-      if (e.channel.archivedAt !== null) return dropChannel(state, e.channel.id);
+      if (e.channel.archivedAt !== null) {
+        const dropped = dropChannel(state, e.channel.id);
+        return {
+          ...dropped,
+          archived: {
+            ...dropped.archived,
+            [e.channel.id]: { name: e.channel.name, topic: e.channel.topic, window: state.windows[e.channel.id] },
+          },
+        };
+      }
+      if (state.archived[e.channel.id]) {
+        const archived = { ...state.archived };
+        delete archived[e.channel.id];
+        state = { ...state, archived };
+      }
       if (!c) return state;
       return {
         ...state,
@@ -241,6 +258,11 @@ export function reduce(state: ChatState, e: ChatEvent, now: number): ChatState {
     }
     case 'membership': {
       if (e.action === 'removed') return dropChannel(state, e.channelId);
+      if (state.archived[e.channel.id]) {
+        const archived = { ...state.archived };
+        delete archived[e.channel.id];
+        state = { ...state, archived };
+      }
       const known = state.channels[e.channel.id];
       if (known) {
         // P2-R23: metadata merge only; keep local counts, lastReadSeq and lastSeq.

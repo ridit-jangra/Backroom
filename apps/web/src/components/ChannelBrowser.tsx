@@ -39,16 +39,18 @@ export function ChannelBrowser({
 
   async function join(c: ChannelListing) {
     setJoinError('');
-    if (c.isMember) {
-      await onJoined(c.id);
-      return;
-    }
     setBusy(true);
     try {
-      await api(`/channels/${encodeURIComponent(c.id)}/join`, { method: 'POST', body: {} });
+      if (!c.isMember) {
+        try {
+          await api(`/channels/${encodeURIComponent(c.id)}/join`, { method: 'POST', body: {} });
+        } catch (e) {
+          setJoinError(e instanceof Error ? e.message : 'Could not join.');
+          return;
+        }
+      }
+      // Joined (or already a member): a failure to show the channel is not a failed join.
       await onJoined(c.id);
-    } catch (e) {
-      setJoinError(e instanceof Error ? e.message : 'Could not join.');
     } finally {
       setBusy(false);
     }
@@ -58,18 +60,23 @@ export function ChannelBrowser({
     e.preventDefault();
     setCreateError('');
     setBusy(true);
+    let created: { channel: { id: string } };
     try {
       const body: { name: string; private: boolean; topic?: string } = {
         name: name.trim().toLowerCase(),
         private: isPrivate,
       };
       if (topic.trim()) body.topic = topic.trim();
-      const r = await api<{ channel: { id: string } }>(`/w/${encodeURIComponent(slug)}/channels`, { method: 'POST', body });
-      await onJoined(r.channel.id);
+      created = await api<{ channel: { id: string } }>(`/w/${encodeURIComponent(slug)}/channels`, { method: 'POST', body });
     } catch (err) {
       if (err instanceof ApiClientError && err.status === 409) setCreateError(TAKEN);
       else if (err instanceof ApiClientError && err.status === 400) setCreateError(BAD_NAME);
       else setCreateError(err instanceof Error ? err.message : 'Could not create the channel.');
+      setBusy(false);
+      return;
+    }
+    try {
+      await onJoined(created.channel.id);
     } finally {
       setBusy(false);
     }
@@ -84,13 +91,15 @@ export function ChannelBrowser({
           {channels.map((c) => (
             <li key={c.id}>
               <div>
-                <strong>#{c.name}</strong>{' '}
+                <strong>#{c.name}</strong>{c.archivedAt !== null && <span className="muted"> (archived)</span>}{' '}
                 <span className="muted">{c.memberCount === 1 ? '1 member' : `${c.memberCount} members`}</span>
                 {c.topic && <div className="muted">{c.topic}</div>}
               </div>
-              <button type="button" disabled={busy} onClick={() => void join(c)}>
-                {c.isMember ? 'Open' : 'Join'}
-              </button>
+              {c.archivedAt === null && (
+                <button type="button" disabled={busy} onClick={() => void join(c)}>
+                  {c.isMember ? 'Open' : 'Join'}
+                </button>
+              )}
             </li>
           ))}
         </ul>

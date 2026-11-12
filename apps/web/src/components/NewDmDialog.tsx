@@ -27,14 +27,19 @@ export function NewDmDialog({
   async function open() {
     setError('');
     setBusy(true);
+    let opened: { channel: { id: string } };
     try {
-      const r = await api<{ channel: { id: string } }>(`/w/${encodeURIComponent(slug)}/dms`, {
+      opened = await api<{ channel: { id: string } }>(`/w/${encodeURIComponent(slug)}/dms`, {
         method: 'POST',
         body: { userIds: picked },
       });
-      await onOpened(r.channel.id);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Could not open the conversation.');
+      setBusy(false);
+      return;
+    }
+    try {
+      await onOpened(opened.channel.id);
     } finally {
       setBusy(false);
     }

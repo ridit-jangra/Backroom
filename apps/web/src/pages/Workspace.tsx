@@ -13,7 +13,7 @@ import { channelLabel, notificationPermission, requestNotificationPermission } f
 import { useChat } from '../realtime/useChat';
 
 export function Workspace({ slug, channelId }: { slug: string; channelId?: string }) {
-  const { state, actions, error } = useChat(slug);
+  const { state, actions, error, threadError } = useChat(slug);
   const [signOutError, setSignOutError] = useState('');
   const [permission, setPermission] = useState(notificationPermission);
   const [dialog, setDialog] = useState<'browse' | 'dm' | 'settings' | null>(null);
@@ -64,6 +64,7 @@ export function Workspace({ slug, channelId }: { slug: string; channelId?: strin
   const me = state.me;
   const myRole = bootstrap.me.role;
   const channel = channelId ? state.channels[channelId] : undefined;
+  const archived = channelId && !channel ? state.archived[channelId] : undefined;
   const label = channel ? channelLabel(channel, members, me) : '';
   const isDm = channel?.kind === 'dm';
   const isGeneral = channel?.kind === 'public' && channel.name === 'general';
@@ -113,8 +114,9 @@ export function Workspace({ slug, channelId }: { slug: string; channelId?: strin
       <div className="main">
         <header>
           <div className="channel-title">
-            <strong>{channel ? label : bootstrap.workspace.name}</strong>
-            {channel?.topic && <span className="muted topic">{channel.topic}</span>}
+            <strong>{channel ? label : archived ? `#${archived.name ?? ''}` : bootstrap.workspace.name}</strong>
+            {archived && <span className="muted topic">Archived</span>}
+            {(channel?.topic ?? archived?.topic) && <span className="muted topic">{channel?.topic ?? archived?.topic}</span>}
           </div>
           {channel && !isDm && (
             <button type="button" onClick={() => setDialog('settings')}>
@@ -159,6 +161,27 @@ export function Workspace({ slug, channelId }: { slug: string; channelId?: strin
               />
             </div>
           </>
+        ) : archived ? (
+          <>
+            <MessageList
+              key={channelId}
+              channelWindow={archived.window}
+              pending={[]}
+              members={members}
+              me=""
+              myRole="member"
+              connected={false}
+              onLoadOlder={() => undefined}
+              onOpenThread={() => undefined}
+              onEdit={() => false}
+              onDelete={() => false}
+              onRetry={actions.retry}
+              onDiscard={actions.discard}
+            />
+            <section className="empty">
+              <p>This channel is archived.</p>
+            </section>
+          </>
         ) : (
           <section className="empty">
             <p>{channelId ? 'This channel isn’t available.' : 'Pick a channel.'}</p>
@@ -180,6 +203,8 @@ export function Workspace({ slug, channelId }: { slug: string; channelId?: strin
           onSend={(body, also) => actions.send(channel.id, body, threadId, also)}
           onTyping={() => actions.typing(channel.id, threadId)}
           onMarkRead={(seq) => actions.markThreadRead(threadId, seq)}
+          loadFailed={threadError === threadId}
+          onReload={() => actions.openThread(threadId)}
           onEdit={actions.edit}
           onDelete={actions.remove}
           onRetry={actions.retry}

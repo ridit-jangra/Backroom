@@ -19,7 +19,8 @@ export type ChatActions = {
   open(channelId: string): void;
   loadOlder(channelId: string): Promise<void>;
   openThread(parentId: string | null): void;
-  markThreadRead(messageId: string, seq: number): void;
+  /** False when the frame could not be sent (not connected). */
+  markThreadRead(messageId: string, seq: number): boolean;
   send(channelId: string, body: string, parentId?: string | null, alsoInChannel?: boolean): void;
   retry(clientId: string): void;
   discard(clientId: string): void;
@@ -47,6 +48,7 @@ function startSession(
   slug: string,
   publish: (s: ChatState) => void,
   reportError: (msg: string) => void,
+  reportThreadError: (parentId: string | null) => void,
 ): { actions: ChatActions; stop: () => void } {
   let alive = true;
   let state = initialChat('');
@@ -116,9 +118,17 @@ function startSession(
     );
 
   const loadThread = (parentId: string) =>
-    api<ThreadPage>(`/messages/${encodeURIComponent(parentId)}/thread`).then((page) => {
-      if (state.openThreadId === parentId) dispatch({ t: 'local.thread', page });
-    }, fail);
+    api<ThreadPage>(`/messages/${encodeURIComponent(parentId)}/thread`).then(
+      (page) => {
+        if (state.openThreadId !== parentId) return;
+        if (alive) reportThreadError(null);
+        dispatch({ t: 'local.thread', page });
+      },
+      (err) => {
+        fail(err);
+        if (alive && !isUnauthorized(err) && state.openThreadId === parentId) reportThreadError(parentId);
+      },
+    );
 
   const outbox = new Outbox({
     send: (f) => sendFrame(f),
@@ -148,11 +158,12 @@ function startSession(
       }
     },
     openThread(parentId) {
+      reportThreadError(null);
       dispatch({ t: 'local.openThread', parentId });
       if (parentId !== null) void loadThread(parentId);
     },
     markThreadRead(messageId, seq) {
-      sendFrame({ t: 'mark_thread_read', messageId, seq });
+      return sendFrame({ t: 'mark_thread_read', messageId, seq });
     },
     send(channelId, body, parentId = null, alsoInChannel = false) {
       if (alive) outbox.enqueue({ channelId, parentId: parentId ?? null, body, alsoInChannel });
@@ -259,15 +270,17 @@ function startSession(
   };
 }
 
-export function useChat(slug: string): { state: ChatState; actions: ChatActions; error: string } {
+export function useChat(slug: string): { state: ChatState; actions: ChatActions; error: string; threadError: string | null } {
   const [state, setState] = useState<ChatState>(() => initialChat(''));
   const [error, setError] = useState('');
+  const [threadError, setThreadError] = useState<string | null>(null);
   const impl = useRef<ChatActions | null>(null);
 
   useEffect(() => {
     setState(initialChat(''));
     setError('');
-    const session = startSession(slug, setState, setError);
+    setThreadError(null);
+    const session = startSession(slug, setState, setError, setThreadError);
     impl.current = session.actions;
     return () => {
       session.stop();
@@ -281,7 +294,7 @@ export function useChat(slug: string): { state: ChatState; actions: ChatActions;
       open: (id) => impl.current?.open(id),
       loadOlder: (id) => impl.current?.loadOlder(id) ?? Promise.resolve(),
       openThread: (id) => impl.current?.openThread(id),
-      markThreadRead: (id, seq) => impl.current?.markThreadRead(id, seq),
+      markThreadRead: (id, seq) => impl.current?.markThreadRead(id, seq) ?? false,
       send: (cid, body, pid, also) => impl.current?.send(cid, body, pid, also),
       retry: (id) => impl.current?.retry(id),
       discard: (id) => impl.current?.discard(id),
@@ -293,5 +306,5 @@ export function useChat(slug: string): { state: ChatState; actions: ChatActions;
     [],
   );
 
-  return { state, actions, error };
+  return { state, actions, error, threadError };
 }

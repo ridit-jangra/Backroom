@@ -78,3 +78,42 @@ describe('Thread panel', () => {
     expect(await screen.findByLabelText('Also send to conversation')).toBeTruthy();
   });
 });
+
+describe('Fix round 1', () => {
+  it('a failed thread fetch shows an error with Retry that refetches', async () => {
+    let fail = true;
+    stubApi({
+      pages: { [GEN]: { messages: [parent], hasMore: false } },
+      route: (url) => {
+        if (url !== `/messages/${parent.id}/thread`) return undefined;
+        return fail ? new Response('{}', { status: 500 }) : thread();
+      },
+    });
+    await boot();
+    await userEvent.click(await screen.findByRole('button', { name: '2 replies' }));
+    const panel = await screen.findByRole('complementary', { name: 'Thread' });
+    expect((await within(panel).findByRole('alert')).textContent).toBe("Couldn't load this thread.");
+    fail = false;
+    await userEvent.click(within(panel).getByRole('button', { name: 'Retry' }));
+    expect(await within(panel).findByText('first reply')).toBeTruthy();
+    expect(within(panel).queryByRole('alert')).toBeNull();
+  });
+
+  it('the "Also send to" checkbox resets after a send', async () => {
+    const { panel } = await openThread();
+    await within(panel).findByText('first reply');
+    const box = within(panel).getByLabelText('Also send to #general') as HTMLInputElement;
+    await userEvent.click(box);
+    await userEvent.type(within(panel).getByPlaceholderText('Reply…'), 'x{Enter}');
+    expect(box.checked).toBe(false);
+  });
+
+  it('mark_thread_read is not sent while disconnected (it stays pending for the next connection)', async () => {
+    const { ws, panel } = await openThread();
+    await within(panel).findByText('second reply');
+    await waitFor(() => expect(frames(ws).filter((f) => f.t === 'mark_thread_read')).toHaveLength(1));
+    act(() => ws.serverClose(1006));
+    act(() => ws.receive({ t: 'message.new', message: msg(4, { parentId: parent.id, body: 'while away' }) }));
+    expect(frames(ws).filter((f) => f.t === 'mark_thread_read')).toHaveLength(1);
+  });
+});
