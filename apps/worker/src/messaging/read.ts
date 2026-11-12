@@ -21,6 +21,14 @@ export function canSeeChannel(v: { role: string | null; kind: ChannelKind; isMem
   return v.role !== null && (v.kind === 'public' || Boolean(v.isMember));
 }
 
+/**
+ * SQL form of `canSeeChannel` for a channel alias `c` and a bound user parameter (e.g. `'?3'`). It mirrors
+ * `canSeeChannel` for an active workspace member only: the caller must already be checked by `requireMember`.
+ */
+export function VISIBLE_CHANNEL_SQL(c: string, userParam: string): string {
+  return `(${c}.kind = 'public' OR EXISTS (SELECT 1 FROM channel_members cm WHERE cm.channel_id = ${c}.id AND cm.user_id = ${userParam}))`;
+}
+
 export async function requireChannelRead(db: D1Database, channelId: string, userId: string): Promise<ChannelRow> {
   const row = await db
     .prepare(
