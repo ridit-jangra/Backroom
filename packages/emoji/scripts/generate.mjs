@@ -1,13 +1,14 @@
 // Generates src/generated/{data.ts,images.txt} from emoji-datasource + @discordapp/twemoji.
 // Every path resolves from import.meta.url, so the cwd does not matter.
 import { createRequire } from 'node:module';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const require = createRequire(import.meta.url);
 const pkgRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
-const outDir = join(pkgRoot, 'src', 'generated');
+// Optional first argument: output directory (against the caller's cwd). Default src/generated.
+const outDir = process.argv[2] ? resolve(process.argv[2]) : join(pkgRoot, 'src', 'generated');
 const datasource = dirname(require.resolve('emoji-datasource/package.json'));
 const svgDir = join(dirname(require.resolve('@discordapp/twemoji/package.json')), 'dist', 'svg');
 
@@ -29,8 +30,13 @@ function imgOf(unified) {
 }
 
 const records = [];
+const seenNames = new Map();
 const images = new Set();
 for (const e of emoji) {
+  for (const n of e.short_names) {
+    if (seenNames.has(n)) problems.push(`duplicate short name ${n} (${seenNames.get(n)} and ${e.short_name})`);
+    else seenNames.set(n, e.short_name);
+  }
   const cat = categories.indexOf(e.category);
   if (cat < 0) problems.push(`unknown category ${e.category}`);
   const r = {
@@ -67,8 +73,14 @@ const json = JSON.stringify(records.map((x) => x.r));
 // One single-quoted string literal (U+2028/2029 are legal in string literals since ES2019).
 const literal = `'${json.replace(/[\\']/g, '\\$&')}'`;
 mkdirSync(outDir, { recursive: true });
-writeFileSync(
-  join(outDir, 'data.ts'),
+// Write to a temp file in the same directory, then rename: readers never see a partial file.
+function writeAtomic(name, content) {
+  const tmp = join(outDir, `.${name}.${process.pid}.tmp`);
+  writeFileSync(tmp, content);
+  renameSync(tmp, join(outDir, name));
+}
+writeAtomic(
+  'data.ts',
   `import type { EmojiRecord } from '../types';\nexport const DATA: EmojiRecord[] = JSON.parse(${literal});\n`,
 );
-writeFileSync(join(outDir, 'images.txt'), [...images].sort().join('\n') + '\n');
+writeAtomic('images.txt', [...images].sort().join('\n') + '\n');

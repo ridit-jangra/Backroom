@@ -38,6 +38,9 @@ export function formatShortcode(name: string, tone: SkinTone | null): string {
   return tone === null || tone === 1 ? name : `${name}${TONE_MARK}${tone}`;
 }
 
+/** Test-only work counter: name-scan steps and isKnown calls. */
+export const scanWork = { steps: 0, known: 0 };
+
 const MAX_NAME = 64;
 const TONE_SUFFIX = /^:skin-tone-([2-6]):/;
 
@@ -51,6 +54,10 @@ export function findShortcodes(
   isKnown: (name: string, tone: SkinTone | null) => boolean,
 ): ShortcodeMatch[] {
   const out: ShortcodeMatch[] = [];
+  const known = (name: string, tone: SkinTone | null) => {
+    scanWork.known++;
+    return isKnown(name, tone);
+  };
   const n = text.length;
   let i = 0;
   while (i < n) {
@@ -59,7 +66,11 @@ export function findShortcodes(
       continue;
     }
     let j = i + 1;
-    while (j < n && j - i - 1 < MAX_NAME && isNameChar(text.charCodeAt(j))) j++;
+    scanWork.steps++;
+    while (j < n && j - i - 1 < MAX_NAME && isNameChar(text.charCodeAt(j))) {
+      j++;
+      scanWork.steps++;
+    }
     if (j === i + 1 || j >= n || text.charCodeAt(j) !== 58) {
       // The candidate failed at j (j > i): resume there. A ':' at j may open the next one,
       // and the name characters already passed are never rescanned.
@@ -70,13 +81,13 @@ export function findShortcodes(
     const tm = TONE_SUFFIX.exec(text.slice(j + 1, j + 14));
     if (tm) {
       const tone = Number(tm[1]) as SkinTone;
-      if (isKnown(name, tone)) {
+      if (known(name, tone)) {
         out.push({ index: i, length: j + 14 - i, name, tone });
         i = j + 14;
         continue;
       }
     }
-    if (isKnown(name, null)) {
+    if (known(name, null)) {
       out.push({ index: i, length: j + 1 - i, name, tone: null });
       i = j + 1; // resume at the tone's opening colon
     } else {

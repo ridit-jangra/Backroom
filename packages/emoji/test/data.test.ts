@@ -33,6 +33,10 @@ describe('emoji data', () => {
     expect(PICKER_CATEGORIES).toHaveLength(9);
     expect(DATA.filter((e) => e.hidden)).toHaveLength(41);
   });
+  it('short names and aliases are unique across records', () => {
+    const all = DATA.flatMap((e) => e.names);
+    expect(new Set(all).size).toBe(all.length);
+  });
   it('search ranks prefix matches first and reports the matched alias', () => {
     expect(searchEmoji('thu', 3).map((m) => m.name)).toEqual(['thumbsup', 'thumbsdown', 'thunder_cloud_and_rain']);
     expect(searchEmoji(':wave', 1)[0]!.name).toBe('wave');

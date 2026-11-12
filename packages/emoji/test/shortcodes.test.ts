@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { scanWork } from '../src/shortcodes';
 import { findShortcodes, formatShortcode, parseReactionCode, resolveBuiltin, type SkinTone } from '../src';
 
 const known = (n: string, t: SkinTone | null) => resolveBuiltin(n, t) !== undefined;
@@ -8,7 +9,26 @@ const timed = (text: string) => {
   return performance.now() - t0;
 };
 
+const work = (text: string) => {
+  scanWork.steps = 0;
+  scanWork.known = 0;
+  findShortcodes(text, known);
+  return scanWork.steps + scanWork.known;
+};
+
 describe('findShortcodes', () => {
+  it('does O(n) work on adversarial inputs (counted, not timed)', () => {
+    const N = 100_000;
+    const cases = [
+      ':a'.repeat(N / 2),
+      ':'.repeat(N),
+      (':' + 'a'.repeat(63) + ':').repeat(N / 65),
+      ':' + 'a'.repeat(N),
+      (':' + 'a'.repeat(64) + 'b').repeat(N / 66),
+      ':zq'.repeat(N / 3),
+    ];
+    for (const c of cases) expect(work(c)).toBeLessThanOrEqual(2 * c.length);
+  });
   it('resumes at the closing colon and is linear', () => {
     expect(findShortcodes(':foo:smile:', known)).toEqual([{ index: 4, length: 7, name: 'smile', tone: null }]);
     expect(findShortcodes('10:30:45', known)).toEqual([]);
