@@ -65,7 +65,7 @@ export async function resetDb(): Promise<void> {
   const tables = [
     'message_files', 'files', 'custom_emoji', 'reactions', 'mentions', 'thread_follows', 'messages',
     'channel_members', 'sessions', 'desktop_codes', 'login_codes', 'login_tokens', 'rate_limits', 'invites',
-    'workspace_members', 'users',
+    'workspace_members', 'users', 'ops_events',
   ];
   await env.DB.batch([
     ...tables.map((t) => env.DB.prepare(`DELETE FROM ${t}`)),

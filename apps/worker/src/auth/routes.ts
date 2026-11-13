@@ -5,6 +5,7 @@ import { ApiError } from '../lib/errors';
 import { randomToken, sha256Base64Url, sha256Hex } from '../lib/crypto';
 import { readJson } from '../lib/http';
 import { hitRateLimit } from '../lib/rateLimit';
+import { recordOpsEvent } from '../lib/ops';
 import { checkEligibility, checkEligibilityByInviteId } from './eligibility';
 import { createSession, deleteAllSessions, deleteSession } from './sessions';
 import { acceptLogin, WORKSPACE_SLUG } from '../workspace/membership';
@@ -13,6 +14,9 @@ import { clearSessionCookie, requireSession, setSessionCookie } from '../middlew
 const HOUR_MS = 3_600_000;
 const LINK_TTL_MS = 900_000;
 const DESKTOP_CODE_TTL_MS = 120_000;
+/** Phase 6: desktop code exchanges allowed per IP per hour. */
+export const EXCHANGE_PER_IP_PER_HOUR = 30;
+const CLEAR_SITE_DATA = '"cache", "storage"';
 
 function constantTimeEqual(a: string, b: string): boolean {
   if (a.length !== b.length) return false;
@@ -55,6 +59,12 @@ authRoutes.post('/start', async (c) => {
           await mailer.sendMagicLink(c.env, email, `${c.env.APP_ORIGIN}/verify?t=${raw}`);
         } catch {
           console.error(JSON.stringify({ level: 'error', code: 'email_failed' }));
+          // R11: still off the response path; the admin page shows a banner from this row.
+          try {
+            await recordOpsEvent(db, 'email_failed', now);
+          } catch {
+            console.error(JSON.stringify({ level: 'error', code: 'ops_event_failed' }));
+          }
         }
       })();
       let ctx: { waitUntil(p: Promise<unknown>): void } | undefined;
@@ -100,9 +110,14 @@ authRoutes.post('/verify', async (c) => {
 });
 
 authRoutes.post('/desktop/exchange', async (c) => {
-  const { code, verifier } = DesktopExchangeBody.parse(await readJson(c));
   const now = c.var.deps.now();
   const db = c.env.DB;
+  const ip = c.req.header('CF-Connecting-IP') ?? 'unknown';
+  // Counted before the body is read, so malformed attempts count too; a refused attempt never touches a code.
+  if (!(await hitRateLimit(db, `exchange:ip:${ip}`, EXCHANGE_PER_IP_PER_HOUR, HOUR_MS, now))) {
+    throw new ApiError(429, 'rate_limited', 'Too many attempts. Try again later.');
+  }
+  const { code, verifier } = DesktopExchangeBody.parse(await readJson(c));
   const invalid = () => new ApiError(400, 'code_invalid', 'This sign-in code is invalid or expired.');
   const row = await db
     .prepare(
@@ -127,11 +142,13 @@ authRoutes.post('/desktop/exchange', async (c) => {
 authRoutes.post('/logout', async (c) => {
   if (c.var.session) await deleteSession(c.env.DB, c.var.session.token);
   clearSessionCookie(c);
+  c.header('Clear-Site-Data', CLEAR_SITE_DATA);
   return c.json({ ok: true });
 });
 
 authRoutes.post('/logout-all', requireSession, async (c) => {
   await deleteAllSessions(c.env.DB, c.var.session!.userId);
   clearSessionCookie(c);
+  c.header('Clear-Site-Data', CLEAR_SITE_DATA);
   return c.json({ ok: true });
 });

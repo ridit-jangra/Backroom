@@ -66,6 +66,8 @@ export type Bootstrap = {
   customEmoji?: CustomEmoji[];
   /** P3-R20: revision of the custom emoji list; send it back as `?emojiRev=` on the next bootstrap. */
   emojiRev?: number;
+  /** R11 (Phase 6): admins and owners only; when sign-in email last failed to send (epoch ms). */
+  emailFailedAt?: number;
 };
 
 export type InviteSummary = {

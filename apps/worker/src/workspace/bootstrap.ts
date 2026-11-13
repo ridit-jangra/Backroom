@@ -21,7 +21,7 @@ export async function getMe(db: D1Database, userId: string): Promise<Me> {
 export async function getBootstrap(db: D1Database, slug: string, userId: string, heldEmojiRev: number | null = null): Promise<Bootstrap> {
   const { workspaceId, role } = await requireMember(db, slug, userId);
 
-  const [ws, me, channels, members, emoji] = await db.batch([
+  const [ws, me, channels, members, emoji, ops] = await db.batch([
     db.prepare(`SELECT id, slug, name, settings_json AS settingsJson, ${EMOJI_REV_SQL} AS emojiRev FROM workspaces WHERE id = ?`).bind(workspaceId),
     db.prepare(`SELECT u.id AS id, u.email AS email, ${DISPLAY} AS displayName FROM users u WHERE u.id = ?`).bind(userId),
     db
@@ -49,6 +49,8 @@ export async function getBootstrap(db: D1Database, slug: string, userId: string,
          ORDER BY name`,
       )
       .bind(workspaceId, heldEmojiRev),
+    // R11: only read for admins and owners (members get an always-false WHERE).
+    db.prepare("SELECT at FROM ops_events WHERE kind = 'email_failed' AND ?1").bind(role === 'member' ? 0 : 1),
   ]);
   const { settingsJson, emojiRev: rawRev, ...workspace } = ws!.results[0] as {
     id: string;
@@ -59,6 +61,7 @@ export async function getBootstrap(db: D1Database, slug: string, userId: string,
   };
   const emojiRev = typeof rawRev === 'number' ? rawRev : 0;
   const unchanged = heldEmojiRev !== null && heldEmojiRev === emojiRev;
+  const emailFailedAt = (ops!.results[0] as { at: number } | undefined)?.at;
 
   return {
     workspace: { ...workspace, settings: readSettings(settingsJson) },
@@ -66,6 +69,7 @@ export async function getBootstrap(db: D1Database, slug: string, userId: string,
     channels: (channels!.results as SummaryRow[]).map(rowToSummary),
     ...(unchanged ? {} : { customEmoji: (emoji!.results as CustomEmojiRow[]).map(rowToCustomEmoji) }),
     emojiRev,
+    ...(emailFailedAt !== undefined ? { emailFailedAt } : {}),
     // P2-R28: deactivated members stay listed (flagged) so their old messages keep a name.
     members: (members!.results as (Omit<MemberSummary, 'deactivated'> & { deactivated: number })[]).map(({ deactivated, ...m }) =>
       deactivated ? { ...m, deactivated: true } : m,
