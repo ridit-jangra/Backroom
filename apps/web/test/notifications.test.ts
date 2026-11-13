@@ -119,3 +119,10 @@ describe('plainText emoji (P3-R4)', () => {
     expect(plainText(':wave: hi', [])).toBe(':wave: hi');
   });
 });
+
+describe('plainText code', () => {
+  it('shows code text without backticks', () => {
+    expect(plainText('run `ls` now', [])).toBe('run ls now');
+    expect(plainText('```js\nlet a\n```', [])).toBe('let a');
+  });
+});

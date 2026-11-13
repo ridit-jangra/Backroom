@@ -1,10 +1,12 @@
-import { BROADCAST_RE, USER_MENTION_RE, type MemberSummary } from '@backroom/protocol';
+import { BROADCAST_RE, findCodeRanges, maskCode, USER_MENTION_RE, type MemberSummary } from '@backroom/protocol';
 import { findShortcodes, resolveBuiltin, type SkinTone } from '@backroom/emoji';
 
 export type Token =
   | { kind: 'text'; text: string }
   | { kind: 'link'; href: string; text: string }
   | { kind: 'user'; userId: string }
+  | { kind: 'code'; text: string }
+  | { kind: 'codeblock'; text: string }
   | { kind: 'broadcast'; which: 'channel' | 'here' }
   /** `text` is the original `:name:` / `:name::skin-tone-N:` as written. */
   | { kind: 'emoji'; name: string; tone: SkinTone | null; text: string };
@@ -50,8 +52,13 @@ function isHttp(text: string): boolean {
 
 type Span = { start: number; end: number; token: Token };
 
-export function tokenize(body: string, isKnownEmoji: IsKnownEmoji = builtinKnown): Token[] {
+export function tokenize(source: string, isKnownEmoji: IsKnownEmoji = builtinKnown): Token[] {
   const spans: Span[] = [];
+  // Code wins: everything else is matched on a same-length copy with code blanked out.
+  const body = maskCode(source);
+  for (const r of findCodeRanges(source)) {
+    spans.push({ start: r.start, end: r.end, token: { kind: r.kind, text: r.text } });
+  }
   for (const m of body.matchAll(LINK_RE)) {
     const text = trimLink(m[0]);
     if (text.length > 0 && isHttp(text)) {
@@ -70,7 +77,7 @@ export function tokenize(body: string, isKnownEmoji: IsKnownEmoji = builtinKnown
   }
   // Linear scan; codes that overlap a link or mention are dropped by the overlap rule below.
   for (const m of findShortcodes(body, isKnownEmoji)) {
-    const text = body.slice(m.index, m.index + m.length);
+    const text = source.slice(m.index, m.index + m.length);
     spans.push({ start: m.index, end: m.index + m.length, token: { kind: 'emoji', name: m.name, tone: m.tone, text } });
   }
   spans.sort((a, b) => a.start - b.start || b.end - a.end);
@@ -79,11 +86,11 @@ export function tokenize(body: string, isKnownEmoji: IsKnownEmoji = builtinKnown
   let pos = 0;
   for (const s of spans) {
     if (s.start < pos) continue; // overlaps an earlier token
-    if (s.start > pos) out.push({ kind: 'text', text: body.slice(pos, s.start) });
+    if (s.start > pos) out.push({ kind: 'text', text: source.slice(pos, s.start) });
     out.push(s.token);
     pos = s.end;
   }
-  if (pos < body.length) out.push({ kind: 'text', text: body.slice(pos) });
+  if (pos < source.length) out.push({ kind: 'text', text: source.slice(pos) });
   return out;
 }
 

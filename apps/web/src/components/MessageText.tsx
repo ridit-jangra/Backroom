@@ -14,6 +14,14 @@ export function MessageText({ body, members, me }: { body: string; members: Memb
         switch (t.kind) {
           case 'text':
             return t.text;
+          case 'code':
+            return <code key={i}>{t.text}</code>;
+          case 'codeblock':
+            return (
+              <pre key={i}>
+                <code>{t.text}</code>
+              </pre>
+            );
           case 'link':
             return (
               <a key={i} href={t.href} target="_blank" rel="noopener noreferrer nofollow">

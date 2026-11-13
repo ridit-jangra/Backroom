@@ -45,6 +45,8 @@ export function plainText(body: string, members: MemberSummary[]): string {
       switch (t.kind) {
         case 'text':
         case 'link':
+        case 'code':
+        case 'codeblock':
           return t.text;
         case 'user':
           return `@${names.get(t.userId) ?? 'unknown'}`;

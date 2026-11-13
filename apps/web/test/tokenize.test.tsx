@@ -120,3 +120,48 @@ describe('tokenize emoji', () => {
     expect(isEmojiOnly(tokenize(''))).toBe(false);
   });
 });
+
+describe('code spans and blocks', () => {
+  const kinds = (b: string) => tokenize(b).map((t) => t.kind);
+  it('nothing inside code becomes a mention, broadcast, link or emoji', () => {
+    expect(tokenize(`\`<@${A}>\``)).toEqual([{ kind: 'code', text: `<@${A}>` }]);
+    expect(tokenize('`@here`')).toEqual([{ kind: 'code', text: '@here' }]);
+    expect(tokenize('`http://a`')).toEqual([{ kind: 'code', text: 'http://a' }]);
+    expect(tokenize('`:smile:`')).toEqual([{ kind: 'code', text: ':smile:' }]);
+    expect(tokenize('```\nhttp://a :smile: @channel\n```')).toEqual([{ kind: 'codeblock', text: 'http://a :smile: @channel' }]);
+  });
+  it('a link running into a backtick stops at the code', () => {
+    expect(kinds('http://a.com`x`')).toEqual(['link', 'code']);
+  });
+  it('unclosed fences and lone backticks stay plain text', () => {
+    expect(tokenize('```\nlet a')).toEqual([{ kind: 'text', text: '```\nlet a' }]);
+    expect(tokenize('a ` b')).toEqual([{ kind: 'text', text: 'a ` b' }]);
+    expect(tokenize('`a\nb`')).toEqual([{ kind: 'text', text: '`a\nb`' }]);
+  });
+  it('multiple spans on one line', () => {
+    expect(tokenize('`a` and `b`')).toEqual([
+      { kind: 'code', text: 'a' },
+      { kind: 'text', text: ' and ' },
+      { kind: 'code', text: 'b' },
+    ]);
+  });
+  it('a fence with a language word ignores the word', () => {
+    expect(tokenize('```js\nconst a = `x`;\n```')).toEqual([{ kind: 'codeblock', text: 'const a = `x`;' }]);
+  });
+  it('code beside real mention, link and emoji leaves them intact', () => {
+    expect(kinds(`\`a\` <@${A}> \`b\` https://ex.com \`c\` :smile: \`d\``)).toEqual([
+      'code', 'text', 'user', 'text', 'code', 'text', 'link', 'text', 'code', 'text', 'emoji', 'text', 'code',
+    ]);
+  });
+  it('code is never jumbo emoji', () => {
+    expect(isEmojiOnly(tokenize('`:smile:`'))).toBe(false);
+    expect(isEmojiOnly(tokenize(':smile: `x`'))).toBe(false);
+  });
+  it('renders <code> and <pre><code>', () => {
+    const { container } = render(<MessageText body={'a `x` b\n```py\nprint(1)\n```'} members={[ann]} me={A} />);
+    expect(container.querySelector('code')!.textContent).toBe('x');
+    expect(container.querySelector('pre > code')!.textContent).toBe('print(1)');
+    expect(container.querySelector('pre code')!.closest('pre')!.querySelector('code')).not.toBeNull();
+    expect(container.querySelector('.msg-text.jumbo')).toBeNull();
+  });
+});
