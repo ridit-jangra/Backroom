@@ -107,6 +107,7 @@ button.link:hover { background: none; }
 .msg-text { white-space: pre-wrap; overflow-wrap: anywhere; }
 .msg-text code, .msg-text pre { font-family: ui-monospace, "JetBrains Mono", monospace; font-size: 0.875em; background: var(--wash); border-radius: 4px; }
 .msg-text code { padding: 0.05rem 0.3rem; }
+.msg-text pre code { padding: 0; background: none; }
 .msg-text pre { max-width: 100%; margin: 0.25rem 0; padding: 0.5rem 0.75rem; overflow-x: auto; white-space: pre; }
 .msg-text a { color: var(--ink); text-decoration: underline; text-underline-offset: 2px; overflow-wrap: anywhere; }
 .mention { background: var(--wash); border-radius: 3px; padding: 0 0.15rem; font-weight: 700; }

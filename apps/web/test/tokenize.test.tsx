@@ -161,7 +161,13 @@ describe('code spans and blocks', () => {
     const { container } = render(<MessageText body={'a `x` b\n```py\nprint(1)\n```'} members={[ann]} me={A} />);
     expect(container.querySelector('code')!.textContent).toBe('x');
     expect(container.querySelector('pre > code')!.textContent).toBe('print(1)');
-    expect(container.querySelector('pre code')!.closest('pre')!.querySelector('code')).not.toBeNull();
+    expect(container.querySelectorAll('code')).toHaveLength(2);
+    expect(container.querySelector('code')!.closest('pre')).toBeNull();
     expect(container.querySelector('.msg-text.jumbo')).toBeNull();
+  });
+  it('drops the newline right after a code block so no blank line follows the pre', () => {
+    const { container } = render(<MessageText body={'```\nx\n```\nafter'} members={[]} me={A} />);
+    expect(container.querySelector('.msg-text')!.lastChild!.textContent).toBe('after');
+    expect(tokenize('```\nx\n```\nafter')[1]).toEqual({ kind: 'text', text: '\nafter' });
   });
 });

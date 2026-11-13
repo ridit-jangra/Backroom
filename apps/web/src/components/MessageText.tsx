@@ -13,7 +13,8 @@ export function MessageText({ body, members, me }: { body: string; members: Memb
       {tokens.map((t, i) => {
         switch (t.kind) {
           case 'text':
-            return t.text;
+            // The pre is already a block; its trailing newline would add a blank line.
+            return tokens[i - 1]?.kind === 'codeblock' ? t.text.replace(/^\r?\n/, '') : t.text;
           case 'code':
             return <code key={i}>{t.text}</code>;
           case 'codeblock':
