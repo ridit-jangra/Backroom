@@ -194,6 +194,7 @@ export class WorkspaceHub extends DurableObject<Env> {
    * is nacked `rate_limited`, one without is dropped. State lives in the attachment (hibernation-safe).
    */
   private withinBudget(ws: WebSocket, f: ClientFrame): boolean {
+    // Checked before the `recent` lookup, so a resend of an in-flight or recent clientId also costs a token.
     const cost = frameCost(f);
     if (cost === null) return true;
     const att = getAtt(ws);

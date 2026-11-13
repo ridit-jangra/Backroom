@@ -87,6 +87,16 @@ describe('takeFrameBudget (token bucket)', () => {
   });
 });
 
+describe('stored budget precision', () => {
+  it('stores tokens rounded to at most 3 decimals', () => {
+    let b = takeFrameBudget(undefined, TYPING_FRAME_COST, T).budget;
+    for (let i = 0; i < 7; i++) b = takeFrameBudget(b, TYPING_FRAME_COST, T + 1 + i * 0.37).budget;
+    const decimals = (n: number) => (String(n).split('.')[1] ?? '').length;
+    expect(decimals(b.tokens)).toBeLessThanOrEqual(3);
+    expect(decimals(takeFrameBudget(b, 1, T + 333.3333).budget.tokens)).toBeLessThanOrEqual(3);
+  });
+});
+
 describe('hub per-socket frame budget', () => {
   it('a burst from one socket is nacked rate_limited past 20; other sockets in the channel are unaffected', async () => {
     const s = await setup();

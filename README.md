@@ -154,6 +154,8 @@ D1 write budget (index entries count as rows written; the free plan allows 100k 
 
 Troubleshooting: while developing, workerd may print `uncaught` pipe or stream errors when a client aborts a request (a cancelled upload or download). These are expected and harmless.
 
+Troubleshooting: each WebSocket may send about 10 frames per second (burst 20). Past that, a send shows "You're sending too fast. Wait a moment.", while edits, deletes and reactions are dropped silently (the web client sends them without a clientId).
+
 Deploy notes: `assets.run_worker_first` must now be `["/auth/*", "/me", "/w/*", "/invites/*", "/health", "/channels/*", "/messages/*", "/emoji/*", "/files/*", "/ws"]`, and `wrangler.jsonc` must keep the `triggers.crons` entry. Run `npx wrangler d1 migrations apply backroom --remote` for the new migrations.
 
 ## Desktop app (Phase 5)

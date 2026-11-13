@@ -13,6 +13,9 @@ export type FrameBudget = { tokens: number; at: number };
 /** Float slack so 5 × 0.2 counts as exactly 1 token. */
 const EPSILON = 1e-9;
 
+/** Stored tokens keep 3 decimals (small attachment; 0.2 steps stay exact). */
+const round3 = (n: number) => Math.round(n * 1000) / 1000;
+
 /** What a frame costs, or null for frames the budget does not count (hello, mark_read, activity, ping…). */
 export function frameCost(f: ClientFrame): number | null {
   switch (f.t) {
@@ -39,6 +42,6 @@ export function takeFrameBudget(
   const tokens = Math.min(FRAME_BUDGET_BURST, prev.tokens + (elapsed * FRAME_BUDGET_PER_SEC) / 1000);
   // A clock that went backwards keeps the later stamp, so it cannot be replayed into a refill.
   const at = Math.max(now, prev.at);
-  if (tokens + EPSILON >= cost) return { ok: true, budget: { tokens: Math.max(0, tokens - cost), at } };
-  return { ok: false, budget: { tokens, at } };
+  if (tokens + EPSILON >= cost) return { ok: true, budget: { tokens: round3(Math.max(0, tokens - cost)), at } };
+  return { ok: false, budget: { tokens: round3(tokens), at } };
 }
