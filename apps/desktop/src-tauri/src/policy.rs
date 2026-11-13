@@ -3,6 +3,8 @@
 //! bounded. No Tauri types here, so everything is unit-testable.
 
 use std::fmt;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 use url::Url;
 
 /// Maximum title length (in chars) for native notifications.
@@ -78,9 +80,10 @@ pub fn app_origin(url: &str) -> Result<Url, PolicyError> {
 }
 
 /// Same origin (scheme, host, port) → `Allow`; other http/https → `OpenExternal`;
-/// anything else → `Drop`.
+/// anything else → `Drop`. URLs carrying credentials (`user[:pw]@`) are always
+/// `Drop`: they are a classic way to disguise the real host.
 pub fn nav_decision(target: &Url, origin: &Url) -> Nav {
-    if !is_http(target) {
+    if !is_http(target) || !target.username().is_empty() || target.password().is_some() {
         return Nav::Drop;
     }
     // `Url::origin` compares scheme, host and port (default ports normalised).
@@ -111,6 +114,15 @@ pub fn parse_deep_link(s: &str) -> Option<DeepLink> {
     None
 }
 
+/// `<origin>/desktop-auth#code=<code>&verifier=<verifier>`. Both values travel
+/// in the fragment, so they never reach a server or its logs. Callers pass a
+/// code from [`parse_deep_link`] and a verifier from the store (both base64url).
+pub fn desktop_auth_url(origin: &Url, code: &str, verifier: &str) -> Url {
+    let mut url = origin.join("desktop-auth").expect("origin joins a relative path");
+    url.set_fragment(Some(&format!("code={code}&verifier={verifier}")));
+    url
+}
+
 /// Truncates title/body on char boundaries and enforces the ULID channel id.
 pub fn validate_notify(
     title: &str,
@@ -127,6 +139,65 @@ pub fn validate_notify(
     ))
 }
 
+/// Minimum time between two links opened in the default browser.
+pub const EXTERNAL_OPEN_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Rate limit for opening links in the default browser: at most one per
+/// [`EXTERNAL_OPEN_INTERVAL`], so a hostile page cannot spam browser tabs.
+#[derive(Debug, Default)]
+pub struct ExternalOpenLimiter {
+    last: Option<Instant>,
+}
+
+impl ExternalOpenLimiter {
+    /// True (and records `now`) when an open is allowed at `now`.
+    pub fn allow(&mut self, now: Instant) -> bool {
+        let ok = self
+            .last
+            .is_none_or(|last| now.saturating_duration_since(last) >= EXTERNAL_OPEN_INTERVAL);
+        if ok {
+            self.last = Some(now);
+        }
+        ok
+    }
+}
+
+/// Fallback name for a download whose suggested name is unusable.
+pub const DEFAULT_DOWNLOAD_NAME: &str = "download";
+
+/// Reduces a suggested download name to a safe basename: the last path
+/// component (either separator), without control characters or leading dots,
+/// at most 200 chars. Unusable names become [`DEFAULT_DOWNLOAD_NAME`].
+pub fn sanitize_download_name(name: &str) -> String {
+    let base = name.rsplit(['/', '\\']).next().unwrap_or("");
+    let cleaned: String = base.chars().filter(|c| !c.is_control()).collect();
+    let cleaned = cleaned.trim().trim_start_matches('.').trim();
+    if cleaned.is_empty() {
+        return DEFAULT_DOWNLOAD_NAME.to_string();
+    }
+    truncate_chars(cleaned, MAX_DOWNLOAD_NAME_CHARS)
+}
+
+/// Maximum download file name length (in chars).
+const MAX_DOWNLOAD_NAME_CHARS: usize = 200;
+
+/// `dir/name`, or `dir/stem (n).ext` for the first `n` that does not exist, so
+/// an existing file is never overwritten. `exists` is injected for tests.
+pub fn unique_download_path(dir: &Path, name: &str, exists: impl Fn(&Path) -> bool) -> PathBuf {
+    let first = dir.join(name);
+    if !exists(&first) {
+        return first;
+    }
+    let (stem, ext) = match name.rfind('.') {
+        Some(i) if i > 0 => (&name[..i], &name[i..]),
+        _ => (name, ""),
+    };
+    (1u32..)
+        .map(|n| dir.join(format!("{stem} ({n}){ext}")))
+        .find(|p| !exists(p))
+        .expect("unbounded counter finds a free name")
+}
+
 /// Clamps an unread count to `0..=9999`.
 pub fn clamp_badge(count: i64) -> i64 {
     count.clamp(0, MAX_BADGE)
@@ -137,7 +208,7 @@ fn is_http(url: &Url) -> bool {
 }
 
 /// `^[0-9A-Z]{26}$`
-fn is_ulid(s: &str) -> bool {
+pub fn is_ulid(s: &str) -> bool {
     s.len() == 26
         && s.bytes()
             .all(|b| b.is_ascii_digit() || b.is_ascii_uppercase())
@@ -280,6 +351,114 @@ mod tests {
         }
     }
 
+    #[test]
+    fn urls_with_userinfo_are_dropped() {
+        let o = origin();
+        for s in [
+            "http://user@localhost:8787/",
+            "http://user:pw@localhost:8787/x",
+            "http://:pw@localhost:8787/",
+            "https://localhost:8787@evil.com/",
+            "https://user@example.com/",
+        ] {
+            assert_eq!(nav_decision(&u(s), &o), Nav::Drop, "{s}");
+        }
+    }
+
+    // ---- ExternalOpenLimiter ----
+
+    #[test]
+    fn external_opens_are_limited_to_one_per_second() {
+        let mut limiter = ExternalOpenLimiter::default();
+        let t0 = Instant::now();
+        assert!(limiter.allow(t0));
+        assert!(!limiter.allow(t0));
+        assert!(!limiter.allow(t0 + Duration::from_millis(999)));
+        assert!(limiter.allow(t0 + Duration::from_secs(1)));
+        assert!(!limiter.allow(t0 + Duration::from_millis(1_500)));
+        assert!(limiter.allow(t0 + Duration::from_millis(2_000)));
+    }
+
+    #[test]
+    fn denied_opens_do_not_extend_the_window() {
+        let mut limiter = ExternalOpenLimiter::default();
+        let t0 = Instant::now();
+        assert!(limiter.allow(t0));
+        for ms in [100, 300, 600, 900] {
+            assert!(!limiter.allow(t0 + Duration::from_millis(ms)));
+        }
+        assert!(limiter.allow(t0 + Duration::from_millis(1_000)));
+    }
+
+    // ---- downloads ----
+
+    #[test]
+    fn download_name_keeps_plain_names() {
+        assert_eq!(sanitize_download_name("report.pdf"), "report.pdf");
+        assert_eq!(sanitize_download_name("my photo (1).jpg"), "my photo (1).jpg");
+        assert_eq!(sanitize_download_name("résumé.txt"), "résumé.txt");
+    }
+
+    #[test]
+    fn download_name_is_reduced_to_its_basename() {
+        assert_eq!(sanitize_download_name("../../etc/passwd"), "passwd");
+        assert_eq!(sanitize_download_name("/tmp/x.sh"), "x.sh");
+        assert_eq!(sanitize_download_name("..\\..\\win.ini"), "win.ini");
+        assert_eq!(sanitize_download_name("a/b\\c.txt"), "c.txt");
+    }
+
+    #[test]
+    fn download_name_drops_control_chars_and_leading_dots() {
+        assert_eq!(sanitize_download_name("a\u{0}b\nc.txt"), "abc.txt");
+        assert_eq!(sanitize_download_name(".bashrc"), "bashrc");
+        assert_eq!(sanitize_download_name("...hidden"), "hidden");
+        assert_eq!(sanitize_download_name("  spaced.txt  "), "spaced.txt");
+    }
+
+    #[test]
+    fn unusable_download_names_fall_back() {
+        for s in ["", ".", "..", "/", "a/", "\u{7}", "   ", "..\\"] {
+            assert_eq!(sanitize_download_name(s), DEFAULT_DOWNLOAD_NAME, "{s:?}");
+        }
+    }
+
+    #[test]
+    fn download_name_is_bounded() {
+        let long = format!("{}.txt", "a".repeat(5_000));
+        assert!(sanitize_download_name(&long).chars().count() <= 200);
+        let multi = "😀".repeat(500);
+        assert_eq!(sanitize_download_name(&multi).chars().count(), 200);
+    }
+
+    #[test]
+    fn unique_path_uses_the_name_when_free() {
+        let dir = Path::new("/home/u/Downloads");
+        assert_eq!(
+            unique_download_path(dir, "a.pdf", |_| false),
+            dir.join("a.pdf")
+        );
+    }
+
+    #[test]
+    fn unique_path_never_overwrites() {
+        let dir = Path::new("/home/u/Downloads");
+        let taken = [dir.join("a.pdf"), dir.join("a (1).pdf"), dir.join("a (2).pdf")];
+        assert_eq!(
+            unique_download_path(dir, "a.pdf", |p| taken.iter().any(|t| t == p)),
+            dir.join("a (3).pdf")
+        );
+        let taken = [dir.join("notes")];
+        assert_eq!(
+            unique_download_path(dir, "notes", |p| taken.iter().any(|t| t == p)),
+            dir.join("notes (1)")
+        );
+        let taken = [dir.join("x.tar.gz")];
+        assert_eq!(
+            unique_download_path(dir, "x.tar.gz", |p| taken.iter().any(|t| t == p)),
+            dir.join("x.tar (1).gz")
+        );
+    }
+
     // ---- parse_deep_link ----
 
     #[test]
@@ -384,6 +563,24 @@ mod tests {
         ] {
             assert_eq!(parse_deep_link(&s), None, "{s}");
         }
+    }
+
+    // ---- desktop_auth_url ----
+
+    #[test]
+    fn desktop_auth_url_carries_code_and_verifier_in_the_fragment() {
+        let url = desktop_auth_url(&origin(), "abcDEF0123_-xyz", "vErIfIeR-_0");
+        assert_eq!(
+            url.as_str(),
+            "http://localhost:8787/desktop-auth#code=abcDEF0123_-xyz&verifier=vErIfIeR-_0"
+        );
+        assert_eq!(url.query(), None);
+        assert_eq!(nav_decision(&url, &origin()), Nav::Allow);
+        let https = app_origin("https://chat.example.com").unwrap();
+        assert_eq!(
+            desktop_auth_url(&https, "c", "v").as_str(),
+            "https://chat.example.com/desktop-auth#code=c&verifier=v"
+        );
     }
 
     // ---- validate_notify ----

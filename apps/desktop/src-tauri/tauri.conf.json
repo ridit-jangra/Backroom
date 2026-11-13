@@ -12,6 +12,13 @@
       "csp": "default-src 'self'"
     }
   },
+  "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": ["backroom"]
+      }
+    }
+  },
   "bundle": {
     "active": true,
     "targets": ["deb", "appimage"],

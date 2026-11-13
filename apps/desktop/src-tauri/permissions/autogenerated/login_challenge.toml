@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-login-challenge"
+description = "Enables the login_challenge command without any pre-configured scope."
+commands.allow = ["login_challenge"]
+
+[[permission]]
+identifier = "deny-login-challenge"
+description = "Denies the login_challenge command without any pre-configured scope."
+commands.deny = ["login_challenge"]
