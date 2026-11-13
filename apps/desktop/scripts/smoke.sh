@@ -42,7 +42,7 @@ BACKROOM_APP_URL="$ORIGIN" cargo build --manifest-path "$ROOT/apps/desktop/src-t
 
 echo "starting worker on :$PORT (state in $SCRATCH)"
 (cd "$ROOT/apps/worker" && exec setsid npx wrangler dev --port "$PORT" --inspector-port 9230 \
-  --var "APP_ORIGIN:$ORIGIN" --persist-to "$SCRATCH/state") >"$WORKER_LOG" 2>&1 &
+  --var "APP_ORIGIN:$ORIGIN" --var RESEND_API_KEY:dev --persist-to "$SCRATCH/state") >"$WORKER_LOG" 2>&1 &
 WORKER_PID=$!
 
 ready=0

@@ -56,7 +56,7 @@ Principles:
 - No behaviour changes: every existing test must still pass. Tests that select by text or role must not need edits. If a test selects by a class name you rename, keep the old class alongside, or update the test only when it is purely a style hook (ruling recorded).
 - Never run `vite build` into `apps/web/dist`, because the user's dev server on 8787 serves it live. For visual checks:
   - build with `npx vite build --outDir <scratch>/ui-dist` (scratch = /tmp/claude-1000/-home-ridit/65796474-8e29-42ed-bc90-085080fd8497/scratchpad)
-  - serve it with `npx wrangler dev --port 8788 --assets <scratch>/ui-dist --var APP_ORIGIN:http://localhost:8788 --persist-to <scratch>/ui-state` from apps/worker
+  - serve it with `npx wrangler dev --port 8788 --assets <scratch>/ui-dist --var APP_ORIGIN:http://localhost:8788 --var RESEND_API_KEY:dev --persist-to <scratch>/ui-state` from apps/worker
   - sign in via the dev log link and screenshot with Playwright (the MCP browser tools, if available to you, or `npx playwright` from a scratch dir)
   - kill only the processes you started
 - Fonts are self-hosted via `@fontsource`, with exact pins. No third-party font CDN.
