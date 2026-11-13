@@ -11,6 +11,9 @@ export type UploadItem = {
   error?: string;
 };
 
+const WAIT_NOTICE = 'Wait for uploads to finish.';
+const FAILED_NOTICE = 'Remove or retry failed attachments to send.';
+
 export type UploadDeps = { upload?: typeof uploadFile; thumb?: typeof makeThumbnail; putThumb?: typeof uploadThumbnail };
 
 export function useUploads(slug: string, deps: UploadDeps = {}) {
@@ -29,7 +32,10 @@ export function useUploads(slug: string, deps: UploadDeps = {}) {
   };
   const patch = (key: string, p: Partial<UploadItem>) => {
     if (!live.current) return;
-    set(itemsRef.current.map((i) => (i.key === key ? { ...i, ...p } : i)));
+    const next = itemsRef.current.map((i) => (i.key === key ? { ...i, ...p } : i));
+    set(next);
+    // P4-R28: a blocked-send notice is stale once nothing is pending or failed.
+    if (next.every((i) => i.status === 'done')) setNotice((n) => (n === WAIT_NOTICE || n === FAILED_NOTICE ? null : n));
   };
 
   useEffect(() => {
@@ -108,6 +114,7 @@ export function useUploads(slug: string, deps: UploadDeps = {}) {
       const it = itemsRef.current.find((i) => i.key === key);
       if (!it || it.status !== 'failed') return;
       patch(key, { status: 'uploading', loaded: 0, error: undefined });
+      setNotice((n) => (n === FAILED_NOTICE ? null : n));
       start(key, it.file);
     },
     [start],
@@ -126,11 +133,11 @@ export function useUploads(slug: string, deps: UploadDeps = {}) {
   const blocked = useCallback((): boolean => {
     const cur = itemsRef.current;
     if (cur.some((i) => i.status === 'failed')) {
-      setNotice('Remove or retry failed attachments to send.');
+      setNotice(FAILED_NOTICE);
       return true;
     }
     if (cur.some((i) => i.status !== 'done')) {
-      setNotice('Wait for uploads to finish.');
+      setNotice(WAIT_NOTICE);
       return true;
     }
     return false;

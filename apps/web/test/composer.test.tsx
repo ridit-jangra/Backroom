@@ -362,6 +362,42 @@ describe('Composer attachments', () => {
     expect(screen.getByRole('alert').textContent).toBe('Wait for uploads to finish.');
   });
 
+  it('the wait notice clears once the pending upload finishes (P4-R28)', async () => {
+    const { ta, calls } = await attachSetup();
+    choose([file('a.png')]);
+    type(ta, 'hi');
+    fireEvent.keyDown(ta, { key: 'Enter' });
+    expect(screen.getByRole('alert').textContent).toBe('Wait for uploads to finish.');
+    await act(async () => {
+      calls[0]!.resolve(info('A', 'a.png'));
+    });
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it('the wait notice stays while another upload is still pending', async () => {
+    const { ta, calls } = await attachSetup();
+    choose([file('a.png'), file('b.png')]);
+    type(ta, 'hi');
+    fireEvent.keyDown(ta, { key: 'Enter' });
+    await act(async () => {
+      calls[0]!.resolve(info('A', 'a.png'));
+    });
+    expect(screen.getByRole('alert').textContent).toBe('Wait for uploads to finish.');
+  });
+
+  it('retry clears the failed-attachments notice (P4-R28)', async () => {
+    const { ta, calls } = await attachSetup();
+    choose([file('a.png')]);
+    type(ta, 'hi');
+    await act(async () => {
+      calls[0]!.reject(new Error('quota'));
+    });
+    fireEvent.keyDown(ta, { key: 'Enter' });
+    expect(screen.getByRole('alert').textContent).toBe('Remove or retry failed attachments to send.');
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    expect(screen.queryByText('Remove or retry failed attachments to send.')).toBeNull();
+  });
+
   it('no attach button without uploadSlug', () => {
     setup();
     expect(screen.queryByLabelText('Attach files')).toBeNull();
