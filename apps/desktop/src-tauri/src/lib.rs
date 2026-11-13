@@ -366,8 +366,9 @@ fn emit_navigate<R: Runtime>(app: &AppHandle<R>, channel_id: &str) {
 /// Installed packages (.deb) declare the scheme in their .desktop file; dev
 /// builds and AppImages are not installed, so they register at runtime
 /// (P5-R12). For an AppImage the plugin writes the AppImage path with `%u`.
-fn should_register_scheme(debug_build: bool, appimage: bool) -> bool {
-    debug_build || appimage
+/// Smoke runs never touch the user's handler registration.
+fn should_register_scheme(debug_build: bool, appimage: bool, smoke: bool) -> bool {
+    (debug_build || appimage) && !smoke
 }
 
 /// The webview's data dir (cookie jar with the session cookie) is owner-only.
@@ -397,7 +398,7 @@ fn restrict_data_dir<R: Runtime>(app: &AppHandle<R>) {
 
 fn setup_deep_links<R: Runtime>(app: &AppHandle<R>, origin: Url) {
     let appimage = app.env().appimage.is_some();
-    if should_register_scheme(cfg!(debug_assertions), appimage)
+    if should_register_scheme(cfg!(debug_assertions), appimage, smoke_enabled())
         && app.deep_link().register_all().is_err()
     {
         eprintln!("backroom: deep_link_register_failed");
@@ -671,10 +672,21 @@ mod tests {
 
     #[test]
     fn scheme_registers_at_runtime_only_for_dev_and_appimage() {
-        assert!(should_register_scheme(true, false), "dev build");
-        assert!(should_register_scheme(false, true), "release AppImage");
-        assert!(should_register_scheme(true, true));
-        assert!(!should_register_scheme(false, false), "installed .deb");
+        assert!(should_register_scheme(true, false, false), "dev build");
+        assert!(
+            should_register_scheme(false, true, false),
+            "release AppImage"
+        );
+        assert!(should_register_scheme(true, true, false));
+        assert!(
+            !should_register_scheme(false, false, false),
+            "installed .deb"
+        );
+        assert!(!should_register_scheme(true, false, true), "smoke: dev");
+        assert!(
+            !should_register_scheme(false, true, true),
+            "smoke: AppImage"
+        );
     }
 
     #[cfg(unix)]
