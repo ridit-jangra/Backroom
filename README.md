@@ -174,11 +174,13 @@ Deploy notes: `assets.run_worker_first` must now be `["/auth/*", "/me", "/w/*", 
 BACKROOM_APP_URL=https://chat.example.com npm run build -w apps/desktop
 ```
 
-Artifacts land in `apps/desktop/src-tauri/target/release/bundle/` (`deb/` and `appimage/`). Install the `.deb` with `sudo apt install ./Backroom_0.1.0_amd64.deb` (or `sudo dpkg -i`). The `.deb` installs the `.desktop` file that registers the `backroom://` scheme.
+Artifacts land in `apps/desktop/src-tauri/target/release/bundle/` (`deb/` and `appimage/`). Install the `.deb` with `sudo apt install ./Backroom_0.1.0_amd64.deb` (or `sudo dpkg -i`). The `.deb` installs the `.desktop` file that registers the `backroom://` scheme. That file comes from the custom template `apps/desktop/src-tauri/linux/backroom.desktop.hbs` (`bundle.linux.deb.desktopTemplate`), which adds the `%u` field code to `Exec` so GIO, KDE and Firefox pass the link to the app. The AppImage reuses the same template.
+
+The AppImage is not installed, so it registers the scheme itself on every start: it writes `~/.local/share/applications/backroom-desktop-handler.desktop` (with `Exec="<path to the AppImage>" %u`) and makes it your default `backroom://` handler with `xdg-mime`. If you move the AppImage, start it once from the new place.
 
 The AppImage bundle needs `linuxdeploy`, which Tauri downloads at build time; if that download or FUSE is unavailable the build can fail while the `.deb` still works.
 
-For development run `npm run dev -w apps/desktop` (with the worker on http://localhost:8787); a dev build registers the scheme for its own binary on every start (`register_all`).
+For development run `npm run dev -w apps/desktop` (with the worker on http://localhost:8787); a dev build registers the scheme for its own binary on every start (`register_all`). This writes the same per-user handler file as the AppImage and becomes your default handler, which outranks an installed `.deb` (see Troubleshooting).
 
 ### Smoke test
 
@@ -186,10 +188,12 @@ For development run `npm run dev -w apps/desktop` (with the worker on http://loc
 
 ### How sign-in works
 
-1. In the desktop app, request a sign-in link on the normal login page. The app creates a one-time PKCE verifier in memory and gives the page only its SHA-256 challenge.
+1. In the desktop app, request a sign-in link on the normal login page. The app creates a one-time PKCE verifier in memory and gives the page only its SHA-256 challenge. Requesting again within 20 minutes reuses the same verifier, so any of the emails you received can finish sign-in (only the first one used works).
 2. Open the emailed link: it opens Backroom in your browser.
 3. In the browser, click "Sign in". The server issues a one-time code bound to the challenge and the browser opens `backroom://auth?code=...`.
 4. The desktop app receives the link, loads `/desktop-auth` in the main window with the code and its verifier, and the server exchanges them for a normal session cookie.
+
+If the app has no pending login when the link arrives (it was restarted, the 20 minutes ran out, or the link was already used), it shows its window and a notification: "Sign-in link expired. Request a new one from Backroom." If the browser shows "Opening Backroom…" and nothing happens, use its "Open Backroom" link within 2 minutes, or request a new link from the app.
 
 The code alone is useless without the verifier, which never leaves the app and is never logged.
 
@@ -200,16 +204,19 @@ The code alone is useless without the verifier, which never leaves the app and i
 - PKCE: the one-time login code is bound to a challenge made by the app, so a code intercepted from the custom-scheme link cannot be redeemed without the in-memory verifier. Codes are single use and expire quickly.
 - Viewer windows: file links that open in a new window get a `viewer-<n>` window with no IPC access at all and no opener link back to the page; viewer creation is rate limited.
 - Downloads: the file name suggested by the server is reduced to a safe basename (no paths, leading dots or spaces, control or bidi characters, length-capped) and never overwrites an existing file.
+- Session storage: the webview keeps the session cookie in a plain-text cookie jar under `~/.local/share/app.backroom.desktop/`, like a browser profile. The app sets that directory to `0700` at every start so other local users cannot read it; any program running as you can.
 
 ### Known limitations
 
 - A `backroom://channel/<id>` link that cold-starts the app opens the app but does not select that channel (the page is not ready to receive the event). Links clicked while the app is running work. Planned for Phase 6.
 - A local application can send a fake `backroom://auth` link and spoil a pending desktop login by consuming the verifier. This can only cause a failed sign-in; request a new email and try again.
-- Deep links need the installed `.desktop` file (the `.deb`); a bare AppImage or binary does not register the scheme.
+- Deep links need the installed `.desktop` file (the `.deb`) or a started AppImage (it registers itself); a bare release binary does not register the scheme.
+- Closing the window hides it to the tray. On GNOME without the AppIndicator extension there is no tray icon, so the app keeps running hidden; launch Backroom again to show it, or quit it with `pkill backroom-desktop`. Planned for Phase 6.
 
 ### Troubleshooting
 
-- `backroom://` links do nothing: install the `.deb`, or in development run the app once so `register_all` registers it. Check with `xdg-mime query default x-scheme-handler/backroom`.
+- `backroom://` links do nothing: install the `.deb`, start the AppImage once, or in development run the app once so `register_all` registers it. Check with `xdg-mime query default x-scheme-handler/backroom`.
+- Links open a dev build (or an old AppImage) instead of the installed `.deb`: a dev build or AppImage made `backroom-desktop-handler.desktop` your per-user default, which wins over the `.deb`. Point it back with `xdg-mime default Backroom.desktop x-scheme-handler/backroom`, or delete `~/.local/share/applications/backroom-desktop-handler.desktop`.
 - Blank window or the app opens your browser instead: `BACKROOM_APP_URL` does not match the final origin the site serves (redirect, `www.`, wrong port). Rebuild with the exact origin.
 - Sign-in from the browser says the link expired: request a fresh email from the desktop app.
 
