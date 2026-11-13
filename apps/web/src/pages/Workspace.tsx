@@ -165,9 +165,9 @@ export function Workspace({ slug, channelId }: { slug: string; channelId?: strin
         <div className="main">
           <header>
             <div className="channel-title">
-              <strong>{channel ? label : archived ? `#${archived.name ?? ''}` : bootstrap.workspace.name}</strong>
+              <strong title={channel ? label : archived ? `#${archived.name ?? ''}` : bootstrap.workspace.name}>{channel ? label : archived ? `#${archived.name ?? ''}` : bootstrap.workspace.name}</strong>
               {archived && <span className="muted topic">Archived</span>}
-              {(channel?.topic ?? archived?.topic) && <span className="muted topic">{channel?.topic ?? archived?.topic}</span>}
+              {(channel?.topic ?? archived?.topic) && <span className="muted topic" title={channel?.topic ?? archived?.topic ?? undefined}>{channel?.topic ?? archived?.topic}</span>}
             </div>
             <form role="search" onSubmit={submitSearch}>
               <input
