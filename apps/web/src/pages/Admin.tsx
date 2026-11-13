@@ -2,12 +2,16 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { AdminMember, Bootstrap, CustomEmojiPolicy, InviteSummary } from '@backroom/protocol';
 import { api, ApiClientError } from '../api';
 
+/** R11: how long after a failed sign-in email the banner stays up. */
+const EMAIL_FAILURE_WINDOW_MS = 86_400_000;
+
 const messageOf = (e: unknown) => (e instanceof ApiClientError ? e.message : 'Something went wrong. Try again.');
 
 export function Admin({ slug }: { slug: string }) {
   const base = `/client/${encodeURIComponent(slug)}`;
   const w = `/w/${encodeURIComponent(slug)}`;
   const [me, setMe] = useState<Bootstrap['me'] | null>(null);
+  const [emailFailedAt, setEmailFailedAt] = useState<number | null>(null);
   const [invites, setInvites] = useState<InviteSummary[]>([]);
   const [members, setMembers] = useState<AdminMember[]>([]);
   const [policy, setPolicy] = useState<CustomEmojiPolicy>('admins');
@@ -26,6 +30,7 @@ export function Admin({ slug }: { slug: string }) {
     try {
       const b = await api<Bootstrap>(`${w}/bootstrap`);
       setMe(b.me);
+      setEmailFailedAt(b.emailFailedAt ?? null);
       setPolicy(b.workspace.settings?.customEmojiPolicy ?? 'admins');
       if (b.me.role === 'member') return;
       const [i, m] = await Promise.all([
@@ -140,6 +145,11 @@ export function Admin({ slug }: { slug: string }) {
     <main className="card admin">
       <h1>Admin</h1>
       {back}
+      {emailFailedAt !== null && Date.now() - emailFailedAt < EMAIL_FAILURE_WINDOW_MS && (
+        <p role="alert" className="banner">
+          Sign-in emails failed recently. Check the Resend API key and sending domain.
+        </p>
+      )}
       {error && <p role="alert">{error}</p>}
 
       <h2>Invites</h2>

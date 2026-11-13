@@ -85,6 +85,15 @@ describe('Outbox', () => {
     expect(sent[1]).toMatchObject({ clientId: id, parentId: 'P', alsoInChannel: true });
   });
 
+  it('nack rate_limited is a terminal failure carrying the code (no automatic resend)', () => {
+    const o = make();
+    const id = o.enqueue(msg);
+    o.nack(id, 'rate_limited');
+    expect(last[0]).toMatchObject({ status: 'failed', error: 'rate_limited' });
+    o.flush();
+    expect(sent).toHaveLength(1);
+  });
+
   it('flush resends pending after reconnect', () => {
     connected = false;
     const o = make();

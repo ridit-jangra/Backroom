@@ -240,7 +240,7 @@ export function PendingRow({
         <span className="muted">Sending…</span>
       ) : (
         <div className="msg-actions">
-          <span role="alert">Failed to send</span>{' '}
+          <span role="alert">{p.error === 'rate_limited' ? "You're sending too fast. Wait a moment." : 'Failed to send'}</span>{' '}
           <button type="button" className="link" onClick={() => onRetry(p.clientId)}>
             Retry
           </button>

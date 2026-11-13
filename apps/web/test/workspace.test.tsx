@@ -245,6 +245,23 @@ describe('Workspace live view', () => {
     expect(within(log()).queryByText('oops')).toBeNull();
   });
 
+  it("nack rate_limited shows \"You're sending too fast\" on the pending message, with Retry", async () => {
+    const ws = await boot();
+    const box = await screen.findByLabelText('Message #general');
+    fireEvent.change(box, { target: { value: 'flood' } });
+    fireEvent.keyDown(box, { key: 'Enter' });
+    const send = frames(ws).find((f) => f.t === 'send')!;
+    act(() => ws.receive({ t: 'nack', clientId: send.clientId, code: 'rate_limited' }));
+    const note = await screen.findByText("You're sending too fast. Wait a moment.");
+    expect(note.getAttribute('role')).toBe('alert');
+    expect(note.closest('li')!.textContent).toContain('flood');
+    expect(screen.queryByText('Failed to send')).toBeNull();
+    ws.sent = [];
+    await userEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    expect(frames(ws)).toEqual([expect.objectContaining({ t: 'send', clientId: send.clientId, body: 'flood' })]);
+    await waitFor(() => expect(screen.queryByText("You're sending too fast. Wait a moment.")).toBeNull());
+  });
+
   it('presence frame flips the member dot', async () => {
     const ws = await boot();
     const members = await screen.findByRole('list', { name: 'Members' });

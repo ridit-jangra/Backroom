@@ -19,8 +19,8 @@ const members = (): AdminMember[] => [
   { id: BOB, displayName: 'Bob', role: 'member', avatarKey: null, deactivatedAt: null },
 ];
 
-function open(role: 'member' | 'admin' | 'owner', invites: InviteSummary[] = []) {
-  const bootstrap = makeBootstrap({}, role as 'admin');
+function open(role: 'member' | 'admin' | 'owner', invites: InviteSummary[] = [], extra: { emailFailedAt?: number } = {}) {
+  const bootstrap = { ...makeBootstrap({}, role as 'admin'), ...extra };
   const posted = stubApi({
     bootstrap: () => bootstrap,
     route: (url, init) => {
@@ -40,6 +40,27 @@ function open(role: 'member' | 'admin' | 'owner', invites: InviteSummary[] = [])
   render(<App />);
   return posted;
 }
+
+const BANNER = 'Sign-in emails failed recently. Check the Resend API key and sending domain.';
+
+describe('Admin email-failure banner (R11)', () => {
+  it('shows a role=alert banner when emailFailedAt is within 24 h', async () => {
+    open('admin', [], { emailFailedAt: Date.now() - 23 * 3_600_000 });
+    await screen.findByRole('button', { name: 'Create invite' });
+    const alerts = screen.getAllByRole('alert');
+    expect(alerts.some((a) => a.textContent === BANNER)).toBe(true);
+  });
+
+  it('shows nothing when the failure is older than 24 h or absent', async () => {
+    open('owner', [], { emailFailedAt: Date.now() - 25 * 3_600_000 });
+    await screen.findByRole('button', { name: 'Create invite' });
+    expect(screen.queryByText(BANNER)).toBeNull();
+    cleanup();
+    open('owner');
+    await screen.findByRole('button', { name: 'Create invite' });
+    expect(screen.queryByText(BANNER)).toBeNull();
+  });
+});
 
 describe('Admin page', () => {
   it('create invite shows the link and copies it', async () => {
