@@ -25,5 +25,7 @@ searchRoutes.get('/w/:slug/search', requireSession, async (c) => {
   const { hits, hasMore } = await searchMessages(c.env.DB, { workspaceId, userId, query: parsed.query, offset, now });
   const next = offset + SEARCH_PAGE_SIZE;
   const page: SearchPage = { results: hits, nextCursor: hasMore && next <= SEARCH_MAX_OFFSET ? encodeCursor(next, now) : null };
+  // P4-R24: the parser kept the first SEARCH_MAX_TERMS terms; tell the client which ones it dropped.
+  if (parsed.query.ignoredTerms !== undefined) page.ignoredTerms = parsed.query.ignoredTerms;
   return c.json(page);
 });

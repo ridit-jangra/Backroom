@@ -65,6 +65,26 @@ async function errCode(res: Response): Promise<string> {
 
 const join = (h: SearchHit) => h.snippet.map((s) => s.text).join('');
 
+describe('search cost cap (P4-R24)', () => {
+  it('uses only the first 8 terms and lists the rest as ignoredTerms', async () => {
+    const s = await setup();
+    const hit = await s.say(GENERAL, 'alpha bravo charlie delta echo foxtrot golf hotel');
+    const q = 'alpha bravo charlie delta echo foxtrot golf hotel india "juliet kilo"';
+    const page = await s.q(s.carol.cookie, q);
+    // india and "juliet kilo" are not in the message: had they been matched, there would be no hit
+    expect(s.ids(page)).toEqual([hit.id]);
+    expect(page.ignoredTerms).toEqual(['india', 'juliet kilo']);
+  });
+
+  it('filters do not count as terms; ignoredTerms is omitted when nothing was dropped', async () => {
+    const s = await setup();
+    const hit = await s.say(GENERAL, 'alpha bravo charlie delta echo foxtrot golf hotel');
+    const page = await s.q(s.carol.cookie, 'in:#general from:alice alpha bravo charlie delta echo foxtrot golf hotel');
+    expect(s.ids(page)).toEqual([hit.id]);
+    expect('ignoredTerms' in page).toBe(false);
+  });
+});
+
 describe('search helpers', () => {
   it('splitSnippet marks hits, drops empties and keeps unbalanced markers as text', () => {
     expect(splitSnippet(`a ${HIT_START}zebra${HIT_END} b`)).toEqual([
@@ -210,7 +230,10 @@ describe('search', () => {
     const huge = await s.raw(s.carol.cookie, 'z'.repeat(2000));
     expect(huge.status).toBe(400);
     expect(await errCode(huge)).toBe('invalid_request');
-    expect(await errCode(await s.raw(s.carol.cookie, Array.from({ length: 17 }, (_, i) => `w${i}`).join(' ')))).toBe('too_long');
+    // P4-R24: 200 characters max (201 is too long); extra terms are ignored, not rejected
+    expect(await errCode(await s.raw(s.carol.cookie, 'z'.repeat(201)))).toBe('too_long');
+    expect((await s.raw(s.carol.cookie, 'z'.repeat(200))).status).toBe(200);
+    expect((await s.raw(s.carol.cookie, Array.from({ length: 17 }, (_, i) => `w${i}`).join(' '))).status).toBe(200);
     const noQ = await (async () => {
       const ctx = createExecutionContext();
       const r = await s.app.request('/w/clubhack/search', { headers: { Cookie: s.carol.cookie } }, env, ctx);

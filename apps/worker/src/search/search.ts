@@ -1,5 +1,6 @@
 import {
   SEARCH_MAX_OFFSET,
+  SEARCH_MAX_TERMS,
   SEARCH_PAGE_SIZE,
   USER_MENTION_RE,
   toFtsMatch,
@@ -175,7 +176,8 @@ export async function searchMessages(
   input: { workspaceId: string; userId: string; query: ParsedSearch; offset: number; now: number },
 ): Promise<{ hits: SearchHit[]; hasMore: boolean }> {
   const { query } = input;
-  const match = toFtsMatch(query.terms);
+  // P4-R24: the parser already caps terms; the slice keeps the query cost bounded for any caller.
+  const match = toFtsMatch(query.terms.slice(0, SEARCH_MAX_TERMS));
   if (match === null && query.terms.length > 0) return { hits: [], hasMore: false };
   const filters = await resolveFilters(db, input.workspaceId, query);
   if (filters === 'none') return { hits: [], hasMore: false };

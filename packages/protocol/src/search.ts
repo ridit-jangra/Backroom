@@ -2,12 +2,16 @@ import { z } from 'zod';
 import { ChannelKindSchema, MessageSchema } from './messaging';
 
 export const SEARCH_PAGE_SIZE = 20;
-export const SEARCH_QUERY_MAX = 256;
-export const SEARCH_MAX_TERMS = 16;
+/** P4-R24 (Phase 6): longer queries are `too_long`. */
+export const SEARCH_QUERY_MAX = 200;
+/** P4-R24 (Phase 6): terms past this many are ignored and reported as `ignoredTerms`. */
+export const SEARCH_MAX_TERMS = 8;
 export const SEARCH_MAX_OFFSET = 480;
 
 export type ParsedSearch = {
   terms: string[];
+  /** Terms past SEARCH_MAX_TERMS, in query order; present only when some were dropped. */
+  ignoredTerms?: string[];
   inChannel: string | null;
   from: string | null;
   hasFile: boolean;
@@ -81,7 +85,10 @@ export function parseSearchQuery(q: string): ParseSearchResult {
       else query.after = t + DAY_MS;
     } else query.terms.push(tok.text);
   }
-  if (query.terms.length > SEARCH_MAX_TERMS) return fail('too_long', 'That search is too long.');
+  if (query.terms.length > SEARCH_MAX_TERMS) {
+    query.ignoredTerms = query.terms.slice(SEARCH_MAX_TERMS);
+    query.terms = query.terms.slice(0, SEARCH_MAX_TERMS);
+  }
   const hasFilter =
     query.inChannel !== null ||
     query.from !== null ||
@@ -114,7 +121,12 @@ export const SearchHitSchema = z.object({
   snippet: z.array(SnippetSegmentSchema),
 });
 export type SearchHit = z.infer<typeof SearchHitSchema>;
-export type SearchPage = { results: SearchHit[]; nextCursor: string | null };
+export type SearchPage = {
+  results: SearchHit[];
+  nextCursor: string | null;
+  /** P4-R24: query terms past the first SEARCH_MAX_TERMS, which the search ignored. Omitted when none were. */
+  ignoredTerms?: string[];
+};
 
-// Transport guard only; parseSearchQuery owns the 256-char / 16-term rule (P4-R16).
+// Transport guard only; parseSearchQuery owns the 200-char rule and the 8-term cap (P4-R16, P4-R24).
 export const SearchParams = z.object({ q: z.string().max(1024), cursor: z.string().max(200).optional() });
