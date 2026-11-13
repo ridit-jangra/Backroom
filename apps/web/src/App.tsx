@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useSyncExternalStore } from 'react';
 import { navigate } from './nav';
 import { Login } from './pages/Login';
 import { Verify } from './pages/Verify';
@@ -16,13 +16,15 @@ function Redirect({ to }: { to: string }) {
   return null;
 }
 
+function subscribeToLocation(onChange: () => void): () => void {
+  window.addEventListener('popstate', onChange);
+  return () => window.removeEventListener('popstate', onChange);
+}
+
 export function App() {
-  const [path, setPath] = useState(location.pathname);
-  useEffect(() => {
-    const onPop = () => setPath(location.pathname);
-    window.addEventListener('popstate', onPop);
-    return () => window.removeEventListener('popstate', onPop);
-  }, []);
+  // useSyncExternalStore re-reads the snapshot after subscribing, so a navigate() fired by a
+  // child effect before this subscription (e.g. Redirect on `/`) is not lost.
+  const path = useSyncExternalStore(subscribeToLocation, () => location.pathname);
 
   if (path === '/') return <Redirect to={`/client/${DEFAULT_WORKSPACE}`} />;
   if (path === '/login') return <Login />;
