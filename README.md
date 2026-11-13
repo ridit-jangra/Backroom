@@ -156,6 +156,63 @@ Troubleshooting: while developing, workerd may print `uncaught` pipe or stream e
 
 Deploy notes: `assets.run_worker_first` must now be `["/auth/*", "/me", "/w/*", "/invites/*", "/health", "/channels/*", "/messages/*", "/emoji/*", "/files/*", "/ws"]`, and `wrangler.jsonc` must keep the `triggers.crons` entry. Run `npx wrangler d1 migrations apply backroom --remote` for the new migrations.
 
+## Desktop app (Phase 5)
+
+`apps/desktop` is a Tauri 2 shell (Rust) that loads the deployed Backroom web app in a native window. It adds a system tray, native notifications and unread badge, file downloads to your Downloads folder, and `backroom://` deep links. Linux only for now (`.deb` and AppImage).
+
+### Prerequisites
+
+- Rust (stable) and cargo
+- WebKitGTK 4.1 and libsoup 3 development packages (Arch: `webkit2gtk-4.1`, `libsoup3`; Debian/Ubuntu: `libwebkit2gtk-4.1-dev`, `libsoup-3.0-dev`), plus the usual Tauri Linux build libraries (`libayatana-appindicator`, `librsvg`, `patchelf`)
+- `xvfb` for the smoke test (Arch: `sudo pacman -S xorg-server-xvfb`; Debian/Ubuntu: `sudo apt install xvfb`)
+
+### Build
+
+`BACKROOM_APP_URL` is compiled into the binary (default `http://localhost:8787`). It must be the final canonical origin of your deployment: scheme and host (and port) only, no path, and no redirects. A redirect to another origin would be treated as an external link and leave the app blank. A value that is not an http(s) URL fails the build.
+
+```sh
+BACKROOM_APP_URL=https://chat.example.com npm run build -w apps/desktop
+```
+
+Artifacts land in `apps/desktop/src-tauri/target/release/bundle/` (`deb/` and `appimage/`). Install the `.deb` with `sudo apt install ./Backroom_0.1.0_amd64.deb` (or `sudo dpkg -i`). The `.deb` installs the `.desktop` file that registers the `backroom://` scheme.
+
+The AppImage bundle needs `linuxdeploy`, which Tauri downloads at build time; if that download or FUSE is unavailable the build can fail while the `.deb` still works.
+
+For development run `npm run dev -w apps/desktop` (with the worker on http://localhost:8787); a dev build registers the scheme for its own binary on every start (`register_all`).
+
+### Smoke test
+
+`apps/desktop/scripts/smoke.sh` builds a debug binary for `http://localhost:8788`, starts `wrangler dev` on port 8788 with its own scratch state, runs the app under `xvfb-run -a` with `BACKROOM_SMOKE=1`, and expects `smoke ok http://localhost:8788`. It exits 2 with an install hint if `xvfb-run` is missing. Pass `--direct` (or `SMOKE_DIRECT=1`) to use your current display instead of xvfb. It needs `apps/web/dist` to exist (`npm run build -w apps/web`). In smoke mode the app exits right after the first page load on the app origin, or with `smoke timeout` after 30 seconds.
+
+### How sign-in works
+
+1. In the desktop app, request a sign-in link on the normal login page. The app creates a one-time PKCE verifier in memory and gives the page only its SHA-256 challenge.
+2. Open the emailed link: it opens Backroom in your browser.
+3. In the browser, click "Sign in". The server issues a one-time code bound to the challenge and the browser opens `backroom://auth?code=...`.
+4. The desktop app receives the link, loads `/desktop-auth` in the main window with the code and its verifier, and the server exchanges them for a normal session cookie.
+
+The code alone is useless without the verifier, which never leaves the app and is never logged.
+
+### Security notes (threat model)
+
+- Origin lock: only the app origin loads in the app windows. Other http(s) links open in your default browser (rate limited), and every other scheme is dropped.
+- Capability scope: the desktop commands (`notify`, `set_badge`, `platform`, `login_challenge`) are granted at runtime only to the main window and only for the app origin. Each command also checks that it was called from the main window.
+- PKCE: the one-time login code is bound to a challenge made by the app, so a code intercepted from the custom-scheme link cannot be redeemed without the in-memory verifier. Codes are single use and expire quickly.
+- Viewer windows: file links that open in a new window get a `viewer-<n>` window with no IPC access at all and no opener link back to the page; viewer creation is rate limited.
+- Downloads: the file name suggested by the server is reduced to a safe basename (no paths, leading dots or spaces, control or bidi characters, length-capped) and never overwrites an existing file.
+
+### Known limitations
+
+- A `backroom://channel/<id>` link that cold-starts the app opens the app but does not select that channel (the page is not ready to receive the event). Links clicked while the app is running work. Planned for Phase 6.
+- A local application can send a fake `backroom://auth` link and spoil a pending desktop login by consuming the verifier. This can only cause a failed sign-in; request a new email and try again.
+- Deep links need the installed `.desktop` file (the `.deb`); a bare AppImage or binary does not register the scheme.
+
+### Troubleshooting
+
+- `backroom://` links do nothing: install the `.deb`, or in development run the app once so `register_all` registers it. Check with `xdg-mime query default x-scheme-handler/backroom`.
+- Blank window or the app opens your browser instead: `BACKROOM_APP_URL` does not match the final origin the site serves (redirect, `www.`, wrong port). Rebuild with the exact origin.
+- Sign-in from the browser says the link expired: request a fresh email from the desktop app.
+
 ## Running tests
 
 ```sh

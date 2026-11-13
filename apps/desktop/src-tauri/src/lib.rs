@@ -73,6 +73,41 @@ fn deep_link_action(
     }
 }
 
+/// True when the app was started in smoke mode (`BACKROOM_SMOKE=1`).
+fn smoke_enabled() -> bool {
+    std::env::var("BACKROOM_SMOKE").is_ok_and(|v| v == "1")
+}
+
+/// A finished page load counts for the smoke check only on the app origin.
+fn smoke_load_matches(loaded: &Url, origin: &Url) -> bool {
+    loaded.origin() == origin.origin()
+}
+
+/// Smoke mode: print `smoke ok <origin>` and exit 0 once the main webview
+/// finishes loading the app origin; exit 1 with `smoke timeout` after 30 s.
+fn smoke_builder<'a, R: Runtime, M: Manager<R>>(
+    builder: WebviewWindowBuilder<'a, R, M>,
+    app: &AppHandle<R>,
+    origin: &Url,
+) -> WebviewWindowBuilder<'a, R, M> {
+    let timeout_app = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(30));
+        println!("smoke timeout");
+        timeout_app.exit(1);
+    });
+    let exit_app = app.clone();
+    let origin = origin.clone();
+    builder.on_page_load(move |_webview, payload| {
+        if payload.event() == tauri::webview::PageLoadEvent::Finished
+            && smoke_load_matches(payload.url(), &origin)
+        {
+            println!("smoke ok {}", origin.origin().ascii_serialization());
+            exit_app.exit(0);
+        }
+    })
+}
+
 pub fn run() {
     tauri::Builder::default()
         // Registered first: a second launch hands its argv to this instance and
@@ -125,6 +160,11 @@ fn build_main_window<R: Runtime>(app: &AppHandle<R>, origin: &Url) -> tauri::Res
         // On WebKitGTK the download handler lives on the shared web context, so
         // this one also covers downloads started in viewer windows.
         .on_download(download_handler(app.clone()));
+    let builder = if smoke_enabled() {
+        smoke_builder(builder, app, origin)
+    } else {
+        builder
+    };
     let window = lock_down(builder, app, origin).build()?;
 
     // Closing hides to the tray; the tray's Quit exits.
@@ -417,6 +457,15 @@ mod tests {
             panic!("verifier taken for a channel link")
         });
         assert_eq!(action, DeepLinkAction::EmitNavigate(ULID.to_string()));
+    }
+
+    #[test]
+    fn smoke_matches_only_the_app_origin() {
+        let o = origin();
+        assert!(smoke_load_matches(&Url::parse("http://localhost:8787/x?y#z").unwrap(), &o));
+        assert!(!smoke_load_matches(&Url::parse("http://localhost:8788/").unwrap(), &o));
+        assert!(!smoke_load_matches(&Url::parse("https://localhost:8787/").unwrap(), &o));
+        assert!(!smoke_load_matches(&Url::parse("about:blank").unwrap(), &o));
     }
 
     // ---- glue on the mock runtime ----
