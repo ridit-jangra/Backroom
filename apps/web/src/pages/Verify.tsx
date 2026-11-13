@@ -6,7 +6,8 @@ export function Verify() {
   const token = new URLSearchParams(location.search).get('t') ?? '';
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
-  const [opening, setOpening] = useState(false);
+  // The desktop scheme URL once the code is handed over (also offered as a manual link).
+  const [appUrl, setAppUrl] = useState('');
 
   async function signIn() {
     setBusy(true);
@@ -18,8 +19,9 @@ export function Verify() {
       });
       if (res.desktopCode) {
         // The sign-in belongs to the desktop app: hand the one-time code over via its URL scheme.
-        setOpening(true);
-        location.assign(`backroom://auth?code=${encodeURIComponent(res.desktopCode)}`);
+        const url = `backroom://auth?code=${encodeURIComponent(res.desktopCode)}`;
+        setAppUrl(url);
+        location.assign(url);
         return;
       }
       navigate(`/client/${res.workspace}`);
@@ -29,11 +31,15 @@ export function Verify() {
     }
   }
 
-  if (opening)
+  if (appUrl)
     return (
       <main className="card">
         <h1>Finish signing in</h1>
         <p role="status">Opening Backroom…</p>
+        <p>
+          <a href={appUrl}>Open Backroom</a>
+        </p>
+        <p>Nothing happened? Make sure the Backroom app is installed, then request a new link from it.</p>
       </main>
     );
 

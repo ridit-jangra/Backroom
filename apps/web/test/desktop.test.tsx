@@ -95,6 +95,19 @@ describe('desktop login pages', () => {
     expect(assign).toHaveBeenCalledWith('backroom://auth?code=abc123');
   });
 
+  it('Verify with desktopCode offers an "Open Backroom" fallback link and a hint', async () => {
+    vi.stubGlobal('location', { search: '?t=tok', pathname: '/verify', hash: '', assign: vi.fn() });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify({ ok: true, workspace: 'clubhack', desktopCode: 'abc123' }), { status: 200 })),
+    );
+    render(<Verify />);
+    await userEvent.click(screen.getByRole('button', { name: 'Sign in' }));
+    const link = await screen.findByRole('link', { name: 'Open Backroom' });
+    expect(link.getAttribute('href')).toBe('backroom://auth?code=abc123');
+    expect(screen.getByText(/Nothing happened\? Make sure the Backroom app is installed/)).toBeTruthy();
+  });
+
   it('Verify without desktopCode navigates to /client/clubhack as before', async () => {
     vi.stubGlobal(
       'fetch',
