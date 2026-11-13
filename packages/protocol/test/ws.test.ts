@@ -32,6 +32,13 @@ describe('ws frames', () => {
     expect(parseHubFrame('{"t":"message.new"}')).toBeNull();
     expect(parseHubFrame('nope')).toBeNull();
   });
+  it("parseHubFrame accepts nack code 'rate_limited' (Phase 6)", () => {
+    expect(parseHubFrame(JSON.stringify({ t: 'nack', clientId: 'c-1-xxxxxx', code: 'rate_limited' }))).toEqual({
+      t: 'nack',
+      clientId: 'c-1-xxxxxx',
+      code: 'rate_limited',
+    });
+  });
   it('parseHubFrame returns null for an unknown hub frame type (old clients ignore new frames)', () => {
     expect(parseHubFrame('{"t":"future_hub_thing"}')).toBeNull();
     expect(parseHubFrame('{"t":"future_hub_thing","x":1}')).toBeNull();

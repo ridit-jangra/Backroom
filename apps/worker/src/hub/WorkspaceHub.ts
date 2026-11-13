@@ -22,6 +22,7 @@ import { deleteMessage, editMessage, sendMessage, type Audience } from '../messa
 import { toggleReaction } from '../emoji/reactions';
 import { withFiles } from '../files/attach';
 import { addChannel, channelsOf, getAtt, removeChannel, setAtt } from './attachment';
+import { frameCost, takeFrameBudget } from './budget';
 
 export type MembershipChange =
   | {
@@ -183,7 +184,25 @@ export class WorkspaceHub extends DurableObject<Env> {
       if (parsed.clientId !== undefined) this.sendFrame(ws, { t: 'nack', clientId: parsed.clientId, code: parsed.code });
       return;
     }
+    if (!this.withinBudget(ws, parsed.frame)) return;
     await this.dispatch(ws, parsed.frame);
+  }
+
+  /**
+   * Phase 6 per-socket token bucket (budget.ts), checked before any work, so an over-budget frame never
+   * reaches D1 or a channel queue and cannot delay other sockets. Over budget: a frame with a clientId
+   * is nacked `rate_limited`, one without is dropped. State lives in the attachment (hibernation-safe).
+   */
+  private withinBudget(ws: WebSocket, f: ClientFrame): boolean {
+    const cost = frameCost(f);
+    if (cost === null) return true;
+    const att = getAtt(ws);
+    const r = takeFrameBudget(att.budget, cost, this.now());
+    setAtt(ws, { ...att, budget: r.budget });
+    if (r.ok) return true;
+    const clientId = 'clientId' in f ? f.clientId : undefined;
+    if (clientId !== undefined) this.sendFrame(ws, { t: 'nack', clientId, code: 'rate_limited' });
+    return false;
   }
 
   private async dispatch(ws: WebSocket, f: ClientFrame): Promise<void> {

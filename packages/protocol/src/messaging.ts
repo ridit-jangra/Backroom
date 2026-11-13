@@ -98,10 +98,11 @@ export const HistoryQuery = z
   })
   .refine((v) => v.before === undefined || v.after === undefined, { message: 'before and after are mutually exclusive' });
 
-export type NackCode = 'invalid' | 'too_long' | 'not_found' | 'forbidden' | 'archived' | 'failed';
+/** `rate_limited` (Phase 6): the socket's frame budget is spent; the frame was not processed. */
+export type NackCode = 'invalid' | 'too_long' | 'not_found' | 'forbidden' | 'archived' | 'failed' | 'rate_limited';
 export type PresenceState = 'active' | 'away';
 export type NotifyKind = 'dm' | 'mention' | 'thread' | 'channel' | 'here' | 'all';
 
-export const NackCodeSchema = z.enum(['invalid', 'too_long', 'not_found', 'forbidden', 'archived', 'failed']);
+export const NackCodeSchema = z.enum(['invalid', 'too_long', 'not_found', 'forbidden', 'archived', 'failed', 'rate_limited']);
 export const PresenceStateSchema = z.enum(['active', 'away']);
 export const NotifyKindSchema = z.enum(['dm', 'mention', 'thread', 'channel', 'here', 'all']);

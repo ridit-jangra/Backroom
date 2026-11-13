@@ -1,4 +1,5 @@
 import type { PresenceState } from '@backroom/protocol';
+import type { FrameBudget } from './budget';
 
 /** Per-socket state, serialized onto the WebSocket so it survives hibernation (spec §5). */
 export type SocketAttachment = {
@@ -7,6 +8,8 @@ export type SocketAttachment = {
   channelIds: string[];
   lastActivityAt: number;
   announced: PresenceState;
+  /** Phase 6 per-socket frame budget; absent until the first counted frame (a full bucket). */
+  budget?: FrameBudget;
 };
 
 export function getAtt(ws: WebSocket): SocketAttachment {
