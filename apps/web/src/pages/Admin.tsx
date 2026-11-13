@@ -169,7 +169,7 @@ export function Admin({ slug }: { slug: string }) {
             <tr key={i.id}>
               <td>{i.uses}/{i.maxUses}</td>
               <td>{new Date(i.expiresAt).toLocaleDateString()}</td>
-              <td><button type="button" onClick={() => void revoke(i.id)}>Revoke</button></td>
+              <td><button type="button" className="danger" onClick={() => void revoke(i.id)}>Revoke</button></td>
             </tr>
           ))}
         </tbody>
@@ -223,7 +223,7 @@ export function Admin({ slug }: { slug: string }) {
                 <td>{m.deactivatedAt === null ? 'Active' : 'Deactivated'}</td>
                 <td>
                   {editable && (
-                    <button type="button" onClick={() => void patch(m, { deactivated: m.deactivatedAt === null })}>
+                    <button type="button" className={m.deactivatedAt === null ? 'danger' : undefined} onClick={() => void patch(m, { deactivated: m.deactivatedAt === null })}>
                       {m.deactivatedAt === null ? 'Deactivate' : 'Reactivate'}
                     </button>
                   )}

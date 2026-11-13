@@ -1,6 +1,7 @@
 export function About() {
   return (
     <main className="card about">
+      <p className="wordmark">Backroom</p>
       <h1>About Backroom</h1>
       <p>
         <span>Emoji graphics by Twemoji, CC-BY 4.0</span> (

@@ -34,6 +34,7 @@ export function Verify() {
   if (appUrl)
     return (
       <main className="card">
+        <p className="wordmark">Backroom</p>
         <h1>Finish signing in</h1>
         <p role="status">Opening Backroom…</p>
         <p>
@@ -45,6 +46,7 @@ export function Verify() {
 
   return (
     <main className="card">
+      <p className="wordmark">Backroom</p>
       <h1>Finish signing in</h1>
       <button type="button" onClick={signIn} disabled={busy || !token}>
         Sign in

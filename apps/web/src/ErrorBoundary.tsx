@@ -18,6 +18,7 @@ export class ErrorBoundary extends Component<{ children: ReactNode }, State> {
     if (!this.state.failed) return this.props.children;
     return (
       <div role="alert" className="error-boundary card">
+        <p className="wordmark">Backroom</p>
         <p>Something went wrong.</p>
         <button type="button" onClick={() => location.reload()}>
           Reload

@@ -48,6 +48,7 @@ export function DesktopAuth() {
 
   return (
     <main className="card">
+      <p className="wordmark">Backroom</p>
       <h1>Signing in…</h1>
       {error ? (
         <>

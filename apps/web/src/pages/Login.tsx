@@ -37,6 +37,7 @@ export function Login() {
 
   return (
     <main className="card">
+      <p className="wordmark">Backroom</p>
       <h1>Sign in to Backroom</h1>
       {sent ? (
         <p role="status">
