@@ -153,19 +153,24 @@ export function MessageRow({
         />
       )}
       {replies > 0 && onOpenThread && (
-        <button type="button" className="link replies" onClick={() => onOpenThread(message.id)}>
+        <button type="button" className="replies" onClick={() => onOpenThread(message.id)}>
           {replies === 1 ? '1 reply' : `${replies} replies`}
         </button>
       )}
       {sendError && <p role="alert" className="msg-error">Not connected — try again.</p>}
-      {(canEdit || canDelete || canReact) && !editing && (
-        <div className="msg-actions">
+      {(canEdit || canDelete || canReact || (!!onOpenThread && !deleted)) && !editing && (
+        <div className="msg-toolbar" role="group" aria-label="Message actions">
+          {onOpenThread && !deleted && (
+            <button type="button" className="tool" aria-label="Reply in thread" onClick={() => onOpenThread(message.id)}>
+              Reply
+            </button>
+          )}
           {canReact && (
             <span className="reaction-add">
               <button
                 ref={addRef}
                 type="button"
-                className="link"
+                className="tool"
                 aria-label="Add reaction"
                 aria-haspopup="dialog"
                 aria-expanded={pickerOpen}
@@ -182,14 +187,14 @@ export function MessageRow({
             </span>
           )}
           {canEdit && (
-            <button type="button" className="link" disabled={!connected} title={offlineTitle} onClick={() => setEditing(true)}>
+            <button type="button" className="tool" disabled={!connected} title={offlineTitle} onClick={() => setEditing(true)}>
               Edit
             </button>
           )}
           {canDelete && (
             <button
               type="button"
-              className="link"
+              className="tool"
               disabled={!connected}
               title={offlineTitle}
               onClick={() => {

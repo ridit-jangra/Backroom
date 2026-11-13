@@ -293,7 +293,7 @@ export function Composer({
       </div>
       {attach && (
         <>
-          <button type="button" aria-label="Attach files" onClick={() => fileInput.current?.click()}>
+          <button type="button" className="attach" aria-label="Attach files" onClick={() => fileInput.current?.click()}>
             Attach
           </button>
           <input
@@ -313,7 +313,7 @@ export function Composer({
         <ul className="upload-list">
           {uploads.items.map((it) => (
             <li key={it.key}>
-              <span>{it.file.name}</span>{' '}
+              <span className="upload-name">{it.file.name}</span>{' '}
               {it.status === 'uploading' && (
                 <progress aria-label={`Uploading ${it.file.name}`} max={it.file.size} value={it.loaded} />
               )}

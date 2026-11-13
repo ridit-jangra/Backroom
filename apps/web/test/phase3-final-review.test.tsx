@@ -174,6 +174,6 @@ describe('composer emoji button layout', () => {
     expect(wrap.contains(alert)).toBe(false);
     const css = readFileSync(`${import.meta.dirname}/../src/styles.css`, 'utf8');
     expect(css).toMatch(/\.composer-input \{ position: relative; \}/);
-    expect(css).toMatch(/\.composer textarea \{[^}]*padding: 0\.5rem 2\.25rem 0\.5rem 0\.5rem;/);
+    expect(css).toMatch(/\.composer textarea \{[^}]*padding: 0\.375rem 2\.25rem 0\.25rem 0;/);
   });
 });
