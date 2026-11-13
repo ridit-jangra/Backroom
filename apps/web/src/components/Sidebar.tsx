@@ -24,6 +24,7 @@ function ChannelItem({
         type="button"
         className={`channel${c.unreadCount > 0 ? ' unread' : ''}${active ? ' active' : ''}`}
         aria-current={active ? 'true' : undefined}
+        title={label}
         onClick={() => onOpen(c.id)}
       >
         {label}
@@ -52,6 +53,7 @@ export function Sidebar({
   onNewMessage,
   onEnableNotifications,
   onAdmin,
+  onSignOut,
 }: {
   slug: string;
   workspaceName: string;
@@ -67,6 +69,7 @@ export function Sidebar({
   onNewMessage?: () => void;
   onEnableNotifications: () => void;
   onAdmin: () => void;
+  onSignOut?: () => void;
 }) {
   const named = channels
     .filter((c) => c.kind !== 'dm')
@@ -163,6 +166,11 @@ export function Sidebar({
         >
           About
         </a>
+        {onSignOut && (
+          <button type="button" className="sign-out" onClick={onSignOut}>
+            Sign out
+          </button>
+        )}
       </footer>
     </aside>
   );

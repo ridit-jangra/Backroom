@@ -220,6 +220,11 @@ The code alone is useless without the verifier, which never leaves the app and i
 - Blank window or the app opens your browser instead: `BACKROOM_APP_URL` does not match the final origin the site serves (redirect, `www.`, wrong port). Rebuild with the exact origin.
 - Sign-in from the browser says the link expired: request a fresh email from the desktop app.
 
+## Look and feel
+
+Fonts are Atkinson Hyperlegible (body) and Bricolage Grotesque (workspace name, channel title and auth headings), self-hosted through `@fontsource`.
+Colour and font tokens live at the top of `apps/web/src/styles.css` (`:root`, with dark values under `prefers-color-scheme: dark`).
+
 ## Running tests
 
 ```sh

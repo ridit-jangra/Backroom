@@ -161,12 +161,13 @@ export function Workspace({ slug, channelId }: { slug: string; channelId?: strin
           onNewMessage={() => setDialog('dm')}
           onEnableNotifications={() => void enableNotifications()}
           onAdmin={() => navigate(`${base}/admin`)}
+          onSignOut={() => void signOut()}
         />
         <div className="main">
           <header>
             <div className="channel-title">
               <strong title={channel ? label : archived ? `#${archived.name ?? ''}` : bootstrap.workspace.name}>{channel ? label : archived ? `#${archived.name ?? ''}` : bootstrap.workspace.name}</strong>
-              {archived && <span className="muted topic">Archived</span>}
+              {archived && <span className="muted topic archived-tag">Archived</span>}
               {(channel?.topic ?? archived?.topic) && <span className="muted topic" title={channel?.topic ?? archived?.topic ?? undefined}>{channel?.topic ?? archived?.topic}</span>}
             </div>
             <form role="search" onSubmit={submitSearch}>
@@ -180,15 +181,16 @@ export function Workspace({ slug, channelId }: { slug: string; channelId?: strin
               />
             </form>
             {channel && !isDm && (
-              <button type="button" onClick={() => setDialog('settings')}>
-                Channel settings
+              <button type="button" className="icon-button" aria-label="Channel settings" title="Channel settings" onClick={() => setDialog('settings')}>
+                <svg viewBox="0 0 20 20" width="18" height="18" aria-hidden="true" focusable="false">
+                  <circle cx="10" cy="10" r="6.5" fill="none" stroke="currentColor" strokeWidth="3" strokeDasharray="2.553 2.553" />
+                  <circle cx="10" cy="10" r="5" fill="none" stroke="currentColor" strokeWidth="1.75" />
+                  <circle cx="10" cy="10" r="1.75" fill="none" stroke="currentColor" strokeWidth="1.5" />
+                </svg>
               </button>
             )}
-            <button type="button" onClick={signOut}>
-              Sign out
-            </button>
-            {signOutError && <span role="alert">{signOutError}</span>}
           </header>
+          {signOutError && <p role="alert" className="banner">{signOutError}</p>}
           {jumpError && <p role="alert" className="banner">{jumpError}</p>}
           {state.connection === 'reconnecting' && (
             <div role="status" className="banner">
