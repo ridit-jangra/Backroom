@@ -5,7 +5,7 @@
   "scripts": {
     "pretest": "mkdir -p ../web/dist && node ../../packages/emoji/scripts/generate.mjs",
     "test": "vitest run",
-    "predev": "mkdir -p ../web/dist && node ../../packages/emoji/scripts/generate.mjs",
+    "predev": "mkdir -p ../web/dist && node ../../packages/emoji/scripts/generate.mjs && wrangler d1 migrations apply DB --local",
     "dev": "wrangler dev"
   },
   "dependencies": {
