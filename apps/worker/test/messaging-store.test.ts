@@ -100,6 +100,16 @@ describe('sendMessage', () => {
     expect(r.audience.mentions.here).toBe(true);
   });
 
+  it('mentions inside code create no rows and no audience entries', async () => {
+    const { input, alice, bob } = await setup();
+    const priv = await insertChannel({ name: 'codey', kind: 'private', memberIds: [alice, bob] });
+    const r = await sendMessage(env.DB, input({ channelId: priv, body: `\`<@${bob}>\` and \`\`\`\n@here @channel\n\`\`\`` }));
+    if (!r.ok) throw new Error(r.code);
+    const n = await env.DB.prepare('SELECT count(*) AS n FROM mentions WHERE message_id = ?').bind(r.message.id).first<{ n: number }>();
+    expect(n!.n).toBe(0);
+    expect(r.audience.mentions).toEqual({ userIds: [], channel: false, here: false });
+  });
+
   it('sender must be an active workspace member; deactivated members are excluded from audience and mentions', async () => {
     const { input, alice, bob } = await setup();
     await env.DB.prepare('UPDATE workspace_members SET deactivated_at = 5 WHERE user_id = ?').bind(bob).run();

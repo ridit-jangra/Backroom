@@ -4,6 +4,8 @@ export const USER_MENTION_RE = /<@([0-9A-Z]{26})>/;
 /** Source of the @channel / @here matcher (shared with the client tokenizer). Build with flag 'g'. */
 export const BROADCAST_RE = /(?<![A-Za-z0-9_@</])@(channel|here)(?![A-Za-z0-9_-])/;
 
+import { maskCode } from './code';
+
 export const MAX_USER_MENTIONS = 50;
 
 export type ParsedMentions = { userIds: string[]; channel: boolean; here: boolean };
@@ -18,7 +20,8 @@ export function findBroadcasts(body: string): BroadcastMatch[] {
   return out;
 }
 
-export function extractMentions(body: string): ParsedMentions {
+export function extractMentions(raw: string): ParsedMentions {
+  const body = maskCode(raw); // `@x` inside code never notifies
   const seen = new Set<string>();
   for (const m of body.matchAll(new RegExp(USER_MENTION_RE.source, 'g'))) {
     if (seen.size >= MAX_USER_MENTIONS) break;

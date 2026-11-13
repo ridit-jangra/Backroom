@@ -38,3 +38,15 @@ describe('HistoryQuery', () => {
     expect(HistoryQuery.safeParse({ limit: '101' }).success).toBe(false);
   });
 });
+
+describe('extractMentions ignores code', () => {
+  it('does not extract mentions or broadcasts inside code spans or fences', () => {
+    expect(extractMentions(`\`<@${A}>\` \`@here\``)).toEqual({ userIds: [], channel: false, here: false });
+    expect(extractMentions(`\`\`\`js\n<@${A}> @channel\n\`\`\``)).toEqual({ userIds: [], channel: false, here: false });
+  });
+  it('still extracts mentions next to code and in unclosed code', () => {
+    expect(extractMentions(`\`x\` <@${A}> @here \`y\``)).toEqual({ userIds: [A], channel: false, here: true });
+    expect(extractMentions(`\`<@${A}>`)).toEqual({ userIds: [A], channel: false, here: false });
+    expect(extractMentions(`\`\`\`\n<@${B}>`)).toEqual({ userIds: [B], channel: false, here: false });
+  });
+});

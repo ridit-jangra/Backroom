@@ -5,3 +5,4 @@ export * from './ws';
 export * from './emoji';
 export * from './files';
 export * from './search';
+export * from './code';
