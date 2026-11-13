@@ -1,9 +1,10 @@
 //! PKCE verifier store for the desktop login hand-off (RFC 7636, S256).
 //!
-//! `login_challenge` makes a fresh 32-byte verifier, keeps it in memory only
-//! (one at a time, replaced on each call, valid for 20 minutes) and returns its
-//! challenge. `take_verifier` hands the verifier out at most once. Neither the
-//! verifier nor the challenge is ever logged.
+//! `login_challenge` returns the challenge of the pending 32-byte verifier,
+//! making a fresh one only when none is pending or it expired. The verifier is
+//! kept in memory only (one at a time, valid for 20 minutes from creation).
+//! `take_verifier` hands the verifier out at most once. Neither the verifier
+//! nor the challenge is ever logged.
 
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
@@ -20,7 +21,9 @@ pub const VERIFIER_TTL: Duration = Duration::from_secs(20 * 60);
 pub struct VerifierStore(Mutex<Option<(String, Instant)>>);
 
 impl VerifierStore {
-    /// New verifier (replacing any previous one); returns its S256 challenge.
+    /// S256 challenge of the pending verifier while it is still valid, else of a
+    /// fresh one. Reusing it lets every outstanding login email sign in (P5-R11);
+    /// the TTL still counts from when the verifier was made.
     pub fn login_challenge(&self) -> String {
         self.login_challenge_at(Instant::now())
     }
@@ -32,9 +35,15 @@ impl VerifierStore {
 
     /// [`Self::login_challenge`] with an injected clock.
     pub fn login_challenge_at(&self, now: Instant) -> String {
+        let mut slot = self.slot();
+        if let Some((verifier, created)) = slot.as_ref() {
+            if is_live(*created, now) {
+                return challenge_for(verifier);
+            }
+        }
         let verifier = new_verifier();
         let challenge = challenge_for(&verifier);
-        *self.slot() = Some((verifier, now));
+        *slot = Some((verifier, now));
         challenge
     }
 
@@ -42,12 +51,17 @@ impl VerifierStore {
     pub fn take_verifier_at(&self, now: Instant) -> Option<String> {
         // Always cleared: a verifier is used once, and an expired one is dropped.
         let (verifier, created) = self.slot().take()?;
-        (now.saturating_duration_since(created) < VERIFIER_TTL).then_some(verifier)
+        is_live(created, now).then_some(verifier)
     }
 
     fn slot(&self) -> MutexGuard<'_, Option<(String, Instant)>> {
         self.0.lock().unwrap_or_else(PoisonError::into_inner)
     }
+}
+
+/// True while a verifier made at `created` is still usable at `now`.
+fn is_live(created: Instant, now: Instant) -> bool {
+    now.saturating_duration_since(created) < VERIFIER_TTL
 }
 
 /// base64url(SHA-256(verifier)) without padding.
@@ -119,15 +133,43 @@ mod tests {
     }
 
     #[test]
-    fn new_challenge_replaces_old_verifier() {
+    fn repeated_challenge_reuses_the_pending_verifier() {
+        // Every outstanding email shares one verifier, so any of them can sign in.
         let store = VerifierStore::default();
-        let now = Instant::now();
-        let first = store.login_challenge_at(now);
-        let second = store.login_challenge_at(now);
-        assert_ne!(first, second, "fresh random verifier each call");
-        let verifier = store.take_verifier_at(now).unwrap();
-        assert_eq!(challenge_for(&verifier), second);
-        assert_ne!(challenge_for(&verifier), first);
-        assert_eq!(store.take_verifier_at(now), None, "only one verifier kept");
+        let t0 = Instant::now();
+        let first = store.login_challenge_at(t0);
+        let second = store.login_challenge_at(t0 + Duration::from_secs(60));
+        assert_eq!(first, second, "pending verifier reused, not replaced");
+        let verifier = store
+            .take_verifier_at(t0 + Duration::from_secs(61))
+            .unwrap();
+        assert_eq!(challenge_for(&verifier), first);
+        assert_eq!(store.take_verifier_at(t0), None, "still single-use");
+    }
+
+    #[test]
+    fn reuse_does_not_extend_the_verifier_lifetime() {
+        let store = VerifierStore::default();
+        let t0 = Instant::now();
+        store.login_challenge_at(t0);
+        store.login_challenge_at(t0 + VERIFIER_TTL - Duration::from_secs(1));
+        assert!(
+            store.take_verifier_at(t0 + VERIFIER_TTL).is_none(),
+            "TTL counts from the first challenge"
+        );
+    }
+
+    #[test]
+    fn expired_or_used_verifier_is_replaced_by_a_fresh_one() {
+        let store = VerifierStore::default();
+        let t0 = Instant::now();
+        let first = store.login_challenge_at(t0);
+        let after_expiry = store.login_challenge_at(t0 + VERIFIER_TTL);
+        assert_ne!(first, after_expiry, "expired verifier is not reused");
+        let verifier = store.take_verifier_at(t0 + VERIFIER_TTL).unwrap();
+        assert_eq!(challenge_for(&verifier), after_expiry);
+
+        let after_use = store.login_challenge_at(t0 + VERIFIER_TTL);
+        assert_ne!(after_use, after_expiry, "a used verifier is never reissued");
     }
 }

@@ -33,6 +33,14 @@ pub const NAVIGATE_EVENT: &str = "backroom://navigate";
 pub const VIEWER_PREFIX: &str = "viewer-";
 
 static VIEWER_SEQ: AtomicU32 = AtomicU32::new(1);
+/// Nonce for `/desktop-auth?n=<seq>` so each auth hand-off is a fresh document
+/// load, even when main already shows `/desktop-auth` (a fragment-only change
+/// would not re-run the page's exchange).
+static AUTH_NAV_SEQ: AtomicU32 = AtomicU32::new(1);
+
+/// Native notification shown when an auth link arrives with no pending login
+/// (an app restart, or the 20-minute verifier expired) (P5-R11).
+pub const LINK_EXPIRED_NOTICE: &str = "Sign-in link expired. Request a new one from Backroom.";
 
 /// Managed state: limits how often a page can open viewer windows (1/sec).
 #[derive(Default)]
@@ -47,7 +55,7 @@ struct ExternalLimiter(Mutex<ExternalOpenLimiter>);
 enum DeepLinkAction {
     /// Auth link with a pending verifier: load this URL in the main window.
     NavigateMain(Url),
-    /// Auth link but no pending verifier (or it expired): ignore.
+    /// Auth link but no pending verifier (or it expired): tell the user.
     NoVerifier,
     /// Channel link: ask the page to open this channel.
     EmitNavigate(String),
@@ -133,6 +141,7 @@ pub fn run() {
             let origin = policy::app_origin(APP_URL)?;
             app.add_capability(commands::remote_capability(&origin))?;
             let handle = app.handle().clone();
+            restrict_data_dir(&handle);
             build_main_window(&handle, &origin)?;
             tray::build(&handle)?;
             setup_notification_clicks(&handle);
@@ -353,10 +362,44 @@ fn emit_navigate<R: Runtime>(app: &AppHandle<R>, channel_id: &str) {
     }
 }
 
+/// Whether this run registers itself as the per-user `backroom://` handler.
+/// Installed packages (.deb) declare the scheme in their .desktop file; dev
+/// builds and AppImages are not installed, so they register at runtime
+/// (P5-R12). For an AppImage the plugin writes the AppImage path with `%u`.
+fn should_register_scheme(debug_build: bool, appimage: bool) -> bool {
+    debug_build || appimage
+}
+
+/// The webview's data dir (cookie jar with the session cookie) is owner-only.
+#[cfg(unix)]
+fn restrict_dir(dir: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::create_dir_all(dir)?;
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+}
+
+/// Locks down the app local data dir (where the webview keeps cookies) to 0700.
+fn restrict_data_dir<R: Runtime>(app: &AppHandle<R>) {
+    #[cfg(unix)]
+    {
+        let restricted = app
+            .path()
+            .app_local_data_dir()
+            .map_err(|_| ())
+            .and_then(|dir| restrict_dir(&dir).map_err(|_| ()));
+        if restricted.is_err() {
+            eprintln!("backroom: data_dir_permissions_failed");
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = app;
+}
+
 fn setup_deep_links<R: Runtime>(app: &AppHandle<R>, origin: Url) {
-    // Dev builds are not installed, so register the scheme for this binary.
-    #[cfg(debug_assertions)]
-    if app.deep_link().register_all().is_err() {
+    let appimage = app.env().appimage.is_some();
+    if should_register_scheme(cfg!(debug_assertions), appimage)
+        && app.deep_link().register_all().is_err()
+    {
         eprintln!("backroom: deep_link_register_failed");
     }
 
@@ -364,23 +407,38 @@ fn setup_deep_links<R: Runtime>(app: &AppHandle<R>, origin: Url) {
     let listen_origin = origin.clone();
     app.deep_link().on_open_url(move |event| {
         for url in event.urls() {
-            handle_deep_link(&handle, &listen_origin, url.as_str());
+            handle_deep_link(&handle, &listen_origin, url.as_str(), &show_notice);
         }
     });
 
     // A link that started this (first) instance.
     if let Ok(Some(urls)) = app.deep_link().get_current() {
         for url in urls {
-            handle_deep_link(app, &origin, url.as_str());
+            handle_deep_link(app, &origin, url.as_str(), &show_notice);
         }
     }
 }
 
+/// A title-only native notification; clicking it shows the main window.
+fn show_notice<R: Runtime>(app: &AppHandle<R>, text: &str) {
+    if app.notification().builder().title(text).show().is_err() {
+        eprintln!("backroom: notification_failed");
+    }
+}
+
 /// Routes an accepted `backroom://` link. Never logs the link, code or verifier.
-fn handle_deep_link<R: Runtime>(app: &AppHandle<R>, origin: &Url, raw: &str) {
+/// `notice` shows a native notification (injected so tests stay headless).
+fn handle_deep_link<R: Runtime>(
+    app: &AppHandle<R>,
+    origin: &Url,
+    raw: &str,
+    notice: &dyn Fn(&AppHandle<R>, &str),
+) {
     let action = deep_link_action(raw, origin, || app.state::<VerifierStore>().take_verifier());
     match action {
-        DeepLinkAction::NavigateMain(target) => {
+        DeepLinkAction::NavigateMain(mut target) => {
+            let seq = AUTH_NAV_SEQ.fetch_add(1, Ordering::Relaxed);
+            target.set_query(Some(&format!("n={seq}")));
             show_main(app);
             let navigated = app
                 .get_webview_window(MAIN_WINDOW)
@@ -389,8 +447,13 @@ fn handle_deep_link<R: Runtime>(app: &AppHandle<R>, origin: &Url, raw: &str) {
                 eprintln!("backroom: deep_link_navigate_failed");
             }
         }
-        // A code with no pending login from this instance: ignore it.
-        DeepLinkAction::NoVerifier => eprintln!("backroom: deep_link_no_verifier"),
+        // A code with no pending login in this instance (restart, expiry, or
+        // already used): the link cannot work, so say so instead of staying silent.
+        DeepLinkAction::NoVerifier => {
+            eprintln!("backroom: deep_link_no_verifier");
+            show_main(app);
+            notice(app, LINK_EXPIRED_NOTICE);
+        }
         DeepLinkAction::EmitNavigate(id) => {
             show_main(app);
             emit_navigate(app, &id);
@@ -411,6 +474,21 @@ mod tests {
 
     fn origin() -> Url {
         policy::app_origin("http://localhost:8787").unwrap()
+    }
+
+    /// Notice sink for tests: records texts instead of showing notifications.
+    type Seen = Arc<Mutex<Vec<String>>>;
+
+    fn recorder() -> (Seen, impl Fn(&AppHandle<MockRuntime>, &str)) {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&seen);
+        (seen, move |_: &AppHandle<MockRuntime>, text: &str| {
+            sink.lock().unwrap().push(text.to_string())
+        })
+    }
+
+    fn no_notice(_: &AppHandle<MockRuntime>, text: &str) {
+        panic!("unexpected notice: {text}");
     }
 
     /// Mock app with the verifier store and a plain "main" window on the origin.
@@ -435,21 +513,27 @@ mod tests {
         assert_eq!(
             action,
             DeepLinkAction::NavigateMain(
-                Url::parse(&format!("http://localhost:8787/desktop-auth#code={CODE}&verifier=ver"))
-                    .unwrap()
+                Url::parse(&format!(
+                    "http://localhost:8787/desktop-auth#code={CODE}&verifier=ver"
+                ))
+                .unwrap()
             )
         );
     }
 
     #[test]
-    fn auth_link_without_verifier_is_ignored() {
+    fn auth_link_without_verifier_is_no_verifier() {
         let action = deep_link_action(&format!("backroom://auth?code={CODE}"), &origin(), || None);
         assert_eq!(action, DeepLinkAction::NoVerifier);
     }
 
     #[test]
     fn invalid_links_never_take_the_verifier() {
-        for raw in ["backroom://auth?code=short", "garbage", "backroom://channel/x"] {
+        for raw in [
+            "backroom://auth?code=short",
+            "garbage",
+            "backroom://channel/x",
+        ] {
             let action = deep_link_action(raw, &origin(), || panic!("verifier taken for {raw}"));
             assert_eq!(action, DeepLinkAction::Ignore, "{raw}");
         }
@@ -462,9 +546,18 @@ mod tests {
     #[test]
     fn smoke_matches_only_the_app_origin() {
         let o = origin();
-        assert!(smoke_load_matches(&Url::parse("http://localhost:8787/x?y#z").unwrap(), &o));
-        assert!(!smoke_load_matches(&Url::parse("http://localhost:8788/").unwrap(), &o));
-        assert!(!smoke_load_matches(&Url::parse("https://localhost:8787/").unwrap(), &o));
+        assert!(smoke_load_matches(
+            &Url::parse("http://localhost:8787/x?y#z").unwrap(),
+            &o
+        ));
+        assert!(!smoke_load_matches(
+            &Url::parse("http://localhost:8788/").unwrap(),
+            &o
+        ));
+        assert!(!smoke_load_matches(
+            &Url::parse("https://localhost:8787/").unwrap(),
+            &o
+        ));
         assert!(!smoke_load_matches(&Url::parse("about:blank").unwrap(), &o));
     }
 
@@ -477,21 +570,145 @@ mod tests {
         let challenge = app.state::<VerifierStore>().login_challenge();
         assert_eq!(challenge.len(), 43);
 
-        handle_deep_link(handle, &origin(), &format!("backroom://auth?code={CODE}"));
+        handle_deep_link(
+            handle,
+            &origin(),
+            &format!("backroom://auth?code={CODE}"),
+            &no_notice,
+        );
         let main = app.get_webview_window(MAIN_WINDOW).unwrap();
         let url = main.url().unwrap();
         assert_eq!(url.path(), "/desktop-auth");
+        assert!(
+            url.query().is_some_and(|q| q.starts_with("n=")),
+            "nonce query forces a fresh document load"
+        );
         let fragment = url.fragment().unwrap().to_string();
         let verifier = fragment
             .strip_prefix(&format!("code={CODE}&verifier="))
             .expect("code then verifier in the fragment");
         assert_eq!(auth::challenge_for(verifier), challenge);
-        assert_eq!(app.state::<VerifierStore>().take_verifier(), None, "consumed");
+        assert_eq!(
+            app.state::<VerifierStore>().take_verifier(),
+            None,
+            "consumed"
+        );
 
-        // A second (replayed) auth link finds no verifier and leaves main alone.
+        // A second (replayed) auth link finds no verifier, leaves main alone and
+        // tells the user the link expired.
         main.navigate(origin()).unwrap();
-        handle_deep_link(handle, &origin(), &format!("backroom://auth?code={CODE}"));
+        let (seen, notice) = recorder();
+        handle_deep_link(
+            handle,
+            &origin(),
+            &format!("backroom://auth?code={CODE}"),
+            &notice,
+        );
         assert_eq!(main.url().unwrap(), origin());
+        assert_eq!(*seen.lock().unwrap(), vec![LINK_EXPIRED_NOTICE.to_string()]);
+    }
+
+    #[test]
+    fn auth_link_after_restart_shows_the_expired_notice() {
+        // Cold start: nothing pending in this instance.
+        let app = mock_app();
+        let (seen, notice) = recorder();
+        handle_deep_link(
+            app.handle(),
+            &origin(),
+            &format!("backroom://auth?code={CODE}"),
+            &notice,
+        );
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec!["Sign-in link expired. Request a new one from Backroom.".to_string()]
+        );
+        let main = app.get_webview_window(MAIN_WINDOW).unwrap();
+        assert_eq!(main.url().unwrap(), origin(), "main not navigated");
+    }
+
+    #[test]
+    fn two_login_requests_then_either_link_signs_in() {
+        // Two emails requested before either is clicked share one verifier.
+        let app = mock_app();
+        let store = app.state::<VerifierStore>();
+        let first = store.login_challenge();
+        let second = store.login_challenge();
+        assert_eq!(first, second);
+        handle_deep_link(
+            app.handle(),
+            &origin(),
+            &format!("backroom://auth?code={CODE}"),
+            &no_notice,
+        );
+        let url = app.get_webview_window(MAIN_WINDOW).unwrap().url().unwrap();
+        let verifier = url
+            .fragment()
+            .unwrap()
+            .strip_prefix(&format!("code={CODE}&verifier="))
+            .unwrap()
+            .to_string();
+        assert_eq!(auth::challenge_for(&verifier), second);
+    }
+
+    #[test]
+    fn each_auth_hand_off_gets_a_new_nonce() {
+        let app = mock_app();
+        let main = app.get_webview_window(MAIN_WINDOW).unwrap();
+        let mut queries = Vec::new();
+        for _ in 0..2 {
+            app.state::<VerifierStore>().login_challenge();
+            handle_deep_link(
+                app.handle(),
+                &origin(),
+                &format!("backroom://auth?code={CODE}"),
+                &no_notice,
+            );
+            queries.push(main.url().unwrap().query().unwrap().to_string());
+        }
+        assert_ne!(queries[0], queries[1]);
+    }
+
+    #[test]
+    fn scheme_registers_at_runtime_only_for_dev_and_appimage() {
+        assert!(should_register_scheme(true, false), "dev build");
+        assert!(should_register_scheme(false, true), "release AppImage");
+        assert!(should_register_scheme(true, true));
+        assert!(!should_register_scheme(false, false), "installed .deb");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restrict_dir_creates_an_owner_only_dir() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir()
+            .join(format!("backroom-perm-test-{}", std::process::id()))
+            .join("data");
+        restrict_dir(&dir).unwrap();
+        let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+        // Existing dirs are tightened too.
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        restrict_dir(&dir).unwrap();
+        let again = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+        std::fs::remove_dir_all(dir.parent().unwrap()).unwrap();
+        assert_eq!(mode, 0o700);
+        assert_eq!(again, 0o700);
+    }
+
+    #[test]
+    fn packaged_desktop_entry_passes_the_url_and_claims_the_scheme() {
+        // Without a field code GIO/KIO launch the app with no URL (C1).
+        let template = include_str!("../linux/backroom.desktop.hbs");
+        let lines: Vec<&str> = template.lines().collect();
+        assert!(lines.contains(&"Exec={{exec}} %u"), "{template}");
+        assert!(lines.contains(&"MimeType=x-scheme-handler/backroom;"));
+        let conf: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        // The AppImage reuses the deb's data dir, so this covers both bundles.
+        assert_eq!(
+            conf["bundle"]["linux"]["deb"]["desktopTemplate"],
+            "linux/backroom.desktop.hbs"
+        );
     }
 
     #[test]
@@ -502,8 +719,18 @@ mod tests {
         app.listen_any(NAVIGATE_EVENT, move |event| {
             record.lock().unwrap().push(event.payload().to_string());
         });
-        handle_deep_link(app.handle(), &origin(), &format!("backroom://channel/{ULID}"));
-        handle_deep_link(app.handle(), &origin(), "backroom://channel/nope");
+        handle_deep_link(
+            app.handle(),
+            &origin(),
+            &format!("backroom://channel/{ULID}"),
+            &no_notice,
+        );
+        handle_deep_link(
+            app.handle(),
+            &origin(),
+            "backroom://channel/nope",
+            &no_notice,
+        );
         assert_eq!(
             *seen.lock().unwrap(),
             vec![format!(r#"{{"channelId":"{ULID}"}}"#)]
