@@ -34,6 +34,45 @@ pub const VIEWER_PREFIX: &str = "viewer-";
 
 static VIEWER_SEQ: AtomicU32 = AtomicU32::new(1);
 
+/// Managed state: limits how often a page can open viewer windows (1/sec).
+#[derive(Default)]
+struct ViewerOpenLimiter(Mutex<ExternalOpenLimiter>);
+
+/// Managed state: limits how often links go to the default browser (1/sec).
+#[derive(Default)]
+struct ExternalLimiter(Mutex<ExternalOpenLimiter>);
+
+/// What an incoming `backroom://` link should do.
+#[derive(Debug, PartialEq, Eq)]
+enum DeepLinkAction {
+    /// Auth link with a pending verifier: load this URL in the main window.
+    NavigateMain(Url),
+    /// Auth link but no pending verifier (or it expired): ignore.
+    NoVerifier,
+    /// Channel link: ask the page to open this channel.
+    EmitNavigate(String),
+    /// Anything else: ignore.
+    Ignore,
+}
+
+/// Pure routing decision; the verifier is taken only for a valid auth link.
+fn deep_link_action(
+    raw: &str,
+    origin: &Url,
+    take_verifier: impl FnOnce() -> Option<String>,
+) -> DeepLinkAction {
+    match policy::parse_deep_link(raw) {
+        Some(DeepLink::Auth { code }) => match take_verifier() {
+            Some(verifier) => {
+                DeepLinkAction::NavigateMain(policy::desktop_auth_url(origin, &code, &verifier))
+            }
+            None => DeepLinkAction::NoVerifier,
+        },
+        Some(DeepLink::Channel { id }) => DeepLinkAction::EmitNavigate(id),
+        None => DeepLinkAction::Ignore,
+    }
+}
+
 pub fn run() {
     tauri::Builder::default()
         // Registered first: a second launch hands its argv to this instance and
@@ -47,7 +86,8 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
         .manage(VerifierStore::default())
-        .manage(Mutex::new(ExternalOpenLimiter::default()))
+        .manage(ExternalLimiter::default())
+        .manage(ViewerOpenLimiter::default())
         .invoke_handler(tauri::generate_handler![
             commands::notify,
             commands::set_badge,
@@ -139,6 +179,16 @@ fn lock_down<'a, R: Runtime, M: Manager<R>>(
 /// `viewer-<n>` window. It shares the webview session (cookies) but matches no
 /// capability, so it has no IPC.
 fn open_viewer<R: Runtime>(app: &AppHandle<R>, origin: &Url, url: Url) {
+    let allowed = app
+        .state::<ViewerOpenLimiter>()
+        .0
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .allow(Instant::now());
+    if !allowed {
+        eprintln!("backroom: viewer_open_rate_limited");
+        return;
+    }
     let handle = app.clone();
     let origin = origin.clone();
     // Built after the new-window callback returns, not inside it.
@@ -171,7 +221,8 @@ fn open_viewer<R: Runtime>(app: &AppHandle<R>, origin: &Url, url: Url) {
 
 fn open_external<R: Runtime>(app: &AppHandle<R>, url: &Url) {
     let allowed = app
-        .state::<Mutex<ExternalOpenLimiter>>()
+        .state::<ExternalLimiter>()
+        .0
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .allow(Instant::now());
@@ -287,25 +338,144 @@ fn setup_deep_links<R: Runtime>(app: &AppHandle<R>, origin: Url) {
 
 /// Routes an accepted `backroom://` link. Never logs the link, code or verifier.
 fn handle_deep_link<R: Runtime>(app: &AppHandle<R>, origin: &Url, raw: &str) {
-    match policy::parse_deep_link(raw) {
-        Some(DeepLink::Auth { code }) => match app.state::<VerifierStore>().take_verifier() {
-            Some(verifier) => {
-                let target = policy::desktop_auth_url(origin, &code, &verifier);
-                show_main(app);
-                let navigated = app
-                    .get_webview_window(MAIN_WINDOW)
-                    .map(|window| window.navigate(target).is_ok());
-                if navigated != Some(true) {
-                    eprintln!("backroom: deep_link_navigate_failed");
-                }
+    let action = deep_link_action(raw, origin, || app.state::<VerifierStore>().take_verifier());
+    match action {
+        DeepLinkAction::NavigateMain(target) => {
+            show_main(app);
+            let navigated = app
+                .get_webview_window(MAIN_WINDOW)
+                .map(|window| window.navigate(target).is_ok());
+            if navigated != Some(true) {
+                eprintln!("backroom: deep_link_navigate_failed");
             }
-            // A code with no pending login from this instance: ignore it.
-            None => eprintln!("backroom: deep_link_no_verifier"),
-        },
-        Some(DeepLink::Channel { id }) => {
+        }
+        // A code with no pending login from this instance: ignore it.
+        DeepLinkAction::NoVerifier => eprintln!("backroom: deep_link_no_verifier"),
+        DeepLinkAction::EmitNavigate(id) => {
             show_main(app);
             emit_navigate(app, &id);
         }
-        None => {}
+        DeepLinkAction::Ignore => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use tauri::test::{mock_builder, MockRuntime};
+    use tauri::{App, Listener};
+
+    const ULID: &str = "01HZX3K7Q9M2N4P6R8T0V2W4Y6";
+    const CODE: &str = "abcDEF0123_-xyz";
+
+    fn origin() -> Url {
+        policy::app_origin("http://localhost:8787").unwrap()
+    }
+
+    /// Mock app with the verifier store and a plain "main" window on the origin.
+    fn mock_app() -> App<MockRuntime> {
+        let app = mock_builder()
+            .manage(VerifierStore::default())
+            .build(tauri::generate_context!())
+            .expect("mock app");
+        WebviewWindowBuilder::new(&app, MAIN_WINDOW, WebviewUrl::External(origin()))
+            .build()
+            .expect("main window");
+        app
+    }
+
+    // ---- pure decision ----
+
+    #[test]
+    fn auth_link_with_verifier_navigates_to_desktop_auth() {
+        let action = deep_link_action(&format!("backroom://auth?code={CODE}"), &origin(), || {
+            Some("ver".to_string())
+        });
+        assert_eq!(
+            action,
+            DeepLinkAction::NavigateMain(
+                Url::parse(&format!("http://localhost:8787/desktop-auth#code={CODE}&verifier=ver"))
+                    .unwrap()
+            )
+        );
+    }
+
+    #[test]
+    fn auth_link_without_verifier_is_ignored() {
+        let action = deep_link_action(&format!("backroom://auth?code={CODE}"), &origin(), || None);
+        assert_eq!(action, DeepLinkAction::NoVerifier);
+    }
+
+    #[test]
+    fn invalid_links_never_take_the_verifier() {
+        for raw in ["backroom://auth?code=short", "garbage", "backroom://channel/x"] {
+            let action = deep_link_action(raw, &origin(), || panic!("verifier taken for {raw}"));
+            assert_eq!(action, DeepLinkAction::Ignore, "{raw}");
+        }
+        let action = deep_link_action(&format!("backroom://channel/{ULID}"), &origin(), || {
+            panic!("verifier taken for a channel link")
+        });
+        assert_eq!(action, DeepLinkAction::EmitNavigate(ULID.to_string()));
+    }
+
+    // ---- glue on the mock runtime ----
+
+    #[test]
+    fn auth_deep_link_navigates_main_and_consumes_the_verifier() {
+        let app = mock_app();
+        let handle = app.handle();
+        let challenge = app.state::<VerifierStore>().login_challenge();
+        assert_eq!(challenge.len(), 43);
+
+        handle_deep_link(handle, &origin(), &format!("backroom://auth?code={CODE}"));
+        let main = app.get_webview_window(MAIN_WINDOW).unwrap();
+        let url = main.url().unwrap();
+        assert_eq!(url.path(), "/desktop-auth");
+        let fragment = url.fragment().unwrap().to_string();
+        let verifier = fragment
+            .strip_prefix(&format!("code={CODE}&verifier="))
+            .expect("code then verifier in the fragment");
+        assert_eq!(auth::challenge_for(verifier), challenge);
+        assert_eq!(app.state::<VerifierStore>().take_verifier(), None, "consumed");
+
+        // A second (replayed) auth link finds no verifier and leaves main alone.
+        main.navigate(origin()).unwrap();
+        handle_deep_link(handle, &origin(), &format!("backroom://auth?code={CODE}"));
+        assert_eq!(main.url().unwrap(), origin());
+    }
+
+    #[test]
+    fn channel_deep_link_emits_navigate_to_main() {
+        let app = mock_app();
+        let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+        let record = Arc::clone(&seen);
+        app.listen_any(NAVIGATE_EVENT, move |event| {
+            record.lock().unwrap().push(event.payload().to_string());
+        });
+        handle_deep_link(app.handle(), &origin(), &format!("backroom://channel/{ULID}"));
+        handle_deep_link(app.handle(), &origin(), "backroom://channel/nope");
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![format!(r#"{{"channelId":"{ULID}"}}"#)]
+        );
+    }
+
+    #[test]
+    fn require_main_rejects_other_windows() {
+        let app = mock_app();
+        let viewer = WebviewWindowBuilder::new(
+            &app,
+            format!("{VIEWER_PREFIX}1"),
+            WebviewUrl::External(origin()),
+        )
+        .build()
+        .unwrap();
+        let main = app.get_webview_window(MAIN_WINDOW).unwrap();
+        assert_eq!(commands::require_main(main.as_ref()), Ok(()));
+        assert_eq!(
+            commands::require_main(viewer.as_ref()),
+            Err("forbidden".to_string())
+        );
     }
 }

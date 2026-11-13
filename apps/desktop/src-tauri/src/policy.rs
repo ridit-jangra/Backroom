@@ -166,20 +166,87 @@ impl ExternalOpenLimiter {
 pub const DEFAULT_DOWNLOAD_NAME: &str = "download";
 
 /// Reduces a suggested download name to a safe basename: the last path
-/// component (either separator), without control characters or leading dots,
-/// at most 200 chars. Unusable names become [`DEFAULT_DOWNLOAD_NAME`].
+/// component (either separator), without control or Unicode format characters
+/// (bidi overrides, zero-width chars), without leading dots or whitespace, at
+/// most [`MAX_DOWNLOAD_NAME_BYTES`] bytes (extension kept where possible, so a
+/// " (n)" suffix still fits within NAME_MAX = 255 bytes). Unusable names become
+/// [`DEFAULT_DOWNLOAD_NAME`].
 pub fn sanitize_download_name(name: &str) -> String {
     let base = name.rsplit(['/', '\\']).next().unwrap_or("");
-    let cleaned: String = base.chars().filter(|c| !c.is_control()).collect();
-    let cleaned = cleaned.trim().trim_start_matches('.').trim();
+    let cleaned: String = base
+        .chars()
+        .filter(|c| !c.is_control() && !is_format_char(*c))
+        .collect();
+    let cleaned = cleaned
+        .trim_start_matches(|c: char| c == '.' || c.is_whitespace())
+        .trim_end();
     if cleaned.is_empty() {
         return DEFAULT_DOWNLOAD_NAME.to_string();
     }
-    truncate_chars(cleaned, MAX_DOWNLOAD_NAME_CHARS)
+    truncate_name_bytes(cleaned, MAX_DOWNLOAD_NAME_BYTES)
 }
 
-/// Maximum download file name length (in chars).
-const MAX_DOWNLOAD_NAME_CHARS: usize = 200;
+/// Maximum download file name length in bytes. Linux NAME_MAX is 255 bytes;
+/// the rest leaves room for a " (n)" collision suffix.
+pub const MAX_DOWNLOAD_NAME_BYTES: usize = 200;
+
+/// Longest extension (bytes, dot included) kept when a name is shortened.
+const MAX_KEPT_EXT_BYTES: usize = 20;
+
+/// Shortens `name` to at most `max` bytes on a char boundary, keeping a short
+/// extension (`.pdf`) when there is one.
+fn truncate_name_bytes(name: &str, max: usize) -> String {
+    if name.len() <= max {
+        return name.to_string();
+    }
+    let ext = match name.rfind('.') {
+        Some(i) if i > 0 && name.len() - i <= MAX_KEPT_EXT_BYTES => &name[i..],
+        _ => "",
+    };
+    let stem = &name[..name.len() - ext.len()];
+    format!("{}{ext}", truncate_bytes(stem, max - ext.len()))
+}
+
+/// Longest prefix of `s` with at most `max` bytes that ends on a char boundary.
+fn truncate_bytes(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        return s;
+    }
+    let mut end = max;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
+/// Unicode general category Cf (format characters): bidi controls, zero-width
+/// characters, BOM, tags and the like. A static table, so no extra crate.
+fn is_format_char(c: char) -> bool {
+    matches!(
+        c as u32,
+        0x00AD
+            | 0x0600..=0x0605
+            | 0x061C
+            | 0x06DD
+            | 0x070F
+            | 0x0890..=0x0891
+            | 0x08E2
+            | 0x180E
+            | 0x200B..=0x200F
+            | 0x202A..=0x202E
+            | 0x2060..=0x2064
+            | 0x2066..=0x206F
+            | 0xFEFF
+            | 0xFFF9..=0xFFFB
+            | 0x110BD
+            | 0x110CD
+            | 0x13430..=0x1343F
+            | 0x1BCA0..=0x1BCA3
+            | 0x1D173..=0x1D17A
+            | 0xE0001
+            | 0xE0020..=0xE007F
+    )
+}
 
 /// `dir/name`, or `dir/stem (n).ext` for the first `n` that does not exist, so
 /// an existing file is never overwritten. `exists` is injected for tests.
@@ -413,6 +480,10 @@ mod tests {
         assert_eq!(sanitize_download_name(".bashrc"), "bashrc");
         assert_eq!(sanitize_download_name("...hidden"), "hidden");
         assert_eq!(sanitize_download_name("  spaced.txt  "), "spaced.txt");
+        assert_eq!(sanitize_download_name(". .bashrc"), "bashrc");
+        assert_eq!(sanitize_download_name(" . . .y"), "y");
+        assert_eq!(sanitize_download_name(".\u{a0}.x"), "x");
+        assert_eq!(sanitize_download_name("\u{202E}.hidden"), "hidden");
     }
 
     #[test]
@@ -423,11 +494,42 @@ mod tests {
     }
 
     #[test]
-    fn download_name_is_bounded() {
+    fn download_name_is_bounded_in_bytes_keeping_the_extension() {
         let long = format!("{}.txt", "a".repeat(5_000));
-        assert!(sanitize_download_name(&long).chars().count() <= 200);
+        let out = sanitize_download_name(&long);
+        assert_eq!(out.len(), MAX_DOWNLOAD_NAME_BYTES);
+        assert!(out.ends_with(".txt"));
+        // 4-byte chars: cut on a char boundary, never above the limit.
         let multi = "😀".repeat(500);
-        assert_eq!(sanitize_download_name(&multi).chars().count(), 200);
+        let out = sanitize_download_name(&multi);
+        assert!(out.len() <= MAX_DOWNLOAD_NAME_BYTES);
+        assert_eq!(out.len(), 200);
+        assert!(multi.starts_with(&out));
+        let multi_ext = format!("{}.pdf", "€".repeat(300));
+        let out = sanitize_download_name(&multi_ext);
+        assert!(out.len() <= MAX_DOWNLOAD_NAME_BYTES);
+        assert!(out.ends_with(".pdf"));
+        // A long "extension" is not kept whole.
+        let long_ext = format!("x.{}", "e".repeat(400));
+        assert_eq!(sanitize_download_name(&long_ext).len(), MAX_DOWNLOAD_NAME_BYTES);
+        // Room for the collision suffix within NAME_MAX (255 bytes).
+        assert!(MAX_DOWNLOAD_NAME_BYTES + " (4294967295)".len() <= 255);
+        assert_eq!(sanitize_download_name("short.txt"), "short.txt");
+    }
+
+    #[test]
+    fn download_name_strips_bidi_and_format_chars() {
+        assert_eq!(sanitize_download_name("\u{202E}gpj.exe"), "gpj.exe");
+        assert_eq!(
+            sanitize_download_name("a\u{200E}\u{200F}\u{202A}\u{202B}\u{202C}\u{202D}b.txt"),
+            "ab.txt"
+        );
+        assert_eq!(
+            sanitize_download_name("\u{2066}x\u{2067}\u{2068}\u{2069}.pdf"),
+            "x.pdf"
+        );
+        assert_eq!(sanitize_download_name("\u{FEFF}\u{200B}z.txt"), "z.txt");
+        assert_eq!(sanitize_download_name("\u{202E}"), DEFAULT_DOWNLOAD_NAME);
     }
 
     #[test]

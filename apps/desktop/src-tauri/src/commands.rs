@@ -41,7 +41,7 @@ pub fn remote_capability(origin: &Url) -> CapabilityBuilder {
 }
 
 /// Defense in depth on top of the capability: only the main webview may call.
-fn require_main<R: Runtime>(webview: &Webview<R>) -> Result<(), String> {
+pub(crate) fn require_main<R: Runtime>(webview: &Webview<R>) -> Result<(), String> {
     if webview.label() == MAIN_WINDOW {
         Ok(())
     } else {
