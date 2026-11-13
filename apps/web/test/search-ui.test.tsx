@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import type { Message, SearchHit } from '@backroom/protocol';
+import { SEARCH_QUERY_MAX, type Message, type SearchHit } from '@backroom/protocol';
 import { FakeWebSocket } from './fakeSocket';
 import { BOB, GEN, RAND, boot, chan, id, makeBootstrap, msg, stubApi, type Route } from './harness';
 
@@ -30,6 +30,12 @@ async function search(text: string) {
 }
 
 describe('search UI', () => {
+  it('the search box maxLength is SEARCH_QUERY_MAX (200)', async () => {
+    stubApi({});
+    await boot();
+    expect(((await screen.findByRole('searchbox', { name: 'Search messages' })) as HTMLInputElement).maxLength).toBe(SEARCH_QUERY_MAX);
+  });
+
   it('submitting the box requests the search and shows highlighted snippets as text', async () => {
     const route: Route = (url) =>
       url.startsWith('/w/clubhack/search')

@@ -14,7 +14,7 @@ import { channelLabel, notificationPermission, requestNotificationPermission } f
 import { useChat } from '../realtime/useChat';
 import { EmojiProvider } from '../emoji/EmojiContext';
 import { SearchPanel } from '../search/SearchPanel';
-import type { SearchHit } from '@backroom/protocol';
+import { SEARCH_QUERY_MAX, type SearchHit } from '@backroom/protocol';
 
 export function Workspace({ slug, channelId }: { slug: string; channelId?: string }) {
   const { state, actions, error, threadError } = useChat(slug);
@@ -175,7 +175,7 @@ export function Workspace({ slug, channelId }: { slug: string; channelId?: strin
                 type="search"
                 aria-label="Search messages"
                 placeholder="Search"
-                maxLength={256}
+                maxLength={SEARCH_QUERY_MAX}
                 value={searchDraft}
                 onChange={(e) => setSearchDraft(e.target.value)}
               />
