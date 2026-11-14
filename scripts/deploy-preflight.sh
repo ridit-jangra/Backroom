@@ -13,6 +13,12 @@ WORKER_PKG=apps/worker/package.json
 fail=0
 ok()  { printf '  \xe2\x9c\x93 %s\n' "$1"; }
 bad() { printf '  \xe2\x9c\x97 %s\n' "$1"; [ -n "${2:-}" ] && printf '      fix: %s\n' "$2"; fail=1; }
+warn() { printf '  ! %s\n' "$1"; [ -n "${2:-}" ] && printf '      fix: %s\n' "$2"; }
+
+# True when some file under apps/web/src is newer than apps/web/dist/index.html (the build is stale).
+web_build_stale() {
+  [ -n "$(find apps/web/src -type f -newer apps/web/dist/index.html -print -quit 2>/dev/null)" ]
+}
 
 echo "Backroom deploy preflight (read-only)"
 
@@ -48,6 +54,9 @@ fi
 # 4. web build present (needed by the dry run)
 if [ -f apps/web/dist/index.html ]; then
   WEB_READY=1; ok "web build exists (apps/web/dist/index.html)"
+  if web_build_stale; then
+    warn "web build is older than the newest file under apps/web/src (not a failure)" "npm run build -w apps/web"
+  fi
 else
   WEB_READY=0; bad "web build is missing (apps/web/dist/index.html)" "npm run build -w apps/web"
 fi
