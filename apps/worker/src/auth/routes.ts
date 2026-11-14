@@ -16,6 +16,8 @@ const LINK_TTL_MS = 900_000;
 const DESKTOP_CODE_TTL_MS = 120_000;
 /** Phase 6: desktop code exchanges allowed per IP per hour. */
 export const EXCHANGE_PER_IP_PER_HOUR = 30;
+/** P6-R9: sign-in requests allowed per IP per hour (a whole club behind one NAT must fit). */
+export const START_PER_IP_PER_HOUR = 100;
 const CLEAR_SITE_DATA = '"cache", "storage"';
 
 function constantTimeEqual(a: string, b: string): boolean {
@@ -35,7 +37,7 @@ authRoutes.post('/start', async (c) => {
   const ip = c.req.header('CF-Connecting-IP') ?? 'unknown';
 
   const emailOk = await hitRateLimit(db, `start:email:${email}`, 5, HOUR_MS, now);
-  const ipOk = await hitRateLimit(db, `start:ip:${ip}`, 20, HOUR_MS, now);
+  const ipOk = await hitRateLimit(db, `start:ip:${ip}`, START_PER_IP_PER_HOUR, HOUR_MS, now);
   if (emailOk && ipOk) {
     const elig = await checkEligibility(db, email, inviteToken, c.env.OWNER_EMAIL, now);
     if (elig.ok) {

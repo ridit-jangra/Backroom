@@ -136,7 +136,7 @@ Past these, the Workers Paid plan ($5/month) needs no code changes.
 
 ## Troubleshooting
 
-- **Sign-in email not arriving.** Check the Resend dashboard (logs, domain still verified, API key valid) and the admin "emails failed" banner. Requests are rate limited to 5 per hour per email address, so repeated attempts are silently held back. If the key was stored empty (see the step 5 warning), re-set it with the stdin form.
+- **Sign-in email not arriving.** Check the Resend dashboard (logs, domain still verified, API key valid) and the admin "emails failed" banner. Requests are rate limited to 5 per hour per email address and 100 per hour per IP address (a group on one network shares an IP), so repeated attempts are silently held back. If the key was stored empty (see the step 5 warning), re-set it with the stdin form.
 - **Cloudflare error 1027.** The daily Worker request limit was hit; it resets at 00:00 UTC.
 - **`503 storage_busy` on upload** ("Storage has reached a free-tier limit. Try again later."). A KV daily limit (1k writes, 1k deletes or 100k reads) is used up; it resets at 00:00 UTC. `blob_leaked` log lines mean a cleanup delete hit the limit and left a blob behind.
 - **`413 quota_exceeded`.** The workspace's files, thumbnails and custom emoji together reached 900 MB. Delete messages with large files (their files are removed by the next daily cron) or unused custom emoji.

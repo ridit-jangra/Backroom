@@ -27,7 +27,7 @@ Safari refuses Secure cookies on http://localhost — use Chrome or Firefox loca
 
 ### Browser walkthrough
 
-1. Open http://localhost:8787 and request a sign-in link for your `OWNER_EMAIL`.
+1. Open http://localhost:8787 and request a sign-in link for your `OWNER_EMAIL`. Sign-in requests are rate limited to 5 per hour per email address and 100 per hour per IP address (enough for a whole club on one network); over the limit the page still says "check your email" but nothing is sent.
 2. Copy the `Sign-in link ...` URL from the terminal, open it, and click "Sign in". You land in `clubhack` with the `#general` channel.
 3. Create an invite. In the browser dev tools, copy the value of the `backroom_session` cookie, then run:
 

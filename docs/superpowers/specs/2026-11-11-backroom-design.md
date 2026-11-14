@@ -217,7 +217,7 @@ state-changing requests require a matching `Origin`.
 ## 7. Auth
 
 - Magic-link email via Resend, from a domain the operator verifies in Resend.
-- `POST /auth/start` rate limits: 5/hour per email, 20/hour per IP (D1
+- `POST /auth/start` rate limits: 5/hour per email, 100/hour per IP (D1
   `rate_limits`). Same response whether or not the address is eligible.
 - Eligible to receive a link: existing active member, holder of a valid invite,
   or `OWNER_EMAIL` while the workspace has no owner.

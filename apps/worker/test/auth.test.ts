@@ -44,6 +44,23 @@ it('start is rate limited per email', async () => {
   expect(sent).toHaveLength(5);
 });
 
+it('start allows 100 requests per IP per hour (P6-R9: a club on one NAT can sign in)', async () => {
+  const { app, sent } = setup();
+  const ip = { 'CF-Connecting-IP': '198.51.100.20' };
+  // 99 requests for addresses that get no mail, then the owner: still within 100/h for this IP.
+  for (let i = 0; i < 99; i++) {
+    expect((await post(app, '/auth/start', { email: `guest${i}@test.dev` }, ip)).status).toBe(200);
+  }
+  await post(app, '/auth/start', { email: 'owner@test.dev' }, ip);
+  expect(sent.map((s) => s.to)).toEqual(['owner@test.dev']);
+  // The 101st request from that IP is held back (still {ok:true}); another IP is unaffected.
+  const held = await post(app, '/auth/start', { email: 'owner@test.dev' }, ip);
+  expect(held.status).toBe(200);
+  expect(sent).toHaveLength(1);
+  await post(app, '/auth/start', { email: 'owner@test.dev' }, { 'CF-Connecting-IP': '198.51.100.21' });
+  expect(sent).toHaveLength(2);
+});
+
 it('start swallows mailer failures and still returns 200', async () => {
   const app = createApp(testDeps({ mailer: { sendMagicLink: async () => { throw new Error('boom'); } } }));
   const res = await post(app, '/auth/start', { email: 'owner@test.dev' });
