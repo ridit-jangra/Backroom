@@ -128,7 +128,7 @@ Restoring overwrites the database in place; check the timestamp first.
 | D1 rows written | 100k/day | about 5 to 10 rows per message including FTS |
 | D1 rows read | 5M/day | ample |
 | D1 / DO storage | 5 GB total | text is small |
-| Workers KV | 1 GB storage, 25 MiB per value, 100k reads/day, 1k writes/day, 1k deletes/day | files, thumbnails and custom emoji together capped at 900 MB per workspace; an image message is 2 writes and 1 read, plus 2 reads per viewer, so about 500 image messages a day; each 304 is a read; cron cleanup at most 200 deletes/day, so a big orphan backlog drains slowly |
+| Workers KV | 1 GB storage, 25 MiB per value, 100k reads/day, 1k writes/day, 1k deletes/day | files, thumbnails and custom emoji together capped at 900 MB per workspace; an image message is 2 writes and 1 read, plus 2 reads per viewer, so about 500 image messages a day; each 304 is a read; custom emoji uploads are capped at 200 a day per workspace (`429 emoji_daily_limit`), so a big emoji import takes several days but leaves about 800 writes for files; cron cleanup at most 200 deletes/day, so a big orphan backlog drains slowly |
 | Static assets | 20,000 files, 25 MiB/file | about 3,700 emoji SVGs plus the app |
 | Resend | about 100 emails/day | magic links only |
 

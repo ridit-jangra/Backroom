@@ -67,6 +67,9 @@ async function seed() {
         ['start:ip:119m', T - 119 * 60_000],
         ['start:ip:121m', T - 121 * 60_000],
         ['start:email:old', T - 3 * D],
+        // P6-R10 daily emoji counters live for their whole UTC day (and a spare one), not 2 h.
+        ['emoji:day:WS:today', T - 5 * H],
+        ['emoji:day:WS:old', T - 3 * D],
       ] as const
     ).map(([k, w]) => env.DB.prepare('INSERT INTO rate_limits (key, window_start, count) VALUES (?, ?, 3)').bind(k, w)),
   ]);
@@ -85,10 +88,10 @@ describeBackends('cleanupAuth', () => {
 
   it('deletes only expired/used auth rows older than a day and windows older than 2 h', async () => {
     await seed();
-    expect(await cleanupAuth(env.DB, T)).toEqual({ loginTokens: 2, desktopCodes: 2, rateLimits: 2 });
+    expect(await cleanupAuth(env.DB, T)).toEqual({ loginTokens: 2, desktopCodes: 2, rateLimits: 3 });
     expect(await tokens()).toEqual(['lt-expired-23h', 'lt-live', 'lt-used-1h']);
     expect(await codes()).toEqual(['dc-expired-23h', 'dc-live', 'dc-used-1h']);
-    expect(await limits()).toEqual(['start:ip:119m', 'start:ip:live']);
+    expect(await limits()).toEqual(['emoji:day:WS:today', 'start:ip:119m', 'start:ip:live']);
     // idempotent
     expect(await cleanupAuth(env.DB, T)).toEqual({ loginTokens: 0, desktopCodes: 0, rateLimits: 0 });
   });
@@ -118,7 +121,7 @@ describeBackends('cleanupAuth', () => {
     }
     expect(await tokens()).toEqual(['lt-expired-23h', 'lt-live', 'lt-used-1h']);
     expect(await codes()).toEqual(['dc-expired-23h', 'dc-live', 'dc-used-1h']);
-    expect(await limits()).toEqual(['start:ip:119m', 'start:ip:live']);
+    expect(await limits()).toEqual(['emoji:day:WS:today', 'start:ip:119m', 'start:ip:live']);
     expect(deleted).toEqual([orphanKey]);
     expect(await blobHead(orphanKey)).toBeNull();
     expect(await blobHead(`ws/${WS}/emoji/keepme`)).not.toBeNull();

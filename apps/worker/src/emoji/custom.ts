@@ -77,6 +77,17 @@ export function emojiKey(workspaceId: string, emojiId: string): string {
 const NAME_TAKEN_RE = /UNIQUE constraint failed: custom_emoji\.workspace_id, custom_emoji\.name/;
 const isNameTaken = (e: unknown): boolean =>
   e instanceof Error && (NAME_TAKEN_RE.test(e.message) || (e.cause !== undefined && isNameTaken(e.cause)));
+/** Prefix of the per-workspace, per-UTC-day upload counters in rate_limits (P6-R10); the cron keeps them 2 days. */
+export const EMOJI_DAY_KEY_PREFIX = 'emoji:day:';
+
+/** rate_limits key counting a workspace's custom emoji image uploads on the UTC day of `now`. */
+export function emojiDayKey(workspaceId: string, now: number): string {
+  return `${EMOJI_DAY_KEY_PREFIX}${workspaceId}:${new Date(now).toISOString().slice(0, 10)}`;
+}
+
+export const emojiDailyLimit = () =>
+  new ApiError(429, 'emoji_daily_limit', 'Custom emoji limit reached for today. Try again tomorrow.');
+
 export const nameTaken = () => new ApiError(409, 'name_taken', 'A custom emoji with that name already exists.');
 
 /**

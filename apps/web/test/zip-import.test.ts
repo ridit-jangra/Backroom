@@ -70,6 +70,37 @@ describe('zip import', () => {
     expect(() => readEmojiZip(zipSync(many))).toThrow('zip_too_large');
   });
 
+  it('stops at the first 429 or 503 and reports imported and remaining (P6-R10)', async () => {
+    for (const [status, code, message] of [
+      [429, 'emoji_daily_limit', 'Custom emoji limit reached for today. Try again tomorrow.'],
+      [503, 'storage_busy', 'Storage has reached a free-tier limit. Try again later.'],
+    ] as const) {
+      const entries = Array.from({ length: 20 }, (_, i) => ({ fileName: `e${i}.png`, name: `e${i}`, file: new File([png(32, 32) as BlobPart], `e${i}.png`) }));
+      const called: string[] = [];
+      const results: ImportResult[] = [];
+      const outcome = await importEmoji(
+        entries,
+        async (name) => {
+          called.push(name);
+          await new Promise((r) => setTimeout(r, 1));
+          if (Number(name.slice(1)) >= 5) throw new ApiClientError(status, code, message);
+        },
+        (r) => results.push(r),
+      );
+      // The first refusal stops new uploads; the (at most 2) uploads already in flight finish.
+      expect(called.length).toBeLessThanOrEqual(8);
+      const added = results.filter((r) => r.status === 'added').length;
+      expect(added).toBe(5);
+      expect(outcome).toEqual({ stopped: message, imported: 5, remaining: 20 - 5 });
+      expect(results.find((r) => r.status === 'failed')).toMatchObject({ message });
+    }
+  });
+
+  it('a finished import reports no stop', async () => {
+    const entries = Array.from({ length: 4 }, (_, i) => ({ fileName: `e${i}.png`, name: `e${i}`, file: new File([png(32, 32) as BlobPart], `e${i}.png`) }));
+    expect(await importEmoji(entries, async () => {}, () => undefined)).toEqual({ stopped: null, imported: 4, remaining: 0 });
+  });
+
   it('concurrency never exceeds 3', async () => {
     const entries = Array.from({ length: 12 }, (_, i) => ({ fileName: `e${i}.png`, name: `e${i}`, file: new File([png(32, 32) as BlobPart], `e${i}.png`) }));
     let active = 0;

@@ -12,6 +12,8 @@ export const CUSTOM_EMOJI_UPLOAD_MAX_BYTES = 139_264;
 export const CUSTOM_EMOJI_MIN_SIDE = 32;
 export const CUSTOM_EMOJI_MAX_SIDE = 4_096;
 export const CUSTOM_EMOJI_LIMIT = 2_000;
+/** P6-R10: custom emoji image uploads per workspace per UTC day (each is one KV write; aliases are free). */
+export const CUSTOM_EMOJI_DAILY_LIMIT = 200;
 export const MAX_DISTINCT_REACTIONS = 50;
 
 export const EmojiName = z.string().regex(EMOJI_NAME_RE);

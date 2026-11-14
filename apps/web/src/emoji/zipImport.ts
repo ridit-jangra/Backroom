@@ -92,15 +92,26 @@ const ENTRY_MESSAGES = {
   duplicate: 'Duplicate name in archive',
 } as const;
 
+/** What a bulk import did: `stopped` is the server's message when it refused with 429 or 503 (P6-R10). */
+export type ImportOutcome = { stopped: string | null; imported: number; remaining: number };
+
+/**
+ * Uploads the importable entries, at most `concurrency` at a time. The first 429 (the daily emoji limit) or 503
+ * (storage busy) stops it: nothing new is sent, uploads already in flight finish. `remaining` counts the entries
+ * not tried plus those refused that way, so the same zip can be imported again later (added names are skipped).
+ */
 export async function importEmoji(
   entries: ZipEntry[],
   upload: (name: string, file: File) => Promise<void>,
   onResult: (r: ImportResult) => void,
   concurrency = 3,
-): Promise<void> {
+): Promise<ImportOutcome> {
   let next = 0;
+  let stopped: string | null = null;
+  let imported = 0;
+  let refused = 0;
   async function worker() {
-    while (next < entries.length) {
+    while (stopped === null && next < entries.length) {
       const e = entries[next++]!;
       const base = { fileName: e.fileName, name: e.name };
       if (e.error || !e.file) {
@@ -109,12 +120,21 @@ export async function importEmoji(
       }
       try {
         await upload(e.name, e.file);
+        imported++;
         onResult({ ...base, status: 'added', message: 'Added' });
       } catch (err) {
         if (err instanceof ApiClientError && err.status === 409) onResult({ ...base, status: 'skipped', message: 'Already exists' });
-        else onResult({ ...base, status: 'failed', message: err instanceof ApiClientError ? err.message : 'Upload failed' });
+        else {
+          if (err instanceof ApiClientError && (err.status === 429 || err.status === 503)) {
+            stopped ??= err.message;
+            refused++;
+          }
+          onResult({ ...base, status: 'failed', message: err instanceof ApiClientError ? err.message : 'Upload failed' });
+        }
       }
     }
   }
   await Promise.all(Array.from({ length: Math.max(1, Math.min(concurrency, entries.length)) }, worker));
+  const untried = entries.slice(next).filter((e) => !e.error && e.file).length;
+  return { stopped, imported, remaining: stopped === null ? 0 : untried + refused };
 }

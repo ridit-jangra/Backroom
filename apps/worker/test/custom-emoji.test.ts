@@ -1,10 +1,10 @@
 import { createExecutionContext, waitOnExecutionContext } from 'cloudflare:test';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import type { CustomEmoji } from '@backroom/protocol';
+import { CUSTOM_EMOJI_DAILY_LIMIT, type CustomEmoji } from '@backroom/protocol';
 import type { Hono } from 'hono';
 import type { AppEnv } from '../src/app';
 import { createApp } from '../src/app';
-import { readSettings } from '../src/emoji/custom';
+import { emojiDayKey, readSettings } from '../src/emoji/custom';
 import {
   blobHead,
   blobKeys,
@@ -248,6 +248,31 @@ describeBackends('custom emoji', () => {
     expect(res.status).toBe(400);
     expect(await errCode(res)).toBe('limit_reached');
     expect(await objectCount()).toBe(0);
+  });
+
+  it('emoji_daily_limit after 200 image uploads per workspace per UTC day; aliases are free (P6-R10)', async () => {
+    expect(CUSTOM_EMOJI_DAILY_LIMIT).toBe(200);
+    let now = Date.UTC(2027, 0, 15, 23, 0);
+    const { mailer, sent } = captureMailer();
+    const app = createApp(testDeps({ mailer, now: () => now }));
+    const [owner] = await seedUsers(app, sent, ['owner@test.dev']);
+    // 199 creations already today: the 200th is allowed, the 201st is refused before any storage put.
+    await env.DB.prepare('INSERT INTO rate_limits (key, window_start, count) VALUES (?, ?, 199)')
+      .bind(emojiDayKey(CLUBHACK_WS, now), now - 3_600_000)
+      .run();
+    await created(await uploadEmoji(app, owner!.cookie, 'twohundred', png(32, 32)));
+    const before = await objectCount();
+    const res = await uploadEmoji(app, owner!.cookie, 'onetoomany', png(32, 32));
+    expect(res.status).toBe(429);
+    expect(await res.json()).toEqual({
+      error: { code: 'emoji_daily_limit', message: 'Custom emoji limit reached for today. Try again tomorrow.' },
+    });
+    expect(await objectCount()).toBe(before);
+    // An alias stores nothing, so it does not count.
+    await created(await send(app, 'POST', '/w/clubhack/emoji', { name: 'tooalias', aliasFor: 'twohundred' }, owner!.cookie));
+    // A new UTC day starts a new count.
+    now = Date.UTC(2027, 0, 16, 0, 1);
+    await created(await uploadEmoji(app, owner!.cookie, 'tomorrow', png(32, 32)));
   });
 
   it('serving headers and access', async () => {

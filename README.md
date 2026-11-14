@@ -80,6 +80,7 @@ Custom emoji limits:
 - At most 131,072 bytes (128 KB), and 32x32 to 4,096x4,096 pixels.
 - Name matches `^[a-z0-9_-]{1,32}$`, is unique per workspace and cannot equal a built-in emoji name or alias.
 - At most 2,000 per workspace.
+- At most 200 image uploads per workspace per UTC day (each is one KV write; aliases are free), so a bulk import leaves about 800 of KV's 1,000 daily writes for files. Over it, uploads get `429 emoji_daily_limit` ("Custom emoji limit reached for today. Try again tomorrow."). The zip importer stops at the first 429 or 503 and shows how many were imported and how many remain; importing the same zip again later skips the names already added.
 - By default only admins may add them. The owner can allow everyone with `PATCH /w/:slug/settings` and body `{"customEmojiPolicy":"everyone"}` (or `"admins"` to switch back). The creator, an admin or the owner may delete an emoji (`DELETE /emoji/:id`); deleting it also deletes aliases pointing to it.
 - Images are served by `GET /emoji/:id` to active workspace members only, with `X-Content-Type-Options: nosniff`, `Content-Security-Policy: default-src 'none'; sandbox` and long-lived private caching.
 

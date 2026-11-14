@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { canAddCustomEmoji, type Bootstrap, type CustomEmoji } from '@backroom/protocol';
 import { api, apiUpload, ApiClientError } from '../api';
 import { EmojiImg } from '../emoji/EmojiImg';
-import { importEmoji, readEmojiZip, type ImportResult } from '../emoji/zipImport';
+import { importEmoji, readEmojiZip, type ImportOutcome, type ImportResult } from '../emoji/zipImport';
 
 const messageOf = (e: unknown) => (e instanceof ApiClientError ? e.message : 'Something went wrong. Try again.');
 
@@ -19,6 +19,7 @@ export function CustomEmojiPage({ slug }: { slug: string }) {
   const [aliasFor, setAliasFor] = useState('');
   const [results, setResults] = useState<ImportResult[] | null>(null);
   const [importing, setImporting] = useState(false);
+  const [outcome, setOutcome] = useState<ImportOutcome | null>(null);
   const [formKey, setFormKey] = useState(0);
 
   const refresh = useCallback(async () => {
@@ -108,6 +109,7 @@ export function CustomEmojiPage({ slug }: { slug: string }) {
     if (!zip) return;
     setError('');
     setResults([]);
+    setOutcome(null);
     let entries;
     try {
       entries = readEmojiZip(new Uint8Array(await zip.arrayBuffer()));
@@ -122,7 +124,7 @@ export function CustomEmojiPage({ slug }: { slug: string }) {
     }
     setImporting(true);
     try {
-      await importEmoji(entries, uploadOne, (r) => setResults((l) => [...(l ?? []), r]));
+      setOutcome(await importEmoji(entries, uploadOne, (r) => setResults((l) => [...(l ?? []), r])));
     } finally {
       setImporting(false);
     }
@@ -179,6 +181,11 @@ export function CustomEmojiPage({ slug }: { slug: string }) {
               <p role="status">
                 {count('added')} added, {count('skipped')} skipped, {count('failed')} failed
               </p>
+              {outcome?.stopped && (
+                <p role="alert">
+                  {`Import stopped: ${outcome.stopped} ${outcome.imported} imported, ${outcome.remaining} remaining. Import the same zip again later; emoji already added are skipped.`}
+                </p>
+              )}
               <table aria-label="Import results">
                 <thead>
                   <tr><th>File</th><th>Name</th><th>Result</th></tr>

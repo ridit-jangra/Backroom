@@ -29,6 +29,9 @@ function open(role: 'member' | 'admin', policy: 'admins' | 'everyone' = 'admins'
       if (/\/bootstrap(\?|$)/.test(url)) return ok(makeBootstrap({ workspace: { id: 'w', slug: 'clubhack', name: 'Club Hack', settings: { customEmojiPolicy: policy } } }, role));
       if (url === '/w/clubhack/emoji' && method === 'GET') return ok({ emoji: current });
       if (url === '/w/clubhack/emoji' && method === 'POST') {
+        if (init?.body instanceof FormData && String(init.body.get('name')).startsWith('over')) {
+          return ok({ error: { code: 'emoji_daily_limit', message: 'Custom emoji limit reached for today. Try again tomorrow.' } }, 429);
+        }
         if (init?.body instanceof FormData) current = [...current, em(String(init.body.get('name')))];
         return ok({ emoji: current[current.length - 1] }, 201);
       }
@@ -107,5 +110,19 @@ describe('Custom emoji page', () => {
     const table = screen.getByRole('table', { name: 'Import results' });
     expect(within(table).getByText('Added')).toBeTruthy();
     expect(within(table).getByText('Not a PNG, GIF or JPEG')).toBeTruthy();
+  });
+
+  it('zip import stops at the daily limit and says how many were imported and remain', async () => {
+    open('admin');
+    const files: Record<string, Uint8Array> = { 'a.png': png() };
+    for (let i = 0; i < 6; i++) files[`over${i}.png`] = png();
+    const zip = zipSync(files);
+    const f = new File([zip as BlobPart], 'pack.zip', { type: 'application/zip' });
+    (f as unknown as { arrayBuffer: () => Promise<ArrayBuffer> }).arrayBuffer = async () => zip.buffer.slice(zip.byteOffset, zip.byteOffset + zip.byteLength) as ArrayBuffer;
+    await userEvent.upload(await screen.findByLabelText('Import zip'), f);
+    const alert = await screen.findByText(/Import stopped:/);
+    expect(alert.textContent).toBe(
+      'Import stopped: Custom emoji limit reached for today. Try again tomorrow. 1 imported, 6 remaining. Import the same zip again later; emoji already added are skipped.',
+    );
   });
 });

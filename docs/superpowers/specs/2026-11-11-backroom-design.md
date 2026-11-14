@@ -291,7 +291,11 @@ state-changing requests require a matching `Origin`.
 - **Bulk import:** the browser unzips an archive of `name.ext` images (e.g. an
   export from another workspace) and uploads each through the normal endpoint,
   showing per-file results. Done client-side to stay within the Worker's 10 ms
-  CPU limit.
+  CPU limit. At most 200 custom emoji image uploads per workspace per UTC day
+  (each is a KV write; aliases are free), so imports leave about 800 of KV's
+  1k daily writes for files: over it, `429 emoji_daily_limit` ("Custom emoji
+  limit reached for today. Try again tomorrow."). The importer stops at the
+  first 429 or 503 and says how many were imported and how many remain.
 
 ## 10. Search
 
@@ -373,7 +377,7 @@ state-changing requests require a matching `Origin`.
 | D1 rows written | 100k/day | ~5–10 rows per message incl. FTS → ~10k messages/day headroom |
 | D1 rows read | 5M/day | ample |
 | D1 / DO storage | 5 GB total | text is small |
-| Workers KV | 1 GB storage, 25 MiB/value, 100k reads/day, 1k writes/day, 1k deletes/day | all blobs (files, thumbnails, custom emoji) capped at 900 MB/workspace; an image message costs 2 writes (file + thumbnail) and 1 read (the sniff peek), plus per viewer 1 read for the thumbnail and 1 for the full file, so 1k writes/day is about 500 image messages a day for the whole deployment; every `304` also spends a KV read; custom emoji are 1 write each; the cron removes at most 200 orphans per run (≤ 200 deletes/day), so a large orphan backlog drains slowly; at a daily limit uploads get `503 storage_busy` |
+| Workers KV | 1 GB storage, 25 MiB/value, 100k reads/day, 1k writes/day, 1k deletes/day | all blobs (files, thumbnails, custom emoji) capped at 900 MB/workspace; an image message costs 2 writes (file + thumbnail) and 1 read (the sniff peek), plus per viewer 1 read for the thumbnail and 1 for the full file, so 1k writes/day is about 500 image messages a day for the whole deployment; every `304` also spends a KV read; custom emoji are 1 write each, at most 200 a day per workspace; the cron removes at most 200 orphans per run (≤ 200 deletes/day), so a large orphan backlog drains slowly; at a daily limit uploads get `503 storage_busy` |
 | Static assets | 20,000 files, 25 MiB/file | ~3,700 emoji SVGs + app bundle |
 | Resend | free tier (~100 emails/day) | magic links only |
 

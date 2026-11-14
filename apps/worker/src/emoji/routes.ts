@@ -1,5 +1,6 @@
 import { Hono } from 'hono';
 import {
+  CUSTOM_EMOJI_DAILY_LIMIT,
   CUSTOM_EMOJI_LIMIT,
   CUSTOM_EMOJI_MAX_BYTES,
   CUSTOM_EMOJI_MAX_SIDE,
@@ -22,12 +23,24 @@ import { MEDIA_SECURITY_HEADERS, blobPendingResponse } from '../lib/media';
 import { requireSession } from '../middleware/session';
 import { requireMember } from '../workspace/access';
 import { readJson } from '../lib/http';
-import { createCustomAlias, createCustomEmoji, deleteCustomEmoji, limitReached, listCustomEmoji, nameTaken, readSettings } from './custom';
+import { hitRateLimit } from '../lib/rateLimit';
+import {
+  createCustomAlias,
+  createCustomEmoji,
+  deleteCustomEmoji,
+  emojiDailyLimit,
+  emojiDayKey,
+  limitReached,
+  listCustomEmoji,
+  nameTaken,
+  readSettings,
+} from './custom';
 import { sniffImage } from './image';
 
 export const emojiRoutes = new Hono<AppEnv>();
 
 const ID_RE = /^[0-9A-Z]{26}$/;
+const DAY_MS = 86_400_000;
 const SERVABLE = new Set(['image/png', 'image/gif', 'image/jpeg']);
 const tooLarge = () => new ApiError(413, 'too_large', 'Emoji images must be 128 KB or smaller.');
 const invalidRequest = () => new ApiError(400, 'invalid_request', 'Send a multipart form with a name and an image.');
@@ -113,7 +126,12 @@ emojiRoutes.post('/w/:slug/emoji', requireSession, async (c) => {
   // Custom emoji share the workspace's blob quota with files and thumbnails; the insert re-checks atomically.
   if ((await blobBytesUsed(db, workspaceId)) + bytes.byteLength > FILES_QUOTA_BYTES) throw quotaExceeded();
 
-  const emoji = await createCustomEmoji(c.env, { workspaceId, userId, name, bytes, mime: sniffed.mime, now: c.var.deps.now() });
+  // P6-R10: each upload is one KV write; cap them per UTC day so a bulk import leaves writes for files. Counted
+  // last, right before the put, so a request refused above does not spend the day's allowance.
+  const now = c.var.deps.now();
+  if (!(await hitRateLimit(db, emojiDayKey(workspaceId, now), CUSTOM_EMOJI_DAILY_LIMIT, DAY_MS, now))) throw emojiDailyLimit();
+
+  const emoji = await createCustomEmoji(c.env, { workspaceId, userId, name, bytes, mime: sniffed.mime, now });
 
   await broadcast(c.env, workspaceId, { added: [emoji], removed: [] });
   return c.json({ emoji }, 201);
