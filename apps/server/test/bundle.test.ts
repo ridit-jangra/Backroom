@@ -5,7 +5,7 @@
 import { type ChildProcess, execFileSync, spawn } from 'node:child_process';
 import { get as httpGet } from 'node:http';
 import { existsSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { createServer } from 'node:net';
+import { connect as netConnect, createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -81,6 +81,21 @@ function rawGet(path: string, headers: Record<string, string>): Promise<{ status
       res.on('data', (d) => (body += d));
       res.on('end', () => resolve({ status: res.statusCode!, headers: res.headers, body }));
     }).on('error', reject);
+  });
+}
+
+/** Sends raw bytes on a fresh connection; resolves with everything the server wrote before closing (or 2 s). */
+function raw(bytes: string, waitMs = 2_000): Promise<string> {
+  return new Promise((resolve) => {
+    let out = '';
+    const s = netConnect(port, '127.0.0.1', () => s.write(bytes));
+    const timer = setTimeout(() => s.destroy(), waitMs);
+    s.on('data', (d) => (out += d.toString('latin1')));
+    s.on('error', () => {});
+    s.on('close', () => {
+      clearTimeout(timer);
+      resolve(out);
+    });
   });
 }
 
@@ -324,6 +339,36 @@ describe('the built server (dist/server.mjs)', () => {
     const after = rateLimitRows();
     expect(after.map((x) => x.key)).toEqual(['start:ip:127.0.0.1']);
     expect(after[0]!.count).toBe(before[0]!.count + 1);
+  });
+
+  it.each([
+    ['TRACE upgrade on /ws', 'TRACE /ws HTTP/1.1\r\nHost: x\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n'],
+    ['TRACK upgrade on /ws', 'TRACK /ws HTTP/1.1\r\nHost: x\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n'],
+    ['POST upgrade on /ws', 'POST /ws HTTP/1.1\r\nHost: x\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nContent-Length: 0\r\n\r\n'],
+    ['GET * upgrade', 'GET * HTTP/1.1\r\nHost: x\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n'],
+    ['upgrade with a malformed Host', 'GET /ws HTTP/1.1\r\nHost: [bad\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n'],
+    ['absolute-form upgrade', 'GET http://evil.example/ws HTTP/1.1\r\nHost: x\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n'],
+    ['GET *', 'GET * HTTP/1.1\r\nHost: x\r\n\r\n'],
+    ['OPTIONS *', 'OPTIONS * HTTP/1.1\r\nHost: x\r\n\r\n'],
+    ['malformed Host', 'GET /health HTTP/1.1\r\nHost: [bad\r\nConnection: close\r\n\r\n'],
+    ['Host with a path', 'GET /health HTTP/1.1\r\nHost: a/b?c\r\nConnection: close\r\n\r\n'],
+    ['absolute-form request', 'GET http://evil.example/health HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n'],
+    ['TRACE', 'TRACE / HTTP/1.1\r\nHost: x\r\n\r\n'],
+    ['TRACK', 'TRACK / HTTP/1.1\r\nHost: x\r\n\r\n'],
+    ['CONNECT', 'CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n'],
+  ])('hostile request (%s) never stops the server', async (_name, bytes) => {
+    const reply = await raw(bytes);
+    const status = Number(/^HTTP\/1\.1 (\d{3})/.exec(reply)?.[1] ?? 0);
+    // A refusal, a plain close, or (for a fixable Host / absolute-form target) a normal answer: never a 5xx or a crash.
+    expect(status < 500, reply.split('\r\n')[0]).toBe(true);
+    const h = await req('/health');
+    expect(h.status).toBe(200);
+    expect(proc.exitCode).toBeNull();
+  });
+
+  it('GET * is a 400, not a 500', async () => {
+    expect(await raw('GET * HTTP/1.1\r\nHost: x\r\n\r\n')).toMatch(/^HTTP\/1\.1 400 /);
+    expect(jsonLines().some((l) => l.code === 'uncaught_exception' || l.code === 'request_failed')).toBe(false);
   });
 
   it('SIGTERM: sockets close with 1001, the process exits 0, and the database is intact', async () => {

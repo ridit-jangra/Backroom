@@ -2,7 +2,7 @@
  * The HTTP layer: routes each request to the app or the static site, applies the trusted client IP and the body
  * size limit, runs HEAD as GET with the body cancelled, and hands WebSocket upgrades to the bridge.
  */
-import { type IncomingMessage, type Server, type ServerResponse, createServer } from 'node:http';
+import { type IncomingMessage, STATUS_CODES, type Server, type ServerResponse, createServer } from 'node:http';
 import type { Duplex } from 'node:stream';
 import { getRequestListener } from '@hono/node-server';
 import { applyClientIp } from './client-ip';
@@ -92,6 +92,43 @@ export function createRequestHandler(deps: HandlerDeps): (req: Request) => Promi
   };
 }
 
+/** Methods the fetch API can represent (it refuses CONNECT, TRACE and TRACK) and the app may answer. */
+const METHODS = new Set(['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']);
+
+/**
+ * Puts the request line and Host into a shape nothing downstream can choke on: an absolute-form target becomes its
+ * path, and Host is replaced by APP_ORIGIN's host (the app never routes on Host; a forged or malformed one must
+ * not reach URL parsing). Returns false for targets that are not a path at all (`*`, authority-form, garbage).
+ */
+export function normalizeTarget(req: IncomingMessage, appHost: string): boolean {
+  let target = req.url ?? '';
+  if (!target.startsWith('/')) {
+    if (!/^https?:\/\//i.test(target)) return false;
+    try {
+      const u = new URL(target);
+      target = u.pathname + u.search;
+    } catch {
+      return false;
+    }
+  }
+  if (target.startsWith('//')) target = `/${target.replace(/^\/+/, '')}`;
+  try {
+    // Parsing must succeed on the host the app will see.
+    new URL(`http://${appHost}${target}`);
+  } catch {
+    return false;
+  }
+  req.url = target;
+  const raw: string[] = [];
+  for (let i = 0; i + 1 < req.rawHeaders.length; i += 2) {
+    if (req.rawHeaders[i]!.toLowerCase() !== 'host') raw.push(req.rawHeaders[i]!, req.rawHeaders[i + 1]!);
+  }
+  raw.unshift('Host', appHost);
+  req.rawHeaders = raw;
+  req.headers.host = appHost;
+  return true;
+}
+
 /** The app's view of an upgrade request (a GET without a body); the URL is built on APP_ORIGIN, never on Host. */
 export function upgradeRequest(req: IncomingMessage, appOrigin: string): Request {
   const headers = new Headers();
@@ -103,7 +140,33 @@ export function upgradeRequest(req: IncomingMessage, appOrigin: string): Request
     }
   }
   const path = req.url?.startsWith('/') ? req.url : '/';
-  return new Request(appOrigin + path, { method: req.method ?? 'GET', headers });
+  return new Request(appOrigin + path, { method: 'GET', headers });
+}
+
+/** A plain error reply on a raw (upgrade) socket, then the socket is destroyed once flushed. */
+function refuseSocket(socket: Duplex, status: number, reason: string): void {
+  try {
+    if (socket.writable) {
+      const body = JSON.stringify({ error: { code: status === 405 ? 'method_not_allowed' : 'invalid_request', message: reason } });
+      socket.end(
+        `HTTP/1.1 ${status} ${STATUS_CODES[status] ?? ''}\r\ncontent-type: application/json\r\ncontent-length: ${Buffer.byteLength(body)}\r\nconnection: close\r\n\r\n${body}`,
+      );
+      socket.once('finish', () => socket.destroy());
+      setTimeout(() => socket.destroy(), 2_000).unref();
+    } else socket.destroy();
+  } catch {
+    socket.destroy();
+  }
+}
+
+function refuseResponse(res: ServerResponse, status: number, code: string, message: string): void {
+  if (res.headersSent) {
+    res.destroy();
+    return;
+  }
+  const body = JSON.stringify({ error: { code, message } });
+  res.writeHead(status, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body), connection: 'close' });
+  res.end(body);
 }
 
 export interface HttpServerDeps {
@@ -141,8 +204,10 @@ export function createHttpServer(deps: HttpServerDeps): HttpServer {
   const idleWaiters: (() => void)[] = [];
   const upgraded = new Set<Duplex>();
 
+  const appHost = new URL(deps.appOrigin).host;
+
+  // Nothing thrown while handling one request may escape these listeners: an uncaught exception stops the server.
   const server = createServer((req: IncomingMessage, res: ServerResponse) => {
-    applyClientIp(req, deps.trustedProxyHeader);
     active++;
     let done = false;
     const finish = () => {
@@ -153,14 +218,45 @@ export function createHttpServer(deps: HttpServerDeps): HttpServer {
     };
     res.once('close', finish);
     res.once('finish', finish);
-    void listener(req, res);
+    res.on('error', () => {});
+    try {
+      if (!METHODS.has(req.method ?? '')) {
+        res.setHeader('allow', [...METHODS].join(', '));
+        refuseResponse(res, 405, 'method_not_allowed', 'Method not allowed.');
+        return;
+      }
+      if (!normalizeTarget(req, appHost)) {
+        refuseResponse(res, 400, 'invalid_request', 'Bad request target.');
+        return;
+      }
+      applyClientIp(req, deps.trustedProxyHeader);
+      listener(req, res).catch((e: unknown) => {
+        log('error', 'request_failed', errorFields(e));
+        refuseResponse(res, 500, 'internal', 'Internal error.');
+      });
+    } catch (e) {
+      log('warn', 'request_rejected', errorFields(e));
+      refuseResponse(res, 400, 'invalid_request', 'Bad request.');
+    }
   });
 
   server.on('upgrade', (req: IncomingMessage, socket: Duplex, head: Buffer) => {
-    applyClientIp(req, deps.trustedProxyHeader);
-    upgraded.add(socket);
-    socket.once('close', () => upgraded.delete(socket));
-    void deps.bridge.handleUpgrade(req, socket, head, upgradeRequest(req, deps.appOrigin), deps.upgradeHandler);
+    socket.on('error', () => {});
+    try {
+      if (req.method !== 'GET') return refuseSocket(socket, 405, 'Method not allowed.');
+      if (!normalizeTarget(req, appHost)) return refuseSocket(socket, 400, 'Bad request target.');
+      applyClientIp(req, deps.trustedProxyHeader);
+      const request = upgradeRequest(req, deps.appOrigin);
+      upgraded.add(socket);
+      socket.once('close', () => upgraded.delete(socket));
+      deps.bridge.handleUpgrade(req, socket, head, request, deps.upgradeHandler).catch((e: unknown) => {
+        log('error', 'ws_upgrade_failed', errorFields(e));
+        socket.destroy();
+      });
+    } catch (e) {
+      log('warn', 'upgrade_rejected', errorFields(e));
+      refuseSocket(socket, 400, 'Bad request.');
+    }
   });
 
   server.on('clientError', (_err, socket) => {
