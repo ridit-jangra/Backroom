@@ -619,3 +619,43 @@ describe('outbound backpressure', () => {
     expect(raw.terminated).toBe(true);
   });
 });
+
+describe('drain waits for in-flight handlers', () => {
+  it.each(['message', 'close', 'alarm'] as const)('a slow %s handler keeps drain() pending until it finishes', async (which) => {
+    const p = probe();
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let finished = false;
+    const slow = async () => {
+      await gate;
+      finished = true;
+    };
+    if (which === 'message') p.webSocketMessage = slow;
+    else if (which === 'close') p.webSocketClose = slow;
+    else p.alarm = slow;
+    const { raw } = open(p);
+    if (which === 'message') raw.text('x');
+    else if (which === 'close') raw.peerClose(1000);
+    else {
+      await p.state.storage.setAlarm(Date.now() + 60_000);
+      void ns.runAlarm('ws-1');
+    }
+    await tick();
+    let drained = false;
+    const d = ns.drain().then(() => (drained = true));
+    await new Promise((r) => setTimeout(r, 30));
+    expect(drained).toBe(false);
+    release();
+    await d;
+    expect(finished).toBe(true);
+  });
+
+  it('a handler that rejects does not break drain', async () => {
+    const p = probe();
+    p.failing.set('message', 'reject');
+    const { raw } = open(p);
+    raw.text('x');
+    await ns.drain();
+    expect(errors.length).toBe(1);
+  });
+});

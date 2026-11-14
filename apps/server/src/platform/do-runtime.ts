@@ -404,6 +404,11 @@ export class NodeDurableObjectState {
   }
 
   waitUntil(promise: Promise<unknown>): void {
+    this.#track(promise);
+  }
+
+  /** Adds work that `drain()` waits for; removed once it settles (a rejection is swallowed here). */
+  #track(promise: Promise<unknown>): void {
     const p: Promise<unknown> = Promise.resolve(promise)
       .catch(() => {})
       .finally(() => this.#pendingWork.delete(p));
@@ -414,9 +419,12 @@ export class NodeDurableObjectState {
     return callback();
   }
 
-  /** @internal Runs a handler on the object; never throws. */
+  /** @internal Runs a handler on the object; never throws. Tracked, so `drain()` waits for it. */
   dispatch(name: HandlerName, args: unknown[]): Promise<void> {
-    return this.#target ? invoke(this.#target, name, args) : Promise.resolve();
+    if (!this.#target) return Promise.resolve();
+    const p = invoke(this.#target, name, args);
+    this.#track(p);
+    return p;
   }
 
   /** @internal */
@@ -424,7 +432,7 @@ export class NodeDurableObjectState {
     this.#sockets.delete(s);
   }
 
-  /** @internal Waits for `waitUntil` work, including work added meanwhile. */
+  /** @internal Waits for `waitUntil` work and running handlers, including any started meanwhile. */
   async drain(): Promise<void> {
     while (this.#pendingWork.size > 0) await Promise.all([...this.#pendingWork]);
   }
@@ -499,7 +507,7 @@ export class DurableObjectNamespaceShim<T extends object> {
     for (const { state } of this.#objects.values()) state.closeAll(code, reason);
   }
 
-  /** Waits for all `waitUntil` work. */
+  /** Waits for all `waitUntil` work and every handler still running (graceful shutdown). */
   async drain(): Promise<void> {
     await Promise.all([...this.#objects.values()].map(({ state }) => state.drain()));
   }
