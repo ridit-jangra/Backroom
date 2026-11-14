@@ -13,6 +13,7 @@ import {
 import { lookupEmoji } from '@backroom/emoji';
 import type { AppEnv } from '../app';
 import { hubFor } from '../hub/client';
+import { getBlobStore } from '../lib/blobs';
 import { readCappedBody } from '../lib/body';
 import { ApiError } from '../lib/errors';
 import { MEDIA_SECURITY_HEADERS } from '../lib/media';
@@ -36,8 +37,6 @@ async function broadcast(env: AppEnv['Bindings'], workspaceId: string, change: {
     console.error(JSON.stringify({ level: 'error', code: 'emoji_broadcast_failed' }));
   }
 }
-
-const hasBody = (o: R2Object | R2ObjectBody): o is R2ObjectBody => 'body' in o;
 
 emojiRoutes.get('/w/:slug/emoji', requireSession, async (c) => {
   const { workspaceId } = await requireMember(c.env.DB, c.req.param('slug'), c.var.session!.userId);
@@ -99,7 +98,7 @@ emojiRoutes.post('/w/:slug/emoji', requireSession, async (c) => {
 
   if (lookupEmoji(name)) throw new ApiError(409, 'name_taken', 'That name is used by a built-in emoji.');
 
-  // Name and limit are checked before the R2 PUT; the insert re-checks both (constraint / conditional insert) for races.
+  // Name and limit are checked before the blob PUT; the insert re-checks both (constraint / conditional insert) for races.
   const pre = await db
     .prepare(
       `SELECT COUNT(*) AS n, EXISTS (SELECT 1 FROM custom_emoji WHERE workspace_id = ?1 AND name = ?2) AS taken
@@ -129,28 +128,17 @@ emojiRoutes.get('/emoji/:id', requireSession, async (c) => {
     .first<{ key: string }>();
   if (!row) throw notFound;
 
-  const ifNoneMatch = c.req.header('If-None-Match');
-  let obj: R2Object | R2ObjectBody | null;
-  if (ifNoneMatch) {
-    try {
-      obj = await c.env.BUCKET.get(row.key, { onlyIf: new Headers({ 'If-None-Match': ifNoneMatch }) });
-    } catch {
-      // A malformed If-None-Match must not 500 (P3-R16): serve the object unconditionally.
-      obj = await c.env.BUCKET.get(row.key);
-    }
-  } else {
-    obj = await c.env.BUCKET.get(row.key);
-  }
+  // A malformed If-None-Match is ignored by the store, never a 500 (P3-R16); an empty one counts as absent.
+  const obj = await getBlobStore(c.env).get(row.key, { ifNoneMatch: c.req.header('If-None-Match') || undefined });
   if (!obj) throw notFound;
 
-  const stored = obj.httpMetadata?.contentType ?? '';
+  const stored = obj.contentType ?? '';
   const headers = new Headers({
     'Content-Type': SERVABLE.has(stored) ? stored : 'application/octet-stream',
     ...MEDIA_SECURITY_HEADERS,
-    ETag: obj.httpEtag,
+    ETag: obj.etag,
   });
-  // A conditional get whose precondition failed returns the object without a body: the etag matched.
-  if (!hasBody(obj)) return new Response(null, { status: 304, headers });
+  if (obj.notModified) return new Response(null, { status: 304, headers });
   headers.set('Content-Length', String(obj.size));
   return new Response(obj.body, { status: 200, headers });
 });

@@ -1,10 +1,22 @@
-import { createExecutionContext, createScheduledController, env, waitOnExecutionContext } from 'cloudflare:test';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createExecutionContext, createScheduledController, waitOnExecutionContext } from 'cloudflare:test';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import worker from '../src/index';
 import { createApp } from '../src/app';
-import { ORPHAN_BATCH, cleanupOrphans } from '../src/files/cleanup';
+import { ORPHAN_BATCH, ORPHAN_MAX_DELETES, cleanupOrphans } from '../src/files/cleanup';
 import { deleteMessage, sendMessage } from '../src/messaging/store';
-import { GENERAL, captureMailer, insertFile, resetDb, seedUsers, testDeps } from './helpers';
+import {
+  GENERAL,
+  blobHead,
+  blobPut,
+  captureMailer,
+  describeBackends,
+  env,
+  insertFile,
+  patchBlobBinding,
+  resetDb,
+  seedUsers,
+  testDeps,
+} from './helpers';
 
 const T = 1_800_000_000_000;
 const H = 3_600_000;
@@ -24,27 +36,29 @@ const rowExists = async (id: string) =>
   (await env.DB.prepare('SELECT 1 AS x FROM files WHERE id = ?').bind(id).first()) !== null;
 const keysOf = async (id: string) =>
   (await env.DB.prepare('SELECT r2_key AS k, thumb_key AS t FROM files WHERE id = ?').bind(id).first<{ k: string; t: string | null }>())!;
-const has = async (k: string) => (await env.BUCKET.head(k)) !== null;
+const has = async (k: string) => (await blobHead(k)) !== null;
 const fileCount = async () => (await env.DB.prepare('SELECT COUNT(*) AS n FROM files').first<{ n: number }>())!.n;
 
-async function bulk(n: number, createdAt: number, uploader: string) {
+/** `n` orphan rows (no blobs). `thumbs` gives each a thumbnail key too, so a row costs two deletes. */
+async function bulk(n: number, createdAt: number, uploader: string, opts: { thumbs?: boolean; tag?: string } = {}) {
   const stmts: D1PreparedStatement[] = [];
   for (let i = 0; i < n; i++) {
-    const id = `01BULK${String(i).padStart(20, '0')}`;
+    const id = `01BULK${opts.tag ?? ''}${String(i).padStart(20 - (opts.tag ?? '').length, '0')}`;
+    const thumb = opts.thumbs ? `ws/${WS}/${id}-thumb-${'T'.repeat(26)}` : null;
     stmts.push(
       env.DB.prepare(
         `INSERT INTO files (id, workspace_id, uploader_id, r2_key, thumb_key, name, mime, size, width, height, created_at)
-         VALUES (?, ?, ?, ?, NULL, 'b.bin', 'application/octet-stream', 0, NULL, NULL, ?)`,
-      ).bind(id, WS, uploader, `ws/${WS}/${id}`, createdAt + i),
+         VALUES (?, ?, ?, ?, ?, 'b.bin', 'application/octet-stream', 0, NULL, NULL, ?)`,
+      ).bind(id, WS, uploader, `ws/${WS}/${id}`, thumb, createdAt + i),
     );
   }
   for (let i = 0; i < stmts.length; i += 50) await env.DB.batch(stmts.slice(i, i + 50));
 }
 
-describe('cleanupOrphans', () => {
+describeBackends('cleanupOrphans', (backend) => {
   it('removes old orphans, keeps young and attached, rejects emoji keys', async () => {
     const u = await owner();
-    await env.BUCKET.put(`ws/${WS}/emoji/keepme`, bytes);
+    await blobPut(`ws/${WS}/emoji/keepme`, bytes);
     const a = await insertFile({ uploaderId: u, name: 'zebra-report.bin', createdAt: T - 25 * H, object: bytes, thumb: true });
     const ka = await keysOf(a);
     const b = await insertFile({ uploaderId: u, createdAt: T - 23 * H, object: bytes });
@@ -57,7 +71,7 @@ describe('cleanupOrphans', () => {
     expect(sent.ok).toBe(true);
     if (!sent.ok) return;
     const e = await insertFile({ uploaderId: u, createdAt: T - 30 * H, r2Key: EMOJI_KEY });
-    await env.BUCKET.put(EMOJI_KEY, bytes);
+    await blobPut(EMOJI_KEY, bytes);
 
     // run at T: A and E go; B (23 h), C (attached) and D (attached) stay
     expect(await cleanupOrphans(env, T)).toEqual({ deleted: 2, keysRejected: 1 });
@@ -83,7 +97,7 @@ describe('cleanupOrphans', () => {
 
   it('counts rejected keys (emoji key row)', async () => {
     const u = await owner();
-    await env.BUCKET.put(EMOJI_KEY, bytes);
+    await blobPut(EMOJI_KEY, bytes);
     await insertFile({ uploaderId: u, createdAt: T - 30 * H, r2Key: EMOJI_KEY });
     expect(await cleanupOrphans(env, T)).toEqual({ deleted: 1, keysRejected: 1 });
     expect(await has(EMOJI_KEY)).toBe(true);
@@ -113,23 +127,84 @@ describe('cleanupOrphans', () => {
     expect(err).toHaveBeenCalledWith(expect.stringContaining('orphan_cleanup_failed'));
   });
 
-  it('batches: 250 orphans in one run; at most 1,000 per run', async () => {
-    const u = await owner();
-    await bulk(250, T - 30 * H, u);
-    expect((await cleanupOrphans(env, T)).deleted).toBe(250);
-    await bulk(1050, T - 30 * H, u);
-    expect((await cleanupOrphans(env, T)).deleted).toBe(1000);
-    expect(await fileCount()).toBe(50);
-    expect((await cleanupOrphans(env, T)).deleted).toBe(50);
-    expect(ORPHAN_BATCH).toBe(100);
+  /** Counts every key the run hands to the blob store (KV deletes one by one, R2 takes an array). */
+  function countDeletes(): { keys: string[] } {
+    const out = { keys: [] as string[] };
+    restore = patchBlobBinding((real) => ({
+      delete: ((k: string | string[]) => {
+        out.keys.push(...[k].flat());
+        return (real.delete as (k: string | string[]) => Promise<void>)(k);
+      }) as never,
+    }));
+    return out;
+  }
+  let restore: (() => void) | undefined;
+  afterEach(() => {
+    restore?.();
+    restore = undefined;
   });
 
-  it('an R2 failure does not stop the run', async () => {
+  it('batches: at most 200 blob deletes per run (KV allows 1,000 a day); the rest waits for the next run', async () => {
+    expect(ORPHAN_BATCH).toBe(100);
+    expect(ORPHAN_MAX_DELETES).toBe(200);
+    const u = await owner();
+    await bulk(250, T - 30 * H, u);
+    const d = countDeletes();
+    expect((await cleanupOrphans(env, T)).deleted).toBe(200);
+    expect(d.keys).toHaveLength(200);
+    expect(await fileCount()).toBe(50);
+    expect((await cleanupOrphans(env, T)).deleted).toBe(50);
+    expect(d.keys).toHaveLength(250);
+    expect(await fileCount()).toBe(0);
+  });
+
+  it('the cap counts keys: rows with a thumbnail cost two deletes, rejected keys cost none', async () => {
+    const u = await owner();
+    await bulk(150, T - 30 * H, u, { thumbs: true });
+    const d = countDeletes();
+    expect(await cleanupOrphans(env, T)).toEqual({ deleted: 100, keysRejected: 0 });
+    expect(d.keys).toHaveLength(200);
+    expect(await fileCount()).toBe(50);
+    await bulk(1, T - 40 * H, u, { tag: 'E' });
+    await env.DB.prepare('UPDATE files SET r2_key = ? WHERE id LIKE ?').bind(EMOJI_KEY, '01BULKE%').run();
+    expect(await cleanupOrphans(env, T)).toEqual({ deleted: 51, keysRejected: 1 });
+    expect(d.keys).toHaveLength(300);
+    expect(await fileCount()).toBe(0);
+  });
+
+  it('a storage failure does not stop the run', async () => {
     const u = await owner();
     for (let i = 0; i < 3; i++) await insertFile({ uploaderId: u, createdAt: T - 25 * H - i, object: bytes });
-    vi.spyOn(env.BUCKET, 'delete').mockRejectedValueOnce(new Error('x'));
+    let failed = false;
+    restore = patchBlobBinding((real) => ({
+      delete: ((k: string | string[]) => {
+        if (!failed) {
+          failed = true;
+          return Promise.reject(new Error('x'));
+        }
+        return (real.delete as (k: string | string[]) => Promise<void>)(k);
+      }) as never,
+    }));
     vi.spyOn(console, 'error').mockImplementation(() => {});
     await expect(cleanupOrphans(env, T)).resolves.toEqual({ deleted: 3, keysRejected: 0 });
+    expect(await fileCount()).toBe(0);
+  });
+
+  it.runIf(backend === 'kv')('at the KV daily delete limit the run stops and keeps the rows for the next run', async () => {
+    const u = await owner();
+    const a = await insertFile({ uploaderId: u, createdAt: T - 26 * H, object: bytes });
+    const b = await insertFile({ uploaderId: u, createdAt: T - 25 * H, object: bytes });
+    restore = patchBlobBinding(() => ({
+      delete: (() => Promise.reject(new Error('KV delete() limit exceeded for the day.'))) as never,
+    }));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    await expect(cleanupOrphans(env, T)).resolves.toEqual({ deleted: 0, keysRejected: 0 });
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('orphan_delete_limited'));
+    expect(await rowExists(a)).toBe(true);
+    expect(await rowExists(b)).toBe(true);
+    restore();
+    restore = undefined;
+    expect(await cleanupOrphans(env, T)).toEqual({ deleted: 2, keysRejected: 0 });
     expect(await fileCount()).toBe(0);
   });
 });

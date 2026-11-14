@@ -5,7 +5,7 @@ import type { ApiErrorBody } from '@backroom/protocol';
 
 export class ApiError extends Error {
   constructor(
-    public status: 400 | 401 | 403 | 404 | 409 | 411 | 413 | 426 | 429 | 500,
+    public status: 400 | 401 | 403 | 404 | 409 | 411 | 413 | 426 | 429 | 500 | 503,
     public code: string,
     message: string,
   ) {

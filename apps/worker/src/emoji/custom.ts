@@ -1,5 +1,6 @@
 import { CUSTOM_EMOJI_LIMIT, type CustomEmoji, type WorkspaceSettings } from '@backroom/protocol';
 import type { Env } from '../env';
+import { getBlobStore } from '../lib/blobs';
 import { ApiError } from '../lib/errors';
 import { newId } from '../lib/ids';
 import { lookupEmoji } from '@backroom/emoji';
@@ -78,7 +79,7 @@ const isNameTaken = (e: unknown): boolean =>
 export const nameTaken = () => new ApiError(409, 'name_taken', 'A custom emoji with that name already exists.');
 
 /**
- * Stores the image in R2, then inserts the row. The insert re-checks the per-workspace limit so
+ * Stores the image in blob storage, then inserts the row. The insert re-checks the per-workspace limit so
  * concurrent uploads cannot pass it. On any insert failure the object is deleted again.
  */
 export async function createCustomEmoji(
@@ -87,7 +88,7 @@ export async function createCustomEmoji(
 ): Promise<CustomEmoji> {
   const id = newId(input.now);
   const key = emojiKey(input.workspaceId, id);
-  await env.BUCKET.put(key, input.bytes, { httpMetadata: { contentType: input.mime } });
+  await getBlobStore(env).put(key, input.bytes, { contentType: input.mime, size: input.bytes.byteLength });
   let inserted: boolean;
   try {
     const [r] = await env.DB.batch([
@@ -122,9 +123,9 @@ export async function createCustomEmoji(
 export const limitReached = () =>
   new ApiError(400, 'limit_reached', `A workspace can have at most ${CUSTOM_EMOJI_LIMIT.toLocaleString('en-US')} custom emoji.`);
 
-/** Best-effort R2 delete: a failure is logged (no key, no ids) and never replaces the error the caller is about to raise. */
+/** Best-effort blob delete: a failure is logged (no key, no ids) and never replaces the error the caller is about to raise. */
 async function cleanupObject(env: Env, key: string): Promise<void> {
-  await env.BUCKET.delete(key).catch(() => {
+  await getBlobStore(env).delete(key).catch(() => {
     console.error(JSON.stringify({ level: 'error', code: 'r2_cleanup_failed' }));
   });
 }
@@ -165,7 +166,7 @@ export async function createCustomAlias(
   return rowToCustomEmoji({ id, name: input.name, r2_key: null, alias_for: target, created_by: input.userId, created_at: input.now });
 }
 
-/** Removes an emoji and every alias of it in one batch, then its R2 object. 404 unless the caller is an active member; 403 unless creator/admin/owner. */
+/** Removes an emoji and every alias of it in one batch, then its stored image. 404 unless the caller is an active member; 403 unless creator/admin/owner. */
 export async function deleteCustomEmoji(
   env: Env,
   input: { id: string; userId: string },

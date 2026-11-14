@@ -1,11 +1,28 @@
-import { createExecutionContext, env, waitOnExecutionContext } from 'cloudflare:test';
+import { createExecutionContext, waitOnExecutionContext } from 'cloudflare:test';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { CustomEmoji } from '@backroom/protocol';
 import type { Hono } from 'hono';
 import type { AppEnv } from '../src/app';
 import { createApp } from '../src/app';
 import { readSettings } from '../src/emoji/custom';
-import { captureMailer, gif, insertCustomEmoji, jpeg, png, resetDb, send, seedUsers, testDeps, uploadEmoji } from './helpers';
+import {
+  blobHead,
+  blobKeys,
+  blobPut,
+  captureMailer,
+  describeBackends,
+  env,
+  gif,
+  insertCustomEmoji,
+  jpeg,
+  patchBlobBinding,
+  png,
+  resetDb,
+  send,
+  seedUsers,
+  testDeps,
+  uploadEmoji,
+} from './helpers';
 import { CLUBHACK_WS, closeAll, connect } from './ws';
 
 beforeEach(resetDb);
@@ -38,7 +55,7 @@ async function getImage(app: Hono<AppEnv>, path: string, headers: Record<string,
 }
 
 async function objectCount(): Promise<number> {
-  return (await env.BUCKET.list({ prefix: PREFIX })).objects.length;
+  return (await blobKeys(PREFIX)).length;
 }
 
 describe('readSettings', () => {
@@ -52,14 +69,14 @@ describe('readSettings', () => {
   });
 });
 
-describe('custom emoji', () => {
+describeBackends('custom emoji', () => {
   it('owner uploads a 32×32 PNG', async () => {
     const s = await setup();
     const emoji = await created(await uploadEmoji(s.app, s.owner.cookie, 'partyparrot', png(32, 32)));
     expect(emoji).toMatchObject({ name: 'partyparrot', aliasFor: null, createdBy: s.owner.userId, createdAt: 1_800_000_000_000 });
     expect(emoji.url).toBe('/emoji/' + emoji.id);
-    const obj = await env.BUCKET.head(`ws/01JCLUBHACK0000000000000WS/emoji/${emoji.id}`);
-    expect(obj?.httpMetadata?.contentType).toBe('image/png');
+    const obj = await blobHead(`ws/01JCLUBHACK0000000000000WS/emoji/${emoji.id}`);
+    expect(obj?.contentType).toBe('image/png');
     const list = await send(s.app, 'GET', '/w/clubhack/emoji', undefined, s.owner.cookie);
     expect(list.status).toBe(200);
     expect(await list.json()).toEqual({ emoji: [emoji] });
@@ -108,7 +125,7 @@ describe('custom emoji', () => {
     expect(new Uint8Array(await img.arrayBuffer())).toEqual(bytes);
 
     const j = await created(await uploadEmoji(s.app, s.owner.cookie, 'jpg', jpeg(64, 48), { filename: 'x.gif', type: 'image/gif' }));
-    expect((await env.BUCKET.head(PREFIX + j.id))?.httpMetadata?.contentType).toBe('image/jpeg');
+    expect((await blobHead(PREFIX + j.id))?.contentType).toBe('image/jpeg');
   });
 
   it('size limits', async () => {
@@ -259,7 +276,7 @@ describe('custom emoji', () => {
     expect((await getImage(s.app, `/emoji/${emoji.id}`)).status).toBe(401);
 
     const otherId = await insertCustomEmoji({ name: 'theirs', workspaceId: '01OTHERWS00000000000000000' });
-    await env.BUCKET.put(`ws/01OTHERWS00000000000000000/emoji/${otherId}`, png(32, 32), { httpMetadata: { contentType: 'image/png' } });
+    await blobPut(`ws/01OTHERWS00000000000000000/emoji/${otherId}`, png(32, 32), 'image/png');
     const other = await getImage(s.app, `/emoji/${otherId}`, { Cookie: s.alice.cookie });
     expect(other.status).toBe(404);
     expect(await errCode(other)).toBe('not_found');
@@ -289,7 +306,7 @@ describe('custom emoji', () => {
   });
 });
 
-describe('custom emoji aliases, delete, policy', () => {
+describeBackends('custom emoji aliases, delete, policy', () => {
   async function setup3() {
     const { mailer, sent } = captureMailer();
     const app = createApp(testDeps({ mailer }));
@@ -343,7 +360,7 @@ describe('custom emoji aliases, delete, policy', () => {
     expect((await del('bad', s.alice.cookie)).status).toBe(404);
   });
 
-  it('delete cascades aliases, removes the R2 object and broadcasts removed ids', async () => {
+  it('delete cascades aliases, removes the stored object and broadcasts removed ids', async () => {
     const s = await setup3();
     const pp = await created(await uploadEmoji(s.app, s.owner.cookie, 'partyparrot', png(32, 32)));
     const alias = await created(await send(s.app, 'POST', '/w/clubhack/emoji', { name: 'pp', aliasFor: 'partyparrot' }, s.owner.cookie));
@@ -353,8 +370,8 @@ describe('custom emoji aliases, delete, policy', () => {
     const f = await sock.next('emoji.update');
     expect(f.added).toEqual([]);
     expect([...f.removed].sort()).toEqual([pp.id, alias.id].sort());
-    expect(await env.BUCKET.head(PREFIX + pp.id)).toBeNull();
-    expect(await env.BUCKET.head(PREFIX + keep.id)).not.toBeNull();
+    expect(await blobHead(PREFIX + pp.id)).toBeNull();
+    expect(await blobHead(PREFIX + keep.id)).not.toBeNull();
     const list = await send(s.app, 'GET', '/w/clubhack/emoji', undefined, s.owner.cookie);
     expect(((await list.json()) as { emoji: CustomEmoji[] }).emoji.map((e) => e.name)).toEqual(['keeper']);
   });
@@ -362,7 +379,7 @@ describe('custom emoji aliases, delete, policy', () => {
   it('delete cascade is scoped to the emoji workspace', async () => {
     const s = await setup3();
     const pp = await created(await uploadEmoji(s.app, s.owner.cookie, 'partyparrot', png(32, 32)));
-    await env.DB.prepare("INSERT INTO workspaces (id, slug, name, created_at) VALUES ('01OTHERWS00000000000000000', 'other', 'Other', 1)").run();
+    await env.DB.prepare("INSERT OR IGNORE INTO workspaces (id, slug, name, created_at) VALUES ('01OTHERWS00000000000000000', 'other', 'Other', 1)").run();
     const other = await insertCustomEmoji({ name: 'foreign', aliasFor: 'partyparrot', workspaceId: '01OTHERWS00000000000000000' });
     await send(s.app, 'DELETE', `/emoji/${pp.id}`, undefined, s.owner.cookie);
     const row = await env.DB.prepare('SELECT id FROM custom_emoji WHERE id = ?').bind(other).first();
@@ -381,17 +398,16 @@ describe('custom emoji aliases, delete, policy', () => {
     expect((await patch({ customEmojiPolicy: 'all' }, s.owner.cookie)).status).toBe(400);
   });
 
-  it('R2 cleanup failure does not mask name_taken; malformed If-None-Match is 200', async () => {
+  it('storage cleanup failure does not mask name_taken; malformed If-None-Match is 200', async () => {
     const s = await setup3();
     const e = await created(await uploadEmoji(s.app, s.owner.cookie, 'dup', png(32, 32)));
-    const realDelete = env.BUCKET.delete.bind(env.BUCKET);
-    env.BUCKET.delete = (() => Promise.reject(new Error('r2 down'))) as typeof env.BUCKET.delete;
+    const restore = patchBlobBinding(() => ({ delete: (() => Promise.reject(new Error('storage down'))) as never }));
     try {
       const res = await uploadEmoji(s.app, s.owner.cookie, 'dup', png(32, 32));
       expect(res.status).toBe(409);
       expect(await errCode(res)).toBe('name_taken');
     } finally {
-      env.BUCKET.delete = realDelete;
+      restore();
     }
     const img = await getImage(s.app, `/emoji/${e.id}`, { Cookie: s.owner.cookie, 'If-None-Match': 'abc' });
     expect(img.status).toBe(200);
@@ -399,7 +415,7 @@ describe('custom emoji aliases, delete, policy', () => {
   });
 });
 
-describe('emojiRev (P3-R20) and final-review fixes', () => {
+describeBackends('emojiRev (P3-R20) and final-review fixes', () => {
   const rev = async () =>
     (await env.DB.prepare("SELECT json_extract(settings_json, '$.emojiRev') AS r FROM workspaces WHERE id = ?").bind(CLUBHACK_WS).first<{ r: number | null }>())!.r ?? 0;
   const boot = async (app: Hono<AppEnv>, cookie: string, q = '') =>
@@ -457,22 +473,23 @@ describe('emojiRev (P3-R20) and final-review fixes', () => {
     expect(b).not.toHaveProperty('customEmoji');
   });
 
-  it('duplicate upload name is 409 before any R2 put', async () => {
+  it('duplicate upload name is 409 before any storage put', async () => {
     const s = await setup();
     await created(await uploadEmoji(s.app, s.owner.cookie, 'dup', png(32, 32)));
-    const realPut = env.BUCKET.put.bind(env.BUCKET);
     let puts = 0;
-    env.BUCKET.put = ((...args: Parameters<typeof realPut>) => {
-      puts++;
-      return realPut(...args);
-    }) as typeof env.BUCKET.put;
+    const restore = patchBlobBinding((real) => ({
+      put: ((...args: never[]) => {
+        puts++;
+        return real.put(...args);
+      }) as never,
+    }));
     try {
       const res = await uploadEmoji(s.app, s.owner.cookie, 'dup', png(32, 32));
       expect(res.status).toBe(409);
       expect(await errCode(res)).toBe('name_taken');
       expect(puts).toBe(0);
     } finally {
-      env.BUCKET.put = realPut;
+      restore();
     }
     expect(await objectCount()).toBe(1);
   });

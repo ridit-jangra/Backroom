@@ -1,7 +1,8 @@
 import { z } from 'zod';
 
 export const FILE_MAX_BYTES = 26_214_400;
-export const FILES_QUOTA_BYTES = 2_147_483_648;
+/** 900 MiB per workspace: Workers KV holds 1 GB in total, and custom emoji share it. */
+export const FILES_QUOTA_BYTES = 943_718_400;
 export const THUMB_MAX_BYTES = 524_288;
 export const THUMB_MAX_SIDE = 720;
 export const MAX_FILES_PER_MESSAGE = 10;

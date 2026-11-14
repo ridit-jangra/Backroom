@@ -1,9 +1,134 @@
-import { createExecutionContext, env, waitOnExecutionContext } from 'cloudflare:test';
+import { createExecutionContext, env as rawEnv, waitOnExecutionContext } from 'cloudflare:test';
+import { afterAll, beforeEach, describe } from 'vitest';
 import type { Hono } from 'hono';
 import type { AppEnv, Deps } from '../src/app';
 import type { Mailer } from '../src/auth/mailer';
+import { type KvBlobMeta, getBlobStore } from '../src/lib/blobs';
 import { newId } from '../src/lib/ids';
 import { fileKey, thumbKeyOf } from '../src/files/store';
+
+/** Blob storage backends: Workers KV (`BLOBS`, the default and production) and R2 (`BUCKET`). */
+export type Backend = 'kv' | 'r2';
+export const BACKENDS: readonly Backend[] = ['kv', 'r2'];
+let current: Backend = 'kv';
+
+/** All bindings, but only one of the two blob bindings, so `getBlobStore` picks that backend. */
+export function backendEnv(backend: Backend): Cloudflare.Env {
+  const e: Partial<Cloudflare.Env> = { ...rawEnv };
+  if (backend === 'kv') delete e.BUCKET;
+  else delete e.BLOBS;
+  return e as Cloudflare.Env;
+}
+
+const overrides = new Map<PropertyKey, unknown>();
+const hidden = (): string => (current === 'kv' ? 'BUCKET' : 'BLOBS');
+const visible = (p: PropertyKey): boolean => overrides.has(p) || (p !== hidden() && Object.prototype.hasOwnProperty.call(rawEnv, p));
+
+/**
+ * The env every helper (and the parametrised suites) hands to the app: a live view of the `cloudflare:test` env
+ * (so tests that tweak e.g. `APP_ORIGIN` there still reach the app) without the inactive blob binding. Writes to
+ * it stay local (`patchBlobBinding`) and are dropped by `useBackend`. Defaults to KV.
+ */
+export const env: Cloudflare.Env = new Proxy({} as Cloudflare.Env, {
+  get: (_t, p) => (overrides.has(p) ? overrides.get(p) : p === hidden() ? undefined : Reflect.get(rawEnv, p)),
+  set: (_t, p, v) => {
+    overrides.set(p, v);
+    return true;
+  },
+  deleteProperty: (_t, p) => overrides.delete(p) || true,
+  has: (_t, p) => visible(p),
+  ownKeys: () => [...new Set([...Reflect.ownKeys(rawEnv), ...overrides.keys()])].filter(visible) as (string | symbol)[],
+  getOwnPropertyDescriptor: (_t, p) =>
+    visible(p)
+      ? { value: overrides.has(p) ? overrides.get(p) : Reflect.get(rawEnv, p), enumerable: true, configurable: true, writable: true }
+      : undefined,
+});
+
+export function currentBackend(): Backend {
+  return current;
+}
+
+export function useBackend(backend: Backend): void {
+  current = backend;
+  overrides.clear();
+}
+
+/** `describe` run once per backend (`name [kv]`, `name [r2]`), with `env` switched for every test in it. */
+export function describeBackends(name: string, fn: (backend: Backend) => void): void {
+  describe.each(BACKENDS)(`${name} [%s]`, (backend) => {
+    beforeEach(() => useBackend(backend));
+    afterAll(() => useBackend('kv'));
+    fn(backend);
+  });
+}
+
+type BindingMethod = 'get' | 'getWithMetadata' | 'head' | 'list' | 'put' | 'delete';
+type AnyFn = (...args: never[]) => unknown;
+
+/**
+ * Replaces the active blob binding in `env` with a wrapper whose listed methods are overridden (the rest call the
+ * real binding). `real` is the real binding for delegating. Returns the restore function.
+ */
+export function patchBlobBinding(over: (real: Record<BindingMethod, AnyFn>) => Partial<Record<BindingMethod, AnyFn>>): () => void {
+  const name = current === 'kv' ? 'BLOBS' : 'BUCKET';
+  const target = env as unknown as Record<string, Record<string, AnyFn>>;
+  const real = target[name]!;
+  const bound = {} as Record<BindingMethod, AnyFn>;
+  for (const m of ['get', 'getWithMetadata', 'head', 'list', 'put', 'delete'] as const) {
+    if (typeof real[m] === 'function') bound[m] = real[m]!.bind(real);
+  }
+  target[name] = { ...bound, ...over(bound) };
+  return () => {
+    delete target[name];
+  };
+}
+
+/** Size and stored content type of a blob in the active backend, or null when it does not exist. */
+export async function blobHead(key: string): Promise<{ size: number; contentType: string | null } | null> {
+  if (current === 'r2') {
+    const o = await rawEnv.BUCKET!.head(key);
+    return o ? { size: o.size, contentType: o.httpMetadata?.contentType ?? null } : null;
+  }
+  const r = await rawEnv.BLOBS.getWithMetadata<KvBlobMeta>(key, 'arrayBuffer');
+  return r.value === null ? null : { size: r.value.byteLength, contentType: r.metadata?.contentType ?? null };
+}
+
+export async function blobBytes(key: string): Promise<Uint8Array | null> {
+  if (current === 'r2') {
+    const o = await rawEnv.BUCKET!.get(key);
+    return o ? new Uint8Array(await o.arrayBuffer()) : null;
+  }
+  const v = await rawEnv.BLOBS.get(key, 'arrayBuffer');
+  return v === null ? null : new Uint8Array(v);
+}
+
+/** Sorted keys in the active backend under `prefix`. */
+export async function blobKeys(prefix = ''): Promise<string[]> {
+  const out: string[] = [];
+  if (current === 'r2') {
+    let cursor: string | undefined;
+    for (;;) {
+      const page = await rawEnv.BUCKET!.list({ prefix, cursor });
+      out.push(...page.objects.map((o) => o.key));
+      if (!page.truncated) break;
+      cursor = page.cursor;
+    }
+  } else {
+    let cursor: string | null = null;
+    for (;;) {
+      const page: KVNamespaceListResult<unknown> = await rawEnv.BLOBS.list({ prefix, cursor });
+      out.push(...page.keys.map((k) => k.name));
+      if (page.list_complete) break;
+      cursor = page.cursor;
+    }
+  }
+  return out.sort();
+}
+
+/** Writes through the BlobStore of the active backend (same metadata the app writes). */
+export async function blobPut(key: string, bytes: Uint8Array, contentType?: string): Promise<void> {
+  await getBlobStore(env).put(key, bytes, { contentType, size: bytes.byteLength });
+}
 
 export function testDeps(overrides: Partial<Deps> = {}): Deps {
   return {
@@ -74,9 +199,14 @@ export async function resetDb(): Promise<void> {
     env.DB.prepare("UPDATE workspaces SET settings_json = '{}'"),
   ]);
   for (;;) {
-    const page = await env.BUCKET.list();
-    if (page.objects.length > 0) await env.BUCKET.delete(page.objects.map((o) => o.key));
+    const page = await rawEnv.BUCKET!.list();
+    if (page.objects.length > 0) await rawEnv.BUCKET!.delete(page.objects.map((o) => o.key));
     if (!page.truncated) break;
+  }
+  for (;;) {
+    const page = await rawEnv.BLOBS.list();
+    for (const k of page.keys) await rawEnv.BLOBS.delete(k.name);
+    if (page.list_complete) break;
   }
 }
 
@@ -175,7 +305,7 @@ export async function uploadFile(
 
 /**
  * Direct D1 insert of a file row (workspace defaults to `clubhack`); returns its id. Puts `object` (and a
- * `webp(10,10)` thumbnail when `thumb`) into R2 under the real keys. `r2Key` overrides the stored key (key-guard tests only).
+ * `webp(10,10)` thumbnail when `thumb`) into the active blob backend under the real keys. `r2Key` overrides the stored key (key-guard tests only).
  */
 export async function insertFile(opts: {
   uploaderId: string;
@@ -193,8 +323,8 @@ export async function insertFile(opts: {
   const id = newId(createdAt);
   const key = fileKey(ws, id);
   const thumbKey = opts.thumb ? thumbKeyOf(ws, id, newId(createdAt)) : null;
-  if (opts.object) await env.BUCKET.put(key, opts.object);
-  if (thumbKey) await env.BUCKET.put(thumbKey, webp(10, 10), { httpMetadata: { contentType: 'image/webp' } });
+  if (opts.object) await blobPut(key, opts.object);
+  if (thumbKey) await blobPut(thumbKey, webp(10, 10), 'image/webp');
   await env.DB.prepare(
     `INSERT INTO files (id, workspace_id, uploader_id, r2_key, thumb_key, name, mime, size, width, height, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?)`,

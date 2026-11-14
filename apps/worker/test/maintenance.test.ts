@@ -1,9 +1,21 @@
-import { createExecutionContext, createScheduledController, env, waitOnExecutionContext } from 'cloudflare:test';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createExecutionContext, createScheduledController, waitOnExecutionContext } from 'cloudflare:test';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import worker from '../src/index';
 import { AUTH_ROW_GRACE_MS, RATE_LIMIT_KEEP_MS, cleanupAuth } from '../src/maintenance';
 import { createApp } from '../src/app';
-import { captureMailer, insertFile, resetDb, seedUsers, testDeps } from './helpers';
+import {
+  blobHead,
+  blobKeys,
+  blobPut,
+  captureMailer,
+  describeBackends,
+  env,
+  insertFile,
+  patchBlobBinding,
+  resetDb,
+  seedUsers,
+  testDeps,
+} from './helpers';
 
 const T = 1_800_000_000_000;
 const H = 3_600_000;
@@ -65,7 +77,7 @@ const tokens = () => keys('SELECT token_hash AS k FROM login_tokens');
 const codes = () => keys('SELECT code_hash AS k FROM desktop_codes');
 const limits = () => keys('SELECT key AS k FROM rate_limits');
 
-describe('cleanupAuth', () => {
+describeBackends('cleanupAuth', () => {
   it('uses a one-day grace for auth rows and keeps rate-limit windows for 2 h', () => {
     expect(AUTH_ROW_GRACE_MS).toBe(86_400_000);
     expect(RATE_LIMIT_KEEP_MS).toBe(7_200_000);
@@ -81,27 +93,36 @@ describe('cleanupAuth', () => {
     expect(await cleanupAuth(env.DB, T)).toEqual({ loginTokens: 0, desktopCodes: 0, rateLimits: 0 });
   });
 
-  it('runs from the scheduled handler; R2 loses only the orphan file key, emoji/ survives', async () => {
+  it('runs from the scheduled handler; storage loses only the orphan file key, emoji/ survives', async () => {
     const { mailer, sent } = captureMailer();
     const [o] = await seedUsers(createApp(testDeps({ mailer })), sent, ['owner@test.dev']);
     // drop the sign-in's own token and rate-limit rows so only the seeded ones are judged
     await env.DB.batch([env.DB.prepare('DELETE FROM login_tokens'), env.DB.prepare('DELETE FROM rate_limits')]);
     await seed();
-    await env.BUCKET.put(`ws/${WS}/emoji/keepme`, new Uint8Array([1]));
+    await blobPut(`ws/${WS}/emoji/keepme`, new Uint8Array([1]));
     const orphan = await insertFile({ uploaderId: o!.userId, createdAt: T - 25 * H, object: new Uint8Array([1]) });
     const orphanKey = (await env.DB.prepare('SELECT r2_key AS k FROM files WHERE id = ?').bind(orphan).first<{ k: string }>())!.k;
-    const del = vi.spyOn(env.BUCKET, 'delete');
+    const deleted: string[] = [];
+    const restore = patchBlobBinding((real) => ({
+      delete: ((k: string | string[]) => {
+        deleted.push(...[k].flat());
+        return (real.delete as (k: string | string[]) => Promise<void>)(k);
+      }) as never,
+    }));
     const ctx = createExecutionContext();
-    await worker.scheduled!(createScheduledController({ scheduledTime: new Date(T), cron: '0 4 * * *' }), env, ctx);
-    await waitOnExecutionContext(ctx);
+    try {
+      await worker.scheduled!(createScheduledController({ scheduledTime: new Date(T), cron: '0 4 * * *' }), env, ctx);
+      await waitOnExecutionContext(ctx);
+    } finally {
+      restore();
+    }
     expect(await tokens()).toEqual(['lt-expired-23h', 'lt-live', 'lt-used-1h']);
     expect(await codes()).toEqual(['dc-expired-23h', 'dc-live', 'dc-used-1h']);
     expect(await limits()).toEqual(['start:ip:119m', 'start:ip:live']);
-    expect(del.mock.calls.map((c) => c[0])).toEqual([[orphanKey]]);
-    expect(await env.BUCKET.head(orphanKey)).toBeNull();
-    expect(await env.BUCKET.head(`ws/${WS}/emoji/keepme`)).not.toBeNull();
-    const objects = (await env.BUCKET.list()).objects.map((x) => x.key);
-    expect(objects).toEqual([`ws/${WS}/emoji/keepme`]);
+    expect(deleted).toEqual([orphanKey]);
+    expect(await blobHead(orphanKey)).toBeNull();
+    expect(await blobHead(`ws/${WS}/emoji/keepme`)).not.toBeNull();
+    expect(await blobKeys()).toEqual([`ws/${WS}/emoji/keepme`]);
   });
 
   it('an orphan-cleanup failure does not stop the auth cleanup (and vice versa logs its own code)', async () => {

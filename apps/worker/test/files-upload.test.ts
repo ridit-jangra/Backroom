@@ -1,9 +1,26 @@
-import { createExecutionContext, env, waitOnExecutionContext } from 'cloudflare:test';
+import { createExecutionContext, waitOnExecutionContext } from 'cloudflare:test';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { FILES_QUOTA_BYTES, type FileInfo } from '@backroom/protocol';
 import { createApp } from '../src/app';
 import { FILE_KEY_RE, UploadStreamError, fileKey, putExact, storeUpload, thumbKeyOf } from '../src/files/store';
-import { captureMailer, insertFile, png, resetDb, seedUsers, testDeps, uploadFile, webp } from './helpers';
+import { getBlobStore } from '../src/lib/blobs';
+import {
+  blobBytes,
+  blobHead,
+  blobKeys,
+  blobPut,
+  captureMailer,
+  currentBackend,
+  describeBackends,
+  env,
+  insertFile,
+  png,
+  resetDb,
+  seedUsers,
+  testDeps,
+  uploadFile,
+  webp,
+} from './helpers';
 
 beforeEach(resetDb);
 
@@ -11,7 +28,7 @@ const WS = '01JCLUBHACK0000000000000WS';
 const text = (s: string) => new TextEncoder().encode(s);
 
 async function thumbKeys(id: string): Promise<string[]> {
-  return (await env.BUCKET.list({ prefix: `${fileKey(WS, id)}-thumb` })).objects.map((o) => o.key);
+  return blobKeys(`${fileKey(WS, id)}-thumb`);
 }
 
 async function storedThumbKey(id: string): Promise<string | null> {
@@ -46,7 +63,7 @@ async function created(res: Response): Promise<FileInfo> {
 }
 
 async function fileKeys(): Promise<string[]> {
-  return (await env.BUCKET.list({ prefix: `ws/${WS}/` })).objects.map((o) => o.key).filter((k) => !k.includes('/emoji/'));
+  return (await blobKeys(`ws/${WS}/`)).filter((k) => !k.includes('/emoji/'));
 }
 
 async function postThumb(app: ReturnType<typeof createApp>, cookie: string, id: string, bytes: Uint8Array): Promise<Response> {
@@ -70,16 +87,14 @@ function streamOf(bytes: Uint8Array): ReadableStream<Uint8Array> {
   });
 }
 
-describe('file upload', () => {
-  it('uploads a PNG: streamed to R2, dimensions and type from bytes', async () => {
+describeBackends('file upload', () => {
+  it('uploads a PNG: streamed to storage, dimensions and type from bytes', async () => {
     const s = await setup();
     const bytes = png(800, 600, 5_000);
     const file = await created(await uploadFile(s.app, s.alice.cookie, bytes, { name: 'cat.png', type: 'application/octet-stream' }));
     expect(file).toEqual({ id: file.id, name: 'cat.png', mime: 'image/png', size: 5000, width: 800, height: 600, hasThumb: false });
     expect(file.id).toMatch(/^[0-9A-Z]{26}$/);
-    const obj = await env.BUCKET.get(`ws/${WS}/${file.id}`);
-    expect(obj).not.toBeNull();
-    expect(new Uint8Array(await obj!.arrayBuffer())).toEqual(bytes);
+    expect(await blobBytes(`ws/${WS}/${file.id}`)).toEqual(bytes);
     const { results } = await env.DB.prepare('SELECT uploader_id, r2_key, thumb_key FROM files').all<{
       uploader_id: string;
       r2_key: string;
@@ -96,7 +111,7 @@ describe('file upload', () => {
     expect(html.mime).toBe('application/octet-stream');
     const empty = await created(await uploadFile(s.app, s.alice.cookie, new Uint8Array(0), { name: 'empty' }));
     expect(empty).toMatchObject({ size: 0, mime: 'application/octet-stream' });
-    expect(await env.BUCKET.head(fileKey(WS, empty.id))).not.toBeNull();
+    expect(await blobHead(fileKey(WS, empty.id))).not.toBeNull();
     const unnamed = await created(await uploadFile(s.app, s.alice.cookie, text('x')));
     expect(unnamed.name).toBe('file');
   });
@@ -133,10 +148,10 @@ describe('file upload', () => {
     expect((await env.DB.prepare('SELECT COUNT(*) AS n FROM files').first<{ n: number }>())?.n).toBe(0);
   });
 
-  it('quota counts files.size, not R2, and excludes emoji', async () => {
+  it('quota counts files.size, not stored blobs, and excludes emoji', async () => {
     const s = await setup();
     await insertFile({ uploaderId: s.owner.userId, size: FILES_QUOTA_BYTES - 10 });
-    await env.BUCKET.put(`ws/${WS}/emoji/01JEMOJI000000000000000000`, new Uint8Array(1_048_576));
+    await blobPut(`ws/${WS}/emoji/01JEMOJI000000000000000000`, new Uint8Array(1_048_576));
     await created(await uploadFile(s.app, s.alice.cookie, new Uint8Array(10), { name: 'ten' }));
     const over = await uploadFile(s.app, s.alice.cookie, new Uint8Array(1), { name: 'one' });
     expect(over.status).toBe(413);
@@ -178,12 +193,13 @@ describe('file upload', () => {
 
   it('putExact rejects a short stream and leaves no object', async () => {
     const key = `ws/${WS}/01JSHORT000000000000000000`;
-    await expect(putExact(env.BUCKET, key, streamOf(new Uint8Array(50)), 100)).rejects.toBeInstanceOf(UploadStreamError);
-    expect(await env.BUCKET.head(key)).toBeNull();
-    await expect(putExact(env.BUCKET, key, streamOf(new Uint8Array(150)), 100)).rejects.toBeInstanceOf(UploadStreamError);
-    expect(await env.BUCKET.head(key)).toBeNull();
-    await putExact(env.BUCKET, key, streamOf(new Uint8Array(100)), 100);
-    expect((await env.BUCKET.head(key))?.size).toBe(100);
+    const store = getBlobStore(env);
+    await expect(putExact(store, key, streamOf(new Uint8Array(50)), 100)).rejects.toBeInstanceOf(UploadStreamError);
+    expect(await blobHead(key)).toBeNull();
+    await expect(putExact(store, key, streamOf(new Uint8Array(150)), 100)).rejects.toBeInstanceOf(UploadStreamError);
+    expect(await blobHead(key)).toBeNull();
+    await putExact(store, key, streamOf(new Uint8Array(100)), 100);
+    expect((await blobHead(key))?.size).toBe(100);
   });
 
   it('the upload work runs under waitUntil, so the row is inserted even if the response is never delivered', async () => {
@@ -220,20 +236,24 @@ describe('file upload', () => {
     expect(await fileKeys()).toEqual([]);
   });
 
-  it('R2 failures are 500 upload_failed (logged), body failures 400; nothing is left behind', async () => {
+  it('storage failures are 500 upload_failed (logged), body failures 400; nothing is left behind', async () => {
     const s = await setup();
     const deleted: string[] = [];
     const failing = {
       put: async () => {
-        throw new Error('r2 down');
+        throw new Error('storage down');
       },
-      delete: async (k: string) => void deleted.push(k),
-    } as unknown as R2Bucket;
+      delete: async (k: string | string[]) => void deleted.push(...[k].flat()),
+    };
+    const failingEnv =
+      currentBackend() === 'kv'
+        ? { ...env, BLOBS: failing as unknown as KVNamespace }
+        : { ...env, BUCKET: failing as unknown as R2Bucket };
     const errors: string[] = [];
     const orig = console.error;
     console.error = (m: string) => void errors.push(m);
     try {
-      const err = await storeUpload({ ...env, BUCKET: failing }, {
+      const err = await storeUpload(failingEnv, {
         workspaceId: WS,
         userId: s.alice.userId,
         name: 'x',
@@ -256,7 +276,7 @@ describe('file upload', () => {
         c.error(new Error('client went away'));
       },
     });
-    await expect(putExact(env.BUCKET, `ws/${WS}/01JBROKEN00000000000000000`, broken, 100)).rejects.toBeInstanceOf(UploadStreamError);
+    await expect(putExact(getBlobStore(env), `ws/${WS}/01JBROKEN00000000000000000`, broken, 100)).rejects.toBeInstanceOf(UploadStreamError);
     expect(await fileKeys()).toEqual([]);
   });
 
@@ -291,7 +311,7 @@ describe('file upload', () => {
   });
 });
 
-describe('thumbnail upload', () => {
+describeBackends('thumbnail upload', () => {
   it('only the uploader, only raster originals, only small WebP, only once, only before attach', async () => {
     const s = await setup();
     const img = await created(await uploadFile(s.app, s.alice.cookie, png(2000, 1000), { name: 'big.png' }));
@@ -354,8 +374,7 @@ describe('thumbnail upload', () => {
     expect(await errCode(loser)).toBe('already_has_thumbnail');
     const live = await storedThumbKey(img.id);
     expect(await thumbKeys(img.id)).toEqual([live]);
-    const obj = await env.BUCKET.get(live!);
-    expect(new Uint8Array(await obj!.arrayBuffer())).toEqual(ra.status === 200 ? a : b);
+    expect(await blobBytes(live!)).toEqual(ra.status === 200 ? a : b);
   });
 
   it('the link UPDATE runs under waitUntil, so it completes even if the response is never delivered', async () => {
@@ -377,10 +396,52 @@ describe('thumbnail upload', () => {
   it('insertFile stores objects under the real keys', async () => {
     const s = await setup();
     const id = await insertFile({ uploaderId: s.alice.userId, object: text('abc'), thumb: true, mime: 'image/png' });
-    expect((await env.BUCKET.head(fileKey(WS, id)))?.size).toBe(3);
+    expect((await blobHead(fileKey(WS, id)))?.size).toBe(3);
     const key = await storedThumbKey(id);
     expect(key).toMatch(FILE_KEY_RE);
-    expect(await env.BUCKET.head(key!)).not.toBeNull();
+    expect(await blobHead(key!)).not.toBeNull();
     expect((await env.DB.prepare('SELECT size FROM files WHERE id = ?').bind(id).first())?.size).toBe(3);
+  });
+});
+
+describe('workspace quota (Workers KV sizing)', () => {
+  it('is 900 MB (900 MiB), leaving room in the 1 GB KV namespace for emoji', async () => {
+    expect(FILES_QUOTA_BYTES).toBe(943_718_400);
+    const s = await setup();
+    await insertFile({ uploaderId: s.owner.userId, size: FILES_QUOTA_BYTES });
+    const res = await uploadFile(s.app, s.alice.cookie, new Uint8Array(1), { name: 'one' });
+    expect(res.status).toBe(413);
+    expect(await res.json()).toEqual({ error: { code: 'quota_exceeded', message: 'This workspace has used its 900 MB of file storage.' } });
+  });
+});
+
+describe('KV daily write limit', () => {
+  it('an upload when KV refuses writes is 503 storage_busy and leaves no row', async () => {
+    const s = await setup();
+    const exhausted = {
+      put: async () => {
+        throw new Error('KV put() limit exceeded for the day.');
+      },
+      delete: async () => {
+        throw new Error('KV delete() limit exceeded for the day.');
+      },
+    } as unknown as KVNamespace;
+    const ctx = createExecutionContext();
+    const res = await s.app.request(
+      '/w/clubhack/files?name=a.bin',
+      {
+        method: 'POST',
+        headers: { Origin: 'https://app.test', Cookie: s.alice.cookie, 'Content-Length': '10' },
+        body: new Uint8Array(10),
+      },
+      { ...env, BLOBS: exhausted },
+      ctx,
+    );
+    await waitOnExecutionContext(ctx);
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({
+      error: { code: 'storage_busy', message: 'Storage is at its daily write limit. Try again tomorrow.' },
+    });
+    expect((await env.DB.prepare('SELECT COUNT(*) AS n FROM files').first<{ n: number }>())?.n).toBe(0);
   });
 });

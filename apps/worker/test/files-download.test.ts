@@ -1,10 +1,24 @@
-import { createExecutionContext, env, waitOnExecutionContext } from 'cloudflare:test';
+import { createExecutionContext, waitOnExecutionContext } from 'cloudflare:test';
 import { beforeEach, describe, expect, it } from 'vitest';
 import type { FileInfo } from '@backroom/protocol';
 import { createApp } from '../src/app';
 import { canDownload } from '../src/files/access';
 import { deleteMessage, sendMessage } from '../src/messaging/store';
-import { GENERAL, captureMailer, insertChannel, insertFile, png, resetDb, seedUsers, send, testDeps, uploadFile, webp } from './helpers';
+import {
+  GENERAL,
+  captureMailer,
+  describeBackends,
+  env,
+  insertChannel,
+  insertFile,
+  png,
+  resetDb,
+  seedUsers,
+  send,
+  testDeps,
+  uploadFile,
+  webp,
+} from './helpers';
 
 beforeEach(resetDb);
 
@@ -75,7 +89,7 @@ describe('canDownload', () => {
   });
 });
 
-describe('file downloads', () => {
+describeBackends('file downloads', () => {
   it('uploader can fetch an unattached file; nobody else can', async () => {
     const s = await setup();
     const f = await s.upload(s.alice.cookie, 'notes.txt', text('hello'), 'text/plain');
@@ -285,7 +299,7 @@ describe('file downloads', () => {
     expect((await s.get(`/files/${f.id}/thumb`, s.carol.cookie)).status).toBe(404);
   });
 
-  it('a missing R2 object is 404', async () => {
+  it('a missing stored object is 404', async () => {
     const s = await setup();
     const id = await insertFile({ uploaderId: s.alice.userId, name: 'gone.txt', mime: 'text/plain', size: 5 });
     expect(await errCode(await s.get(`/files/${id}`, s.alice.cookie))).toBe('not_found');

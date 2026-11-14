@@ -1,16 +1,17 @@
 import { FILES_QUOTA_BYTES, type FileInfo } from '@backroom/protocol';
 import type { Env } from '../env';
+import { type BlobStore, getBlobStore } from '../lib/blobs';
 import { ApiError } from '../lib/errors';
 import { newId } from '../lib/ids';
 import { SNIFF_BYTES, sniffFile } from './sniff';
 
-/** R2 key of an original upload. Both parts are server values (DB workspace id, server ULID), never user input. */
+/** Blob key of an original upload. Both parts are server values (DB workspace id, server ULID), never user input. */
 export function fileKey(workspaceId: string, fileId: string): string {
   return `ws/${workspaceId}/${fileId}`;
 }
 
 /**
- * R2 key of a thumbnail: `ws/<workspaceId>/<fileId>-thumb-<thumbId>`, where `thumbId` is a fresh server ULID per
+ * Blob key of a thumbnail: `ws/<workspaceId>/<fileId>-thumb-<thumbId>`, where `thumbId` is a fresh server ULID per
  * thumbnail upload. A unique key per upload means a losing concurrent upload can delete its own object without
  * ever touching the live thumbnail; readers always use the stored `files.thumb_key`.
  */
@@ -61,12 +62,13 @@ export class UploadStreamError extends Error {
 const isLengthMismatch = (e: unknown): boolean => e instanceof TypeError && /FixedLengthStream/.test(e.message);
 
 /**
- * Streams exactly `length` bytes into R2 without buffering: the native FixedLengthStream gives R2 a known
- * length and errors on a short or long body. On any failure the key is deleted (best effort). A failure caused by
- * the body (length mismatch, or the source stream erroring, e.g. a client disconnect) is thrown as
- * `UploadStreamError`; anything else (an R2 failure) is rethrown as is.
+ * Streams exactly `length` bytes into blob storage without buffering: the native FixedLengthStream gives KV/R2 a
+ * known length and errors on a short or long body. On any failure the key is deleted (best effort), except at the
+ * KV daily limit (nothing was written, and deletes are capped too). A failure caused by the body (length mismatch,
+ * or the source stream erroring, e.g. a client disconnect) is thrown as `UploadStreamError`; anything else (a
+ * storage failure, or `503 storage_busy`) is rethrown as is.
  */
-export async function putExact(bucket: R2Bucket, key: string, body: ReadableStream, length: number): Promise<void> {
+export async function putExact(store: BlobStore, key: string, body: ReadableStream, length: number): Promise<void> {
   const fixed = new FixedLengthStream(length);
   const abort = new AbortController();
   let sourceFailed = false;
@@ -75,27 +77,27 @@ export async function putExact(bucket: R2Bucket, key: string, body: ReadableStre
     sourceFailed = true;
   });
   try {
-    await bucket.put(key, fixed.readable);
+    await store.put(key, fixed.readable, { size: length });
   } catch (e) {
     // Classify before anything else can settle: a later pipe rejection could be our own abort below.
     const streamFault = sourceFailed || isLengthMismatch(e);
     abort.abort();
-    await bucket.delete(key).catch(() => {});
+    if (!(e instanceof ApiError)) await store.delete(key).catch(() => {});
     throw streamFault ? new UploadStreamError(e) : e;
   }
   await piped;
 }
 
-export const quotaExceeded = () => new ApiError(413, 'quota_exceeded', 'This workspace has used its 2 GB of file storage.');
+export const quotaExceeded = () => new ApiError(413, 'quota_exceeded', 'This workspace has used its 900 MB of file storage.');
 
-async function cleanup(bucket: R2Bucket, key: string): Promise<void> {
-  await bucket.delete(key).catch(() => {
+async function cleanup(store: BlobStore, key: string): Promise<void> {
+  await store.delete(key).catch(() => {
     console.error(JSON.stringify({ level: 'error', code: 'upload_cleanup_failed' }));
   });
 }
 
 /**
- * Streams the body to R2, sniffs the stored type from the first bytes (range get), then inserts the row only if
+ * Streams the body to blob storage, sniffs the stored type from the first bytes (peek), then inserts the row only if
  * the workspace's `SUM(files.size)` stays within the quota. Any failure after the put removes the object again.
  */
 export async function storeUpload(
@@ -104,12 +106,13 @@ export async function storeUpload(
 ): Promise<FileInfo> {
   const id = newId(input.now);
   const key = fileKey(input.workspaceId, id);
-  const bucket = env.BUCKET;
+  const store = getBlobStore(env);
 
   try {
-    await putExact(bucket, key, input.body, input.length);
+    await putExact(store, key, input.body, input.length);
   } catch (e) {
     if (e instanceof UploadStreamError) throw new ApiError(400, 'invalid_request', 'The upload did not complete.');
+    if (e instanceof ApiError) throw e; // 503 storage_busy
     console.error(JSON.stringify({ level: 'error', code: 'r2_put_failed' }));
     throw new ApiError(500, 'upload_failed', 'The file could not be stored. Try again.');
   }
@@ -118,10 +121,7 @@ export async function storeUpload(
   let sniffed: ReturnType<typeof sniffFile>;
   try {
     let head: Uint8Array = new Uint8Array(0);
-    if (input.length > 0) {
-      const obj = await bucket.get(key, { range: { offset: 0, length: Math.min(input.length, SNIFF_BYTES) } });
-      if (obj) head = await obj.bytes();
-    }
+    if (input.length > 0) head = (await store.peek(key, Math.min(input.length, SNIFF_BYTES))) ?? head;
     sniffed = sniffFile(head, input.declaredType);
     const r = await env.DB.prepare(
       `INSERT INTO files (id, workspace_id, uploader_id, r2_key, thumb_key, name, mime, size, width, height, created_at)
@@ -132,11 +132,11 @@ export async function storeUpload(
       .run();
     changes = r.meta.changes;
   } catch (e) {
-    await cleanup(bucket, key);
+    await cleanup(store, key);
     throw e;
   }
   if (changes === 0) {
-    await cleanup(bucket, key);
+    await cleanup(store, key);
     throw quotaExceeded();
   }
   return { id, name: input.name, mime: sniffed.mime, size: input.length, width: sniffed.width, height: sniffed.height, hasThumb: false };

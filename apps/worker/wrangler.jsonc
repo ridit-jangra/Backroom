@@ -15,7 +15,9 @@
     "bindings": [{ "name": "HUB", "class_name": "WorkspaceHub" }]
   },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["WorkspaceHub"] }],
-  "r2_buckets": [{ "binding": "BUCKET", "bucket_name": "backroom" }],
+  // Blob storage (files, thumbnails, custom emoji) is Workers KV: free without a payment card. No R2 binding:
+  // it makes `wrangler deploy` fail while R2 is not enabled on the account. Local dev uses a local KV.
+  "kv_namespaces": [{ "binding": "BLOBS", "id": "<set at deploy>" }],
   "assets": {
     "directory": "../web/dist",
     "binding": "ASSETS",
