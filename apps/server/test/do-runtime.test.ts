@@ -5,6 +5,7 @@ import {
   DurableObject,
   MAX_BUFFERED_BYTES,
   DurableObjectNamespaceShim,
+  abandonSocket,
   attachRawSocket,
   createWebSocketPair,
   type NodeDurableObjectState,
@@ -657,5 +658,31 @@ describe('drain waits for in-flight handlers', () => {
     raw.text('x');
     await ns.drain();
     expect(errors.length).toBe(1);
+  });
+});
+
+describe('minor guards', () => {
+  it('setAlarm after dispose() is a no-op', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    const p = probe();
+    ns.dispose();
+    await p.state.storage.setAlarm(Date.now() + 10);
+    expect(await p.state.storage.getAlarm()).toBeNull();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(p.events).toEqual([]);
+  });
+
+  it('attaching a connection to an already-closed socket terminates it without an unhandled error event', () => {
+    const p = probe();
+    const pair = createWebSocketPair();
+    p.state.acceptWebSocket(pair[1]);
+    abandonSocket(pair[1]);
+    const raw = new FakeRaw();
+    raw.terminate = () => {
+      raw.terminated = true;
+      raw.emit('error', new Error('socket hang up'));
+    };
+    expect(() => attachRawSocket(pair[1], raw)).not.toThrow();
+    expect(raw.terminated).toBe(true);
   });
 });

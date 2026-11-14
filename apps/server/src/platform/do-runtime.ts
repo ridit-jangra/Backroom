@@ -166,6 +166,8 @@ export class NodeWebSocket {
   attachRaw(raw: RawSocket): void {
     if (this.#raw) throw new TypeError('This WebSocket is already connected.');
     if (this.#state === CLOSED) {
+      // Nothing else listens on this connection, so an 'error' while it is torn down must not go unhandled.
+      raw.on('error', () => {});
       raw.terminate();
       return;
     }
