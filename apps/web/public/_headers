@@ -1,2 +1,8 @@
+# Static assets only (Worker routes set their own headers). Matching rules merge, so /twemoji/* gets both.
+/*
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: same-origin
+  X-Frame-Options: DENY
+
 /twemoji/*
   Cache-Control: public, max-age=604800
