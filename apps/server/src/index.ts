@@ -185,11 +185,17 @@ async function main(): Promise<void> {
   http.server.keepAliveTimeout = 65_000;
 
   await new Promise<void>((resolveListen) => {
-    http.server.once('error', (e: NodeJS.ErrnoException) => {
+    const onListenError = (e: NodeJS.ErrnoException) => {
       checkpointAndClose(db);
       fail(`cannot listen on ${config.host}:${config.port} (${e.code ?? e.name})`);
+    };
+    http.server.once('error', onListenError);
+    http.server.listen(config.port, config.host, () => {
+      // Startup failures only: a later server error is logged, never a reason to close the database and exit.
+      http.server.off('error', onListenError);
+      http.server.on('error', (e) => log('error', 'server_error', errorFields(e)));
+      resolveListen();
     });
-    http.server.listen(config.port, config.host, () => resolveListen());
   });
 
   const schedule = startDailySchedule({ run: maintenance, log });
