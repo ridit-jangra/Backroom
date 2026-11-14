@@ -285,6 +285,8 @@ export class NodeDurableObjectId {
 export class NodeAlarmStorage {
   #at: number | null = null;
   #timer: ReturnType<typeof setTimeout> | undefined;
+  /** Set by dispose(): later setAlarm calls (e.g. from a handler still running at shutdown) arm nothing. */
+  #disposed = false;
 
   constructor(private readonly fire: () => Promise<void>) {}
 
@@ -295,6 +297,7 @@ export class NodeAlarmStorage {
   async setAlarm(scheduledTime: number | Date): Promise<void> {
     const at = typeof scheduledTime === 'number' ? scheduledTime : scheduledTime.getTime();
     if (!Number.isFinite(at)) throw new TypeError('setAlarm() requires a valid time.');
+    if (this.#disposed) return;
     this.#at = at;
     this.#arm();
   }
@@ -316,6 +319,7 @@ export class NodeAlarmStorage {
 
   /** @internal */
   dispose(): void {
+    this.#disposed = true;
     this.#at = null;
     this.#clear();
   }
@@ -327,7 +331,7 @@ export class NodeAlarmStorage {
 
   #arm(): void {
     this.#clear();
-    if (this.#at === null) return;
+    if (this.#at === null || this.#disposed) return;
     const delay = Math.min(Math.max(0, this.#at - Date.now()), MAX_TIMER_MS);
     const timer = setTimeout(() => {
       if (this.#timer !== timer) return;
