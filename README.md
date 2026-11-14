@@ -109,7 +109,7 @@ What works:
 - Upload files from the composer (picker, drag-and-drop or paste), with progress, cancel and retry. Up to 10 files per message; a message may be only files. Images get a WebP thumbnail made in the browser; the server never decodes images, runs a transform over upload bytes, or unzips anything.
 - Files are shown inline or as a download card, and download only for people who can see the message they are attached to. Deleting a message detaches its files.
 - Search the workspace from the top bar: free text, filters, 20 results per page, jump to the message.
-- A daily cron deletes files that were uploaded but never attached.
+- A daily cron deletes files that were uploaded but never attached, and purges expired sessions, old sign-in tokens, desktop codes and rate-limit rows.
 
 Limits:
 

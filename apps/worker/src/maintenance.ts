@@ -10,24 +10,27 @@ export const DAILY_LIMIT_KEEP_MS = 172_800_000;
 /**
  * Daily D1-only cleanup (Phase 6): login_tokens and desktop_codes that expired, or were used, more than
  * AUTH_ROW_GRACE_MS ago, rate_limits windows older than RATE_LIMIT_KEEP_MS (daily counters older than
- * DAILY_LIMIT_KEEP_MS). Never touches blob storage.
+ * DAILY_LIMIT_KEEP_MS), and sessions past expires_at. Never touches blob storage.
  */
 export async function cleanupAuth(
   db: D1Database,
   now: number,
-): Promise<{ loginTokens: number; desktopCodes: number; rateLimits: number }> {
+): Promise<{ loginTokens: number; desktopCodes: number; rateLimits: number; sessions: number }> {
   const cutoff = now - AUTH_ROW_GRACE_MS;
-  const [tokens, codes, limits] = await db.batch([
+  const [tokens, codes, limits, sessions] = await db.batch([
     db.prepare('DELETE FROM login_tokens WHERE expires_at < ?1 OR (used_at IS NOT NULL AND used_at < ?1)').bind(cutoff),
     db.prepare('DELETE FROM desktop_codes WHERE expires_at < ?1 OR (used_at IS NOT NULL AND used_at < ?1)').bind(cutoff),
     db
       .prepare(`DELETE FROM rate_limits WHERE window_start < ?1 AND (key NOT LIKE '${EMOJI_DAY_KEY_PREFIX}%' OR window_start < ?2)`)
       .bind(now - RATE_LIMIT_KEEP_MS, now - DAILY_LIMIT_KEEP_MS),
+    // P6-R11: a session past expires_at never resolves again (loadSession requires expires_at > now).
+    db.prepare('DELETE FROM sessions WHERE expires_at < ?').bind(now),
   ]);
   const out = {
     loginTokens: tokens!.meta.changes,
     desktopCodes: codes!.meta.changes,
     rateLimits: limits!.meta.changes,
+    sessions: sessions!.meta.changes,
   };
   console.info(JSON.stringify({ level: 'info', code: 'auth_cleaned', ...out }));
   return out;

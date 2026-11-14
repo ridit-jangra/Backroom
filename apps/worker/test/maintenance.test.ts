@@ -72,6 +72,22 @@ async function seed() {
         ['emoji:day:WS:old', T - 3 * D],
       ] as const
     ).map(([k, w]) => env.DB.prepare('INSERT INTO rate_limits (key, window_start, count) VALUES (?, ?, 3)').bind(k, w)),
+    // P6-R11: sessions past expires_at are never valid again, so the cron removes them.
+    ...(
+      [
+        ['s-live', T + 30 * D],
+        ['s-expiring-soon', T + 60_000],
+        ['s-expired-1m', T - 60_000],
+        ['s-expired-40d', T - 40 * D],
+      ] as const
+    ).map(([h, exp]) =>
+      env.DB.prepare('INSERT INTO sessions (token_hash, user_id, created_at, expires_at, user_agent) VALUES (?, ?, ?, ?, NULL)').bind(
+        h,
+        'u1',
+        T - 60 * D,
+        exp,
+      ),
+    ),
   ]);
 }
 
@@ -79,6 +95,8 @@ const keys = async (sql: string) => (await env.DB.prepare(sql).all<{ k: string }
 const tokens = () => keys('SELECT token_hash AS k FROM login_tokens');
 const codes = () => keys('SELECT code_hash AS k FROM desktop_codes');
 const limits = () => keys('SELECT key AS k FROM rate_limits');
+const sessions = () =>
+  keys("SELECT token_hash AS k FROM sessions WHERE token_hash IN ('s-live', 's-expiring-soon', 's-expired-1m', 's-expired-40d')");
 
 describeBackends('cleanupAuth', () => {
   it('uses a one-day grace for auth rows and keeps rate-limit windows for 2 h', () => {
@@ -88,12 +106,13 @@ describeBackends('cleanupAuth', () => {
 
   it('deletes only expired/used auth rows older than a day and windows older than 2 h', async () => {
     await seed();
-    expect(await cleanupAuth(env.DB, T)).toEqual({ loginTokens: 2, desktopCodes: 2, rateLimits: 3 });
+    expect(await cleanupAuth(env.DB, T)).toEqual({ loginTokens: 2, desktopCodes: 2, rateLimits: 3, sessions: 2 });
+    expect(await sessions()).toEqual(['s-expiring-soon', 's-live']);
     expect(await tokens()).toEqual(['lt-expired-23h', 'lt-live', 'lt-used-1h']);
     expect(await codes()).toEqual(['dc-expired-23h', 'dc-live', 'dc-used-1h']);
     expect(await limits()).toEqual(['emoji:day:WS:today', 'start:ip:119m', 'start:ip:live']);
     // idempotent
-    expect(await cleanupAuth(env.DB, T)).toEqual({ loginTokens: 0, desktopCodes: 0, rateLimits: 0 });
+    expect(await cleanupAuth(env.DB, T)).toEqual({ loginTokens: 0, desktopCodes: 0, rateLimits: 0, sessions: 0 });
   });
 
   it('runs from the scheduled handler; storage loses only the orphan file key, emoji/ survives', async () => {
@@ -122,6 +141,7 @@ describeBackends('cleanupAuth', () => {
     expect(await tokens()).toEqual(['lt-expired-23h', 'lt-live', 'lt-used-1h']);
     expect(await codes()).toEqual(['dc-expired-23h', 'dc-live', 'dc-used-1h']);
     expect(await limits()).toEqual(['emoji:day:WS:today', 'start:ip:119m', 'start:ip:live']);
+    expect(await sessions()).toEqual(['s-expiring-soon', 's-live']);
     expect(deleted).toEqual([orphanKey]);
     expect(await blobHead(orphanKey)).toBeNull();
     expect(await blobHead(`ws/${WS}/emoji/keepme`)).not.toBeNull();
