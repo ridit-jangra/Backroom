@@ -18,7 +18,8 @@ const DESKTOP_CODE_TTL_MS = 120_000;
 export const EXCHANGE_PER_IP_PER_HOUR = 30;
 /** P6-R9: sign-in requests allowed per IP per hour (a whole club behind one NAT must fit). */
 export const START_PER_IP_PER_HOUR = 100;
-const CLEAR_SITE_DATA = '"cache", "storage"';
+// P6-R11: "cache" is dropped (it can make logout slow in Chromium); media responses are private anyway.
+const CLEAR_SITE_DATA = '"storage"';
 
 function constantTimeEqual(a: string, b: string): boolean {
   if (a.length !== b.length) return false;

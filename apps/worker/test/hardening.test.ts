@@ -54,9 +54,9 @@ describe('logout headers', () => {
     const cookie = await signIn(app, sent, 'owner@test.dev');
     const r = await post(app, '/auth/logout', {}, { Cookie: cookie });
     expect(r.status).toBe(200);
-    expect(r.headers.get('Clear-Site-Data')).toBe('"cache", "storage"');
+    expect(r.headers.get('Clear-Site-Data')).toBe('"storage"');
     const anon = await post(app, '/auth/logout', {});
-    expect(anon.headers.get('Clear-Site-Data')).toBe('"cache", "storage"');
+    expect(anon.headers.get('Clear-Site-Data')).toBe('"storage"');
   });
 
   it('/auth/logout-all sends Clear-Site-Data', async () => {
@@ -65,7 +65,7 @@ describe('logout headers', () => {
     const cookie = await signIn(app, sent, 'owner@test.dev');
     const r = await post(app, '/auth/logout-all', {}, { Cookie: cookie });
     expect(r.status).toBe(200);
-    expect(r.headers.get('Clear-Site-Data')).toBe('"cache", "storage"');
+    expect(r.headers.get('Clear-Site-Data')).toBe('"storage"');
   });
 });
 
