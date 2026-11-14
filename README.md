@@ -89,7 +89,8 @@ Build and deploy notes:
 - `npm install` generates the emoji table from `emoji-datasource` into `packages/emoji/src/generated/` (git-ignored); `pretest`, `predev` and `prebuild` hooks regenerate it.
 - `npm run build` copies 3,526 Twemoji SVGs into `apps/web/dist/twemoji/`.
 - Custom emoji, files and thumbnails live in a Workers KV namespace (free, no payment card; R2 would need one). Before the first deploy, create it with `npx wrangler kv namespace create BLOBS` and put the printed id into the `kv_namespaces` entry for the `BLOBS` binding in `apps/worker/wrangler.jsonc` (it says `<set at deploy>` until then; local `wrangler dev` and the tests use a local KV and need no id). There is deliberately no `r2_buckets` entry: an R2 binding makes `wrangler deploy` fail while R2 is not enabled. The worker still has an R2 adapter (`apps/worker/src/lib/blobs.ts`): it is used only when `BLOBS` is not bound and an R2 `BUCKET` is.
-- `assets.run_worker_first` must now be `["/auth/*", "/me", "/w/*", "/invites/*", "/health", "/channels/*", "/messages/*", "/emoji/*", "/ws"]`. Twemoji live under `/twemoji/`, which is served from static assets and deliberately does not collide with `/emoji/*`.
+- `assets.run_worker_first` must now be `["/auth/*", "/me", "/w/*", "/invites/*", "/health", "/channels/*", "/messages/*", "/emoji/*", "/files/*", "/ws"]`. Twemoji live under `/twemoji/`, which is served from static assets and deliberately does not collide with `/emoji/*`.
+- `apps/web/public/_headers` gives every static response, the SPA document included, `X-Content-Type-Options: nosniff`, `Referrer-Policy: same-origin` and `X-Frame-Options: DENY`, and caches `/twemoji/*` for a week. Worker routes set their own headers.
 
 Check it locally without a browser (replace `<cookie>` with the `backroom_session` value; use a PNG of at least 32x32):
 
@@ -121,7 +122,7 @@ Limits:
 | Files per message | 10 |
 | File name | 255 code points |
 | Unattached upload lifetime | 86,400,000 ms (24 h), then the cron removes it |
-| Search query | 256 characters, 16 terms |
+| Search query | 200 characters, 8 terms |
 | Search page | 20 results; at most offset 480 |
 
 Blob key layout (KV namespace `BLOBS`, or R2 bucket `BUCKET` if that is the bound backend):
