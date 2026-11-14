@@ -42,6 +42,12 @@ RESTART_RESET_SECONDS=${RESTART_RESET_SECONDS:-300}
 child=""
 stopping=0
 
+# An unwritable log would make every start fail at the redirect and loop forever without a trace.
+if ! ( : >>"$LOG_FILE" ) 2>/dev/null; then
+  echo "run-forever: cannot write to LOG_FILE ($LOG_FILE)" >&2
+  exit 2
+fi
+
 say() {
   printf '%s run-forever: %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >>"$LOG_FILE"
 }
@@ -78,10 +84,18 @@ pause() {
 
 delay=1
 while :; do
+  if [ "$stopping" -eq 1 ]; then
+    say "stopped before starting the child"
+    exit 0
+  fi
   rotate_if_needed
   started=$(date +%s)
   "$@" >>"$LOG_FILE" 2>&1 &
   child=$!
+  # A signal that arrived before `child` was set found nothing to forward: forward it now.
+  if [ "$stopping" -eq 1 ]; then
+    kill -TERM "$child" 2>/dev/null
+  fi
   say "started pid $child"
 
   # Wait for the child, checking the log size every LOG_CHECK_SECONDS. `wait` returns early when a trapped signal
