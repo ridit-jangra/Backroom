@@ -6,7 +6,9 @@
     "pretest": "mkdir -p ../web/dist && node ../../packages/emoji/scripts/generate.mjs",
     "test": "vitest run",
     "predev": "mkdir -p ../web/dist && node ../../packages/emoji/scripts/generate.mjs && wrangler d1 migrations apply DB --local",
-    "dev": "wrangler dev"
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy --var APP_ORIGIN:https://chat.ridit.space --domain chat.ridit.space",
+    "deploy:dry-run": "wrangler deploy --var APP_ORIGIN:https://chat.ridit.space --domain chat.ridit.space --dry-run"
   },
   "dependencies": {
     "@backroom/emoji": "*",
