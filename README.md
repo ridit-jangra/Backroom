@@ -240,6 +240,10 @@ npx tsc -p apps/worker         # type-check the worker
 npx tsc -p apps/web            # type-check the web app
 ```
 
+## Continuous integration
+
+`.github/workflows/ci.yml` runs on every push and pull request. Job `test` runs `npm test` (all workspaces, including `cargo test` for the desktop app), type-checks `apps/web` and `apps/worker`, and runs `cargo clippy -- -D warnings` on the desktop app. Job `e2e` (after `test`) runs the Playwright suite against `wrangler dev` with bundled chromium and uploads traces on failure. It needs no secrets (the e2e server uses the console mailer). Actions are pinned to commit SHAs. The workflow only runs once the repository has a GitHub remote; none is configured yet, so it has been validated locally (YAML parse) only.
+
 ## Deploying to Cloudflare
 
 1. `npx wrangler login`
