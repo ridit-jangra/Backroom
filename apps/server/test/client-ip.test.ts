@@ -31,6 +31,12 @@ describe('trustedClientIp', () => {
     expect(trustedClientIp({ 'x-forwarded-for': ['1.1.1.1', '3.3.3.3'] }, '10.0.0.2', 'x-forwarded-for')).toBe('3.3.3.3');
   });
 
+  it('x-forwarded-for: only the last hop is parsed, so junk written earlier by the client cannot void it', () => {
+    expect(trustedClientIp({ 'x-forwarded-for': 'garbage, <script>, 2.2.2.2' }, '10.0.0.2', 'x-forwarded-for')).toBe('2.2.2.2');
+    expect(trustedClientIp({ 'x-forwarded-for': ['not an ip', ' 2001:db8::7 '] }, '10.0.0.2', 'x-forwarded-for')).toBe('2001:db8::7');
+    expect(trustedClientIp({ 'x-forwarded-for': '1.1.1.1,' }, '10.0.0.2', 'x-forwarded-for')).toBe('10.0.0.2');
+  });
+
   it('a configured header that is missing, repeated or malformed falls back to the socket address', () => {
     expect(trustedClientIp({}, '10.0.0.2', 'cf-connecting-ip')).toBe('10.0.0.2');
     expect(trustedClientIp({ 'cf-connecting-ip': ['1.1.1.1', '2.2.2.2'] }, '10.0.0.2', 'cf-connecting-ip')).toBe('10.0.0.2');

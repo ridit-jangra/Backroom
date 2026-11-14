@@ -24,11 +24,10 @@ function fromTrustedHeader(headers: HeaderBag, name: string): string | null {
   const raw = headers[name];
   if (raw === undefined) return null;
   if (name === 'x-forwarded-for') {
-    // Each proxy appends the address it saw: the last entry is the one written by the proxy next to us.
+    // Each proxy appends the address it saw: only the last entry (written by the proxy next to us) is trusted, and
+    // only it is parsed; anything before it came from the client or earlier hops and may be junk.
     const hops = (Array.isArray(raw) ? raw.join(',') : raw).split(',');
-    const ips = hops.map((h) => normalizeIp(h));
-    if (ips.some((ip) => ip === null)) return null;
-    return ips[ips.length - 1] ?? null;
+    return normalizeIp(hops[hops.length - 1]);
   }
   if (Array.isArray(raw)) return raw.length === 1 ? normalizeIp(raw[0]) : null;
   return normalizeIp(raw);
