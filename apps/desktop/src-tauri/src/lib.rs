@@ -10,6 +10,7 @@ use std::sync::{Mutex, PoisonError};
 use std::time::Instant;
 
 use auth::VerifierStore;
+use commands::PendingNavigation;
 use policy::{DeepLink, ExternalOpenLimiter, Nav};
 use tauri::webview::{DownloadEvent, NewWindowResponse};
 use tauri::{
@@ -129,20 +130,26 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
         .manage(VerifierStore::default())
+        .manage(PendingNavigation::default())
         .manage(ExternalLimiter::default())
         .manage(ViewerOpenLimiter::default())
         .invoke_handler(tauri::generate_handler![
             commands::notify,
             commands::set_badge,
             commands::platform,
-            commands::login_challenge
+            commands::login_challenge,
+            commands::take_pending_navigation
         ])
         .setup(|app| {
             let origin = policy::app_origin(APP_URL)?;
             app.add_capability(commands::remote_capability(&origin))?;
             let handle = app.handle().clone();
             restrict_data_dir(&handle);
-            build_main_window(&handle, &origin)?;
+            let close = tray::close_policy(tray::host_available());
+            if let Some(token) = close.log {
+                eprintln!("backroom: {token}");
+            }
+            build_main_window(&handle, &origin, close.on_close)?;
             tray::build(&handle)?;
             setup_notification_clicks(&handle);
             setup_deep_links(&handle, origin);
@@ -161,7 +168,11 @@ pub(crate) fn show_main<R: Runtime>(app: &AppHandle<R>) {
     }
 }
 
-fn build_main_window<R: Runtime>(app: &AppHandle<R>, origin: &Url) -> tauri::Result<()> {
+fn build_main_window<R: Runtime>(
+    app: &AppHandle<R>,
+    origin: &Url,
+    on_close: tray::CloseAction,
+) -> tauri::Result<()> {
     let builder = WebviewWindowBuilder::new(app, MAIN_WINDOW, WebviewUrl::External(origin.clone()))
         .title("Backroom")
         .inner_size(1200.0, 800.0)
@@ -176,12 +187,18 @@ fn build_main_window<R: Runtime>(app: &AppHandle<R>, origin: &Url) -> tauri::Res
     };
     let window = lock_down(builder, app, origin).build()?;
 
-    // Closing hides to the tray; the tray's Quit exits.
+    // With a tray host, closing hides to the tray (its Quit exits); without
+    // one the window could never come back, so closing quits (viewers too).
     let hide = window.clone();
     window.on_window_event(move |event| {
         if let WindowEvent::CloseRequested { api, .. } = event {
-            api.prevent_close();
-            let _ = hide.hide();
+            match on_close {
+                tray::CloseAction::HideToTray => {
+                    api.prevent_close();
+                    let _ = hide.hide();
+                }
+                tray::CloseAction::Quit => hide.app_handle().exit(0),
+            }
         }
     });
     Ok(())
@@ -455,7 +472,10 @@ fn handle_deep_link<R: Runtime>(
             show_main(app);
             notice(app, LINK_EXPIRED_NOTICE);
         }
+        // Stored as well as emitted: on a cold start the page is not listening
+        // yet and pulls the id with `take_pending_navigation` (P5-R9).
         DeepLinkAction::EmitNavigate(id) => {
+            app.state::<PendingNavigation>().store(&id);
             show_main(app);
             emit_navigate(app, &id);
         }
@@ -496,6 +516,7 @@ mod tests {
     fn mock_app() -> App<MockRuntime> {
         let app = mock_builder()
             .manage(VerifierStore::default())
+            .manage(PendingNavigation::default())
             .build(tauri::generate_context!())
             .expect("mock app");
         WebviewWindowBuilder::new(&app, MAIN_WINDOW, WebviewUrl::External(origin()))
@@ -747,6 +768,119 @@ mod tests {
             *seen.lock().unwrap(),
             vec![format!(r#"{{"channelId":"{ULID}"}}"#)]
         );
+    }
+
+    #[test]
+    fn channel_deep_link_is_also_kept_for_a_later_pull() {
+        // Cold start: the page is not listening yet, so the live event is lost;
+        // the id waits in the slot for take_pending_navigation (P5-R9).
+        let app = mock_app();
+        handle_deep_link(
+            app.handle(),
+            &origin(),
+            &format!("backroom://channel/{ULID}"),
+            &no_notice,
+        );
+        let pending = app.state::<PendingNavigation>();
+        assert_eq!(pending.take(), Some(ULID.to_string()));
+        assert_eq!(pending.take(), None, "at most once");
+
+        // Invalid channel links and auth links never fill the slot.
+        handle_deep_link(
+            app.handle(),
+            &origin(),
+            "backroom://channel/nope",
+            &no_notice,
+        );
+        let (_seen, notice) = recorder();
+        handle_deep_link(
+            app.handle(),
+            &origin(),
+            &format!("backroom://auth?code={CODE}"),
+            &notice,
+        );
+        assert_eq!(pending.take(), None);
+    }
+
+    #[test]
+    fn take_pending_navigation_command_requires_main() {
+        let app = mock_app();
+        let viewer = WebviewWindowBuilder::new(
+            &app,
+            format!("{VIEWER_PREFIX}1"),
+            WebviewUrl::External(origin()),
+        )
+        .build()
+        .unwrap();
+        app.state::<PendingNavigation>().store(ULID);
+        assert_eq!(
+            commands::take_pending_navigation(viewer.as_ref().clone(), app.state()),
+            Err("forbidden".to_string())
+        );
+        let main = app.get_webview_window(MAIN_WINDOW).unwrap();
+        assert_eq!(
+            commands::take_pending_navigation(main.as_ref().clone(), app.state()),
+            Ok(Some(ULID.to_string())),
+            "a viewer's denied call leaves the id for main"
+        );
+        assert_eq!(
+            commands::take_pending_navigation(main.as_ref().clone(), app.state()),
+            Ok(None)
+        );
+    }
+
+    fn invoke_request(cmd: &str, url: Url) -> tauri::webview::InvokeRequest {
+        tauri::webview::InvokeRequest {
+            cmd: cmd.into(),
+            callback: tauri::ipc::CallbackFn(0),
+            error: tauri::ipc::CallbackFn(1),
+            url,
+            body: tauri::ipc::InvokeBody::default(),
+            headers: Default::default(),
+            invoke_key: tauri::test::INVOKE_KEY.to_string(),
+        }
+    }
+
+    #[test]
+    fn take_pending_navigation_is_callable_through_the_acl() {
+        // Real context + the runtime capability: the call from the main window
+        // on the app origin passes the ACL; a viewer or another origin does not.
+        let app = mock_builder()
+            .manage(PendingNavigation::default())
+            .invoke_handler(tauri::generate_handler![commands::take_pending_navigation])
+            .build(tauri::generate_context!())
+            .expect("mock app");
+        app.add_capability(commands::remote_capability(&origin()))
+            .expect("capability resolves");
+        let main = WebviewWindowBuilder::new(&app, MAIN_WINDOW, WebviewUrl::External(origin()))
+            .build()
+            .unwrap();
+        let viewer = WebviewWindowBuilder::new(
+            &app,
+            format!("{VIEWER_PREFIX}1"),
+            WebviewUrl::External(origin()),
+        )
+        .build()
+        .unwrap();
+        let take = |w: &tauri::WebviewWindow<MockRuntime>, url: &str| {
+            tauri::test::get_ipc_response(
+                w,
+                invoke_request("take_pending_navigation", Url::parse(url).unwrap()),
+            )
+            .map(|body| body.deserialize::<Option<String>>().unwrap())
+        };
+
+        app.state::<PendingNavigation>().store(ULID);
+        assert!(take(&viewer, "http://localhost:8787/").is_err(), "viewer");
+        assert!(
+            take(&main, "http://localhost:8788/").is_err(),
+            "other origin"
+        );
+        assert_eq!(
+            take(&main, "http://localhost:8787/client/x").unwrap(),
+            Some(ULID.to_string())
+        );
+        assert_eq!(take(&main, "http://localhost:8787/").unwrap(), None);
     }
 
     #[test]

@@ -68,6 +68,106 @@ describe('bridge in desktop', () => {
   });
 });
 
+describe('pending navigation pull (P5-R9)', () => {
+  const PENDING = '01HZX3K7Q9M2N4P6R8T0V2W4Y6';
+  type Handler = (e: { payload: { channelId: string } }) => void;
+  const flush = () => new Promise((r) => setTimeout(r, 0));
+  const takes = () => invoke.mock.calls.filter(([c]) => c === 'take_pending_navigation').length;
+
+  it('calls take_pending_navigation once after subscribing and delivers the id', async () => {
+    markDesktop();
+    const order: string[] = [];
+    listen.mockImplementation(async () => {
+      order.push('listen');
+      return () => {};
+    });
+    invoke.mockImplementation(async (cmd: string) => {
+      order.push(cmd);
+      return cmd === 'take_pending_navigation' ? PENDING : undefined;
+    });
+    const cb = vi.fn();
+    const off = onDesktopNavigate(cb);
+    await waitFor(() => expect(cb).toHaveBeenCalledWith(PENDING));
+    await flush();
+    expect(cb).toHaveBeenCalledTimes(1);
+    expect(order).toEqual(['listen', 'take_pending_navigation']);
+    expect(invoke).toHaveBeenCalledWith('take_pending_navigation', undefined);
+    off();
+  });
+
+  it('ignores an empty or malformed pull result', async () => {
+    markDesktop();
+    for (const value of [null, undefined, '', 42, { id: PENDING }]) {
+      invoke.mockReset();
+      invoke.mockImplementation(async () => value);
+      const cb = vi.fn();
+      const off = onDesktopNavigate(cb);
+      await waitFor(() => expect(takes()).toBe(1));
+      await flush();
+      expect(cb).not.toHaveBeenCalled();
+      off();
+    }
+  });
+
+  it('does not pull when unsubscribed before listen resolves (StrictMode remount)', async () => {
+    markDesktop();
+    invoke.mockImplementation(async () => PENDING);
+    const cb = vi.fn();
+    onDesktopNavigate(cb)();
+    await flush();
+    await flush();
+    expect(takes()).toBe(0);
+    expect(cb).not.toHaveBeenCalled();
+  });
+
+  it('drops a pull result that arrives after unsubscribing', async () => {
+    markDesktop();
+    let resolve: (v: string) => void = () => {};
+    invoke.mockImplementation(() => new Promise((r) => (resolve = r)));
+    const cb = vi.fn();
+    const off = onDesktopNavigate(cb);
+    await waitFor(() => expect(takes()).toBe(1));
+    off();
+    resolve(PENDING);
+    await flush();
+    expect(cb).not.toHaveBeenCalled();
+  });
+
+  it('a live event navigates and drains the slot; the same id from the pull is not delivered twice', async () => {
+    markDesktop();
+    let handler: Handler | undefined;
+    listen.mockImplementation(async (_name: string, h: Handler) => {
+      handler = h;
+      return () => {};
+    });
+    let resolvePull: (v: string | null) => void = () => {};
+    invoke.mockImplementationOnce(() => new Promise((r) => (resolvePull = r)));
+    invoke.mockImplementation(async () => null);
+    const cb = vi.fn();
+    const off = onDesktopNavigate(cb);
+    await waitFor(() => expect(takes()).toBe(1));
+    // The link arrives live while the first pull is still in flight.
+    act(() => handler!({ payload: { channelId: PENDING } }));
+    expect(cb).toHaveBeenCalledWith(PENDING);
+    await waitFor(() => expect(takes()).toBe(2));
+    resolvePull(PENDING);
+    await flush();
+    expect(cb).toHaveBeenCalledTimes(1);
+    // A later live click on the same channel still navigates.
+    act(() => handler!({ payload: { channelId: PENDING } }));
+    expect(cb).toHaveBeenCalledTimes(2);
+    off();
+  });
+
+  it('Workspace opens the channel from a cold-start link', async () => {
+    markDesktop();
+    invoke.mockImplementation(async (cmd: string) => (cmd === 'take_pending_navigation' ? RAND : undefined));
+    stubApi();
+    await boot(`/client/clubhack/${GEN}`);
+    await waitFor(() => expect(location.pathname).toBe(`/client/clubhack/${RAND}`));
+  });
+});
+
 describe('desktop login pages', () => {
   it('Login submits desktopChallenge from login_challenge', async () => {
     markDesktop();

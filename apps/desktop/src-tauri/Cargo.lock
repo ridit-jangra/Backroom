@@ -228,6 +228,7 @@ dependencies = [
  "tauri-plugin-opener",
  "tauri-plugin-single-instance",
  "url",
+ "zbus 5.19.0",
 ]
 
 [[package]]

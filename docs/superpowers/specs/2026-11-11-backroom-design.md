@@ -300,12 +300,23 @@ state-changing requests require a matching `Origin`.
   event listening. The web app reaches them through `apps/web/src/desktop/bridge.ts`
   (`@tauri-apps/api`), and is a no-op outside the desktop app.
 - Commands: `notify({title, body, channelId})`, `set_badge(count)`,
-  `platform()`, `login_challenge()`. Command arguments are validated in Rust
-  (lengths, ULID channel ids, count bounds).
+  `platform()`, `login_challenge()`, `take_pending_navigation()`. Command
+  arguments are validated in Rust (lengths, ULID channel ids, count bounds).
+- `take_pending_navigation() -> channelId | null` (Phase 6, P5-R9): Rust keeps
+  the last `backroom://channel/<id>` link (cold start or while running) in a
+  one-slot store with a 60 s TTL; a newer link replaces an older one, and the id
+  is re-validated as a ULID. The command returns the id at most once. Every
+  channel link is both stored and emitted live as `backroom://navigate`; the
+  page pulls once right after subscribing (covers a cold start) and drains the
+  slot when a live event arrives. A duplicate only reopens the same channel.
 - Native notifications (via the notification plugin / notify-rust); clicking
   focuses the window and emits `backroom://navigate` with the channel id. Tray
   icon with Show/Quit menu and unread count in the tooltip; window badge count
-  where the desktop supports it.
+  where the desktop supports it. Closing the main window hides it to the tray.
+  At startup (Linux) a D-Bus probe with a 500 ms timeout checks the session bus
+  for an owner of `org.kde.StatusNotifierWatcher`; with no tray host (or no
+  session bus) closing the main window quits the app instead, and
+  `tray_unavailable` is logged.
 - Single-instance plugin (with deep-link forwarding); `backroom://` scheme via
   the deep-link plugin. Deep links route to the auth hand-off or channel
   navigation; anything else is ignored.

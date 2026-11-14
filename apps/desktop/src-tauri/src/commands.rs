@@ -3,6 +3,9 @@
 //! the app origin. Arguments are validated by `policy`; nothing here logs
 //! titles, bodies or secrets.
 
+use std::sync::{Mutex, PoisonError};
+use std::time::{Duration, Instant};
+
 use tauri::ipc::CapabilityBuilder;
 use tauri::{AppHandle, Manager, Runtime, State, Url, Webview};
 use tauri_plugin_notification::NotificationExt;
@@ -16,16 +19,62 @@ pub const CAPABILITY_ID: &str = "remote-app";
 /// Key in the notification's extra payload that carries the channel id.
 pub const NOTIFY_CHANNEL_KEY: &str = "channelId";
 
-/// Permissions the remote page gets: event listening plus our four commands
+/// Permissions the remote page gets: event listening plus our five commands
 /// (the `allow-*` permissions are generated from the app manifest in build.rs).
-pub const REMOTE_PERMISSIONS: [&str; 6] = [
+pub const REMOTE_PERMISSIONS: [&str; 7] = [
     "core:event:allow-listen",
     "core:event:allow-unlisten",
     "allow-notify",
     "allow-set-badge",
     "allow-platform",
     "allow-login-challenge",
+    "allow-take-pending-navigation",
 ];
+
+/// How long a channel link waits for the page to pull it.
+pub const PENDING_NAV_TTL: Duration = Duration::from_secs(60);
+
+/// Managed state: the last `backroom://channel/<id>` link (P5-R9). One slot;
+/// a newer link replaces an older one; it expires after [`PENDING_NAV_TTL`].
+///
+/// Delivery rule: every channel link is stored here *and* emitted live as
+/// `backroom://navigate`. The page pulls once right after subscribing (this
+/// covers a cold start, when nobody listened to the emit) and drains the slot
+/// whenever a live event arrives (so a later remount does not replay it). A
+/// link seen on both paths only opens the same channel twice, which is
+/// idempotent.
+#[derive(Default)]
+pub struct PendingNavigation(Mutex<Option<(String, Instant)>>);
+
+impl PendingNavigation {
+    pub fn store(&self, channel_id: &str) {
+        self.store_at(channel_id, Instant::now());
+    }
+
+    /// Stores a valid channel id (a ULID); anything else is ignored.
+    pub fn store_at(&self, channel_id: &str, now: Instant) {
+        if policy::is_ulid(channel_id) {
+            *self.slot() = Some((channel_id.to_string(), now));
+        }
+    }
+
+    pub fn take(&self) -> Option<String> {
+        self.take_at(Instant::now())
+    }
+
+    /// Empties the slot; returns the id only if it is still fresh.
+    pub fn take_at(&self, now: Instant) -> Option<String> {
+        self.slot()
+            .take()
+            .filter(|(_, at)| now.saturating_duration_since(*at) < PENDING_NAV_TTL)
+            .map(|(id, _)| id)
+            .filter(|id| policy::is_ulid(id))
+    }
+
+    fn slot(&self) -> std::sync::MutexGuard<'_, Option<(String, Instant)>> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
 
 /// `remote-app`: window "main" only, remote URLs `<origin>/*` only, never local.
 /// Viewer windows match no capability, so they have no IPC at all.
@@ -100,6 +149,16 @@ pub fn login_challenge<R: Runtime>(
     Ok(store.login_challenge())
 }
 
+/// The pending channel id, at most once (see [`PendingNavigation`]).
+#[tauri::command]
+pub fn take_pending_navigation<R: Runtime>(
+    webview: Webview<R>,
+    pending: State<'_, PendingNavigation>,
+) -> Result<Option<String>, String> {
+    require_main(&webview)?;
+    Ok(pending.take())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -108,6 +167,79 @@ mod tests {
 
     fn origin() -> Url {
         policy::app_origin("http://localhost:8787").unwrap()
+    }
+
+    // ---- pending navigation (P5-R9) ----
+
+    const ULID: &str = "01HZX3K7Q9M2N4P6R8T0V2W4Y6";
+    const ULID2: &str = "01HZX3K7Q9M2N4P6R8T0V2W4Y7";
+
+    #[test]
+    fn pending_navigation_is_taken_at_most_once() {
+        let pending = PendingNavigation::default();
+        let t0 = Instant::now();
+        assert_eq!(pending.take_at(t0), None, "empty at start");
+        pending.store_at(ULID, t0);
+        assert_eq!(pending.take_at(t0), Some(ULID.to_string()));
+        assert_eq!(pending.take_at(t0), None, "second take finds nothing");
+    }
+
+    #[test]
+    fn pending_navigation_expires_after_the_ttl() {
+        assert_eq!(PENDING_NAV_TTL, Duration::from_secs(60));
+        let pending = PendingNavigation::default();
+        let t0 = Instant::now();
+        pending.store_at(ULID, t0);
+        assert_eq!(
+            pending.take_at(t0 + Duration::from_secs(59)),
+            Some(ULID.to_string())
+        );
+        pending.store_at(ULID, t0);
+        assert_eq!(pending.take_at(t0 + PENDING_NAV_TTL), None, "expired");
+        assert_eq!(
+            pending.take_at(t0),
+            None,
+            "an expired take still clears the slot"
+        );
+    }
+
+    #[test]
+    fn newer_pending_link_replaces_the_older_one() {
+        let pending = PendingNavigation::default();
+        let t0 = Instant::now();
+        pending.store_at(ULID, t0);
+        pending.store_at(ULID2, t0 + Duration::from_secs(1));
+        assert_eq!(
+            pending.take_at(t0 + Duration::from_secs(1)),
+            Some(ULID2.to_string())
+        );
+        assert_eq!(pending.take_at(t0 + Duration::from_secs(1)), None);
+    }
+
+    #[test]
+    fn pending_navigation_stores_only_ulids() {
+        let pending = PendingNavigation::default();
+        let t0 = Instant::now();
+        pending.store_at(ULID, t0);
+        for bad in [
+            "",
+            "nope",
+            "../../x",
+            "01HZX3K7Q9M2N4P6R8T0V2W4Y",
+            &ULID.to_lowercase(),
+        ] {
+            pending.store_at(bad, t0);
+        }
+        assert_eq!(
+            pending.take_at(t0),
+            Some(ULID.to_string()),
+            "invalid ids never replace a valid one"
+        );
+    }
+
+    #[test]
+    fn remote_permissions_grant_take_pending_navigation() {
+        assert!(REMOTE_PERMISSIONS.contains(&"allow-take-pending-navigation"));
     }
 
     #[test]

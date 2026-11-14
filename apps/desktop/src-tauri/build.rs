@@ -21,6 +21,7 @@ fn main() {
             "set_badge",
             "platform",
             "login_challenge",
+            "take_pending_navigation",
         ]),
     ))
     .expect("failed to run tauri-build");

@@ -202,7 +202,7 @@ The code alone is useless without the verifier, which never leaves the app and i
 ### Security notes (threat model)
 
 - Origin lock: only the app origin loads in the app windows. Other http(s) links open in your default browser (rate limited), and every other scheme is dropped.
-- Capability scope: the desktop commands (`notify`, `set_badge`, `platform`, `login_challenge`) are granted at runtime only to the main window and only for the app origin. Each command also checks that it was called from the main window.
+- Capability scope: the desktop commands (`notify`, `set_badge`, `platform`, `login_challenge`, `take_pending_navigation`) are granted at runtime only to the main window and only for the app origin. Each command also checks that it was called from the main window.
 - PKCE: the one-time login code is bound to a challenge made by the app, so a code intercepted from the custom-scheme link cannot be redeemed without the in-memory verifier. Codes are single use and expire quickly.
 - Viewer windows: file links that open in a new window get a `viewer-<n>` window with no IPC access at all and no opener link back to the page; viewer creation is rate limited.
 - Downloads: the file name suggested by the server is reduced to a safe basename (no paths, leading dots or spaces, control or bidi characters, length-capped) and never overwrites an existing file.
@@ -210,10 +210,13 @@ The code alone is useless without the verifier, which never leaves the app and i
 
 ### Known limitations
 
-- A `backroom://channel/<id>` link that cold-starts the app opens the app but does not select that channel (the page is not ready to receive the event). Links clicked while the app is running work. Planned for Phase 6.
 - A local application can send a fake `backroom://auth` link and spoil a pending desktop login by consuming the verifier. This can only cause a failed sign-in; request a new email and try again.
 - Deep links need the installed `.desktop` file (the `.deb`) or a started AppImage (it registers itself); a bare release binary does not register the scheme.
-- Closing the window hides it to the tray. On GNOME without the AppIndicator extension there is no tray icon, so the app keeps running hidden; launch Backroom again to show it, or quit it with `pkill backroom-desktop`. Planned for Phase 6.
+
+### Tray and channel links
+
+- Closing the window hides it to the tray; use the tray's Quit to exit. At startup the app asks the session D-Bus whether a tray host (`org.kde.StatusNotifierWatcher`) is running. If there is none (for example GNOME without the AppIndicator extension), or the check cannot run, closing the main window quits the app instead, and it logs `tray_unavailable`. A tray host started after Backroom is not noticed until the next launch.
+- A `backroom://channel/<id>` link opens that channel whether the app was already running or the link started it. The app keeps the last channel link for 60 seconds until the page asks for it.
 
 ### Troubleshooting
 
