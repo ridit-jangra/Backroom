@@ -42,15 +42,13 @@ You need Node 26 and npm. Nothing is installed globally.
 ```sh
 git clone <this repository's URL> backroom
 cd backroom
-npm ci                         # also generates the emoji table
-npm run build -w apps/web      # -> apps/web/dist
-npm run build -w apps/server   # -> apps/server/dist/server.mjs
-APP_ORIGIN=http://localhost:8080 OWNER_EMAIL=you@example.com npm start -w apps/server
+npm ci                                   # also generates the emoji table
+OWNER_EMAIL=you@example.com npm run dev  # builds the web app and the server, then starts it on port 8080
 ```
 
-Open http://localhost:8080 (the same origin as `APP_ORIGIN`; other origins are refused by design) and request a sign-in link for the `OWNER_EMAIL` address. That address becomes the workspace owner.
+Open http://localhost:8080 and request a sign-in link for the `OWNER_EMAIL` address. That address becomes the workspace owner. (Without `OWNER_EMAIL` it defaults to `owner@localhost`.) Use exactly that origin: requests from other origins are refused by design.
 
-`RESEND_API_KEY` is not set, so the server uses the console mailer: no email is sent, and the link is printed in the terminal as
+`npm run dev` always uses the console mailer (`RESEND_API_KEY=dev`): no email is sent, and the link is printed in the terminal as
 
 ```
 Sign-in link for you@example.com: http://localhost:8080/verify?t=...
@@ -58,9 +56,16 @@ Sign-in link for you@example.com: http://localhost:8080/verify?t=...
 
 Open it and click "Sign in". To add people, open Admin in the web app, create an invite and send its link. Each person signs in through the link with their own email.
 
-Data goes to `apps/server/data/` (the default `DATA_DIR` when started this way). Delete that folder to start over. Stop the server with Ctrl+C; it shuts down gracefully.
+Data goes to `apps/server/data/`. Delete that folder to start over. Stop the server with Ctrl+C; it shuts down gracefully. Other settings can be given the same way (`PORT=8090 npm run dev`; `APP_ORIGIN` follows `PORT` unless you set it). See `apps/server/.env.example`.
 
-For working on the code: rebuild the web app or the server and restart after changes. `npm run dev` still starts the older `wrangler dev` loop on port 8787 (Cloudflare's local runtime; no Cloudflare account needed), which some contributors use for the API.
+What the scripts do:
+
+| Script | What it runs |
+|---|---|
+| `npm run build` | `npm run build -w apps/web` (to `apps/web/dist`) and `npm run build -w apps/server` (to `apps/server/dist/server.mjs`) |
+| `npm run dev` (`dev:all` is the same) | `build`, then `dev:start` |
+| `npm run dev:start` | starts the built server with the console mailer, without rebuilding (after a change, rerun `npm run dev`) |
+| `npm run dev:worker`, `dev:worker:all` | the old, unmaintained `wrangler dev` loop on port 8787 (Cloudflare's local runtime; no account needed) |
 
 ## Desktop app
 
@@ -72,7 +77,7 @@ Desktop installers: coming soon. Until then, build from source.
 BACKROOM_APP_URL=https://chat.example.com npm run build -w apps/desktop
 ```
 
-`BACKROOM_APP_URL` is compiled in. It must be your server's exact public origin (scheme, host and port, no path, no redirects). The packages land in `apps/desktop/src-tauri/target/release/bundle/`. Sign-in uses the same email link: the link opens in your browser, which hands a one-time code back to the app through a `backroom://` link (PKCE, so an intercepted code is useless).
+`BACKROOM_APP_URL` is compiled in. It must be your server's exact public origin (scheme, host and port, no path, no redirects). The packages land in `apps/desktop/src-tauri/target/release/bundle/`. `apps/desktop/scripts/smoke.sh` builds a debug app for `http://localhost:8788`, starts the Node server there with a scratch data folder and the console mailer, and checks that the app loads (under `xvfb-run`, or `--direct` on your display; `--server-only` checks just the server part). Sign-in uses the same email link: the link opens in your browser, which hands a one-time code back to the app through a `backroom://` link (PKCE, so an intercepted code is useless).
 
 ## Repository layout
 

@@ -5,9 +5,12 @@
   "scripts": {
     "postinstall": "npm run generate -w @backroom/emoji",
     "test": "npm test --workspaces --if-present",
-    "build": "npm run build -w apps/web",
-    "dev": "npm run dev -w apps/worker",
-    "dev:all": "npm run build -w apps/web && npm run dev -w apps/worker",
+    "build": "npm run build -w apps/web && npm run build -w apps/server",
+    "dev": "npm run build && npm run dev:start",
+    "dev:all": "npm run dev",
+    "dev:start": "APP_ORIGIN=${APP_ORIGIN:-http://localhost:${PORT:-8080}} OWNER_EMAIL=${OWNER_EMAIL:-owner@localhost} RESEND_API_KEY=dev npm start -w apps/server",
+    "dev:worker": "npm run dev -w apps/worker",
+    "dev:worker:all": "npm run build -w apps/web && npm run dev -w apps/worker",
     "e2e": "playwright test -c e2e"
   },
   "devDependencies": {
