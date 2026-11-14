@@ -3,7 +3,8 @@
  * 1. stop the maintenance timer and stop accepting connections;
  * 2. close every hub WebSocket with 1001 and give the close frames a moment to go out, then terminate what is
  *    left (bridge), cancel hub alarms, and wait for hub handlers;
- * 3. wait for `waitUntil` work and in-flight requests, up to `timeoutMs`, then force connections closed;
+ * 3. wait for hub handlers, `waitUntil` work, in-flight requests and a running maintenance job, up to `timeoutMs`,
+ *    then force connections closed;
  * 4. checkpoint the WAL and close the database; exit 0 (1 if the database could not be closed).
  * A second signal exits at once with 1.
  */
@@ -19,6 +20,8 @@ export interface ShutdownSteps {
   drainHubs(): Promise<void>;
   drainWork(): Promise<void>;
   drainRequests(): Promise<void>;
+  /** The maintenance run in progress, if any (its lock file is released when it ends). */
+  drainMaintenance(): Promise<void>;
   forceCloseConnections(): void;
   closeDb(): void;
 }
@@ -63,6 +66,7 @@ export function createShutdown(
       step('drainHubs', () => steps.drainHubs()),
       step('drainWork', () => steps.drainWork()),
       step('drainRequests', () => steps.drainRequests()),
+      step('drainMaintenance', () => steps.drainMaintenance()),
     ]).then(() => 'drained' as const);
     const outcome = await Promise.race([drained, timedOut]);
     clearTimeout(timer);

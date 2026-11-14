@@ -23,6 +23,7 @@ function fakes(overrides: Partial<ShutdownSteps> = {}) {
     drainHubs: asyncStep('drainHubs'),
     drainWork: asyncStep('drainWork'),
     drainRequests: asyncStep('drainRequests'),
+    drainMaintenance: asyncStep('drainMaintenance'),
     forceCloseConnections: step('forceCloseConnections'),
     closeDb: step('closeDb'),
     ...overrides,
@@ -48,6 +49,7 @@ describe('graceful shutdown', () => {
       'drainHubs',
       'drainWork',
       'drainRequests',
+      'drainMaintenance',
       'closeDb',
     ]);
     expect(f.exit).toHaveBeenCalledExactlyOnceWith(0);
@@ -76,6 +78,27 @@ describe('graceful shutdown', () => {
     await s.done;
     expect(f.order.indexOf('closeDb')).toBeGreaterThan(f.order.indexOf('drainHubs done'));
     expect(f.exit).toHaveBeenCalledWith(0);
+  });
+
+  it('a running maintenance job is waited for before the database closes', async () => {
+    let release!: () => void;
+    const f = fakes({
+      drainMaintenance: () =>
+        new Promise<void>((r) => {
+          release = () => {
+            f.order.push('maintenance done');
+            r();
+          };
+        }),
+    });
+    const s = createShutdown(f.steps, { exit: f.exit, log: f.log, timeoutMs: 5000 });
+    s.onSignal('SIGTERM');
+    await vi.waitFor(() => expect(release).toBeDefined());
+    await new Promise((r) => setTimeout(r, 20));
+    expect(f.order).not.toContain('closeDb');
+    release();
+    await s.done;
+    expect(f.order.indexOf('closeDb')).toBeGreaterThan(f.order.indexOf('maintenance done'));
   });
 
   it('after the time limit: forces connections closed, then still closes the database and exits 0', async () => {

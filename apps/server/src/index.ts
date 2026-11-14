@@ -216,6 +216,9 @@ async function main(): Promise<void> {
       disposeHubs: () => hubs.dispose(),
       drainHubs: () => hubs.drain(),
       drainWork: () => work.drain(),
+      drainMaintenance: async () => {
+        await schedule.running();
+      },
       drainRequests: async () => {
         await http.idle();
         http.server.closeIdleConnections();

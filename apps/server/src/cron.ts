@@ -31,6 +31,8 @@ export interface DailySchedule {
   stop(): void;
   /** When the next run is due, or null once stopped. */
   nextAt(): Date | null;
+  /** The run in progress (settles when it ends, never rejects), or null. Shutdown waits on it. */
+  running(): Promise<void> | null;
 }
 
 /** Runs `run` every day at the local hour; a run still going when the next is due makes that one a skip. */
@@ -38,7 +40,7 @@ export function startDailySchedule(opts: { run: () => Promise<unknown>; hour?: n
   const log = opts.log ?? noop;
   let timer: ReturnType<typeof setTimeout> | null = null;
   let next: Date | null = null;
-  let running = false;
+  let current: Promise<void> | null = null;
   let stopped = false;
 
   const arm = () => {
@@ -52,15 +54,18 @@ export function startDailySchedule(opts: { run: () => Promise<unknown>; hour?: n
   const fire = () => {
     timer = null;
     if (next && Date.now() < next.getTime()) return arm(); // woke early (clock change): wait for the real time
-    if (running) log('warn', 'maintenance_skipped', { reason: 'still_running' });
+    if (current) log('warn', 'maintenance_skipped', { reason: 'still_running' });
     else {
-      running = true;
-      void Promise.resolve()
+      const run: Promise<void> = Promise.resolve()
         .then(opts.run)
-        .catch((e: unknown) => log('error', 'maintenance_failed', errorFields(e)))
+        .then(
+          () => {},
+          (e: unknown) => log('error', 'maintenance_failed', errorFields(e)),
+        )
         .finally(() => {
-          running = false;
+          if (current === run) current = null;
         });
+      current = run;
     }
     arm();
   };
@@ -74,6 +79,7 @@ export function startDailySchedule(opts: { run: () => Promise<unknown>; hour?: n
       next = null;
     },
     nextAt: () => next,
+    running: () => current,
   };
 }
 

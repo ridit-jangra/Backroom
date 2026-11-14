@@ -96,6 +96,27 @@ describe('startDailySchedule', () => {
     expect(s.nextAt()).toBeNull();
   });
 
+  it('running() exposes the run in progress (for shutdown to wait on), null otherwise', async () => {
+    vi.useFakeTimers();
+    process.env.TZ = 'UTC';
+    vi.setSystemTime(new Date('2026-11-14T03:59:00.000Z'));
+    let release!: () => void;
+    const s = startDailySchedule({ run: () => new Promise<void>((r) => (release = r)) });
+    expect(s.running()).toBeNull();
+    await vi.advanceTimersByTimeAsync(60_000);
+    const p = s.running();
+    expect(p).toBeInstanceOf(Promise);
+    let settled = false;
+    void p!.then(() => (settled = true));
+    await vi.advanceTimersByTimeAsync(10);
+    expect(settled).toBe(false);
+    release();
+    await vi.advanceTimersByTimeAsync(10);
+    expect(settled).toBe(true);
+    expect(s.running()).toBeNull();
+    s.stop();
+  });
+
   it('a failing run is logged by code and the schedule carries on', async () => {
     vi.useFakeTimers();
     process.env.TZ = 'UTC';
