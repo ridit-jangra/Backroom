@@ -236,7 +236,10 @@ User=backroom
 Group=backroom
 WorkingDirectory=/opt/backroom
 EnvironmentFile=/etc/backroom/backroom.env
-# Use the full path of your Node 26 binary (`command -v node`).
+# Use the full path of your Node 26 binary (`command -v node`). With ProtectHome=yes below, Node must be
+# installed system-wide (for example under /usr/local or from your distribution or NodeSource): a Node under /home
+# (nvm, fnm, volta) is invisible to the service, and it fails with status 203/EXEC. If you must use such a Node,
+# replace ProtectHome=yes with ProtectHome=read-only.
 ExecStart=/usr/bin/node /opt/backroom/apps/server/dist/server.mjs
 Restart=on-failure
 RestartSec=5
@@ -306,7 +309,9 @@ To start it at boot without systemd, use the container's entrypoint (run it in t
 ```
 
 Whether `@reboot` runs depends on the container: many containers start no cron daemon. Check what survives a restart of your container.
-Stop it with `kill <pid of run-forever.sh>`; the server shuts down gracefully and the supervisor exits. Settings: `LOG_FILE`, `LOG_MAX_BYTES`, `LOG_KEEP`, `LOG_CHECK_SECONDS`, `RESTART_DELAY_MAX`, `RESTART_RESET_SECONDS` (see the top of the script).
+Stop it with `kill <pid of run-forever.sh>`; the server shuts down gracefully and the supervisor exits.
+
+**Docker and other container runtimes:** graceful shutdown can take about 11 seconds (1 s for WebSocket close frames plus up to 10 s for in-flight work), and Docker's default stop timeout is 10 seconds, after which it sends SIGKILL. Give it more time: `docker stop -t 30 <container>`, `stop_grace_period: 30s` in Compose, or `terminationGracePeriodSeconds: 30` in Kubernetes. Make sure SIGTERM reaches Node (run it, or `run-forever.sh`, as the container's main process, with `exec` in any entrypoint script). Settings: `LOG_FILE`, `LOG_MAX_BYTES`, `LOG_KEEP`, `LOG_CHECK_SECONDS`, `RESTART_DELAY_MAX`, `RESTART_RESET_SECONDS` (see the top of the script).
 
 ## First sign-in and invites
 
@@ -341,7 +346,11 @@ What it does:
 3. Mirrors `DATA_DIR/blobs` into `/var/backups/backroom/blobs`, incrementally. Uploaded files never change once written, so files already in the mirror are skipped. On the same filesystem it uses hardlinks (no extra space). Elsewhere it copies. Uploads in progress (`blobs/.tmp`) are skipped. Files deleted on the server stay in the mirror, so older snapshots keep their files.
 4. Deletes all but the newest `--keep` snapshots (default 7).
 
-It needs only `DATA_DIR` (not the rest of the settings). It is safe to run while the server runs: it never takes `server.lock`, never migrates and never writes into the data folder. It prints JSON lines with sizes and counts, never file names or contents.
+It needs only `DATA_DIR` (not the rest of the settings). It is safe to run while the server runs: it never takes `server.lock`, never migrates and writes none of its own files into the data folder. Run it as the user that runs the server, though: when the server is stopped, SQLite creates `backroom.sqlite-wal` and `-shm` next to the database even for a read-only copy, so the backup needs write access to `DATA_DIR` (it checks this first and says so). It prints JSON lines with sizes and counts, never file names or contents.
+
+The backup directory must be outside `DATA_DIR` (and must not contain it); a backup directory inside the data folder would mirror `blobs/` into itself, so it is refused before anything is created. A directory the backup creates gets mode 700. An existing directory is never chmodded: a world-writable one such as `/tmp` is refused (use a dedicated folder), and a group- or world-readable one only gets a warning (`backup_dir_not_private`).
+
+A blob written while the mirror is being taken may be missed or have a sidecar from just before or after; the next run picks it up, so a daily backup heals itself. If you need a quiescent copy (for a migration to another machine), stop the server or run the backup twice in a row. Temporary `*.partial` files left by an interrupted run are removed at the start of the next one.
 
 A daily cron entry for the `backroom` user (`sudo crontab -u backroom -e`):
 
@@ -349,7 +358,7 @@ A daily cron entry for the `backroom` user (`sudo crontab -u backroom -e`):
 15 3 * * * DATA_DIR=/var/lib/backroom /usr/bin/node /opt/backroom/apps/server/dist/server.mjs --backup /var/backups/backroom --keep 7 >>/var/backups/backroom/backup.log 2>&1
 ```
 
-Create the folder first: `sudo install -d -o backroom -g backroom -m 700 /var/backups/backroom`.
+Create the folder first: `sudo install -d -o backroom -g backroom -m 700 /var/backups/backroom` (the backup can also create it, if the `backroom` user may write to `/var/backups`).
 
 **Keep a copy off the machine.** A backup on the same disk does not survive the disk, and hardlinked files are the same bytes as the live ones. Copy the backup folder elsewhere regularly, for example with `rsync -aH --delete /var/backups/backroom/ backup-host:backroom/` (`-H` keeps hardlinks as hardlinks).
 
