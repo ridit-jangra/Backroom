@@ -25,6 +25,13 @@ export type BlobGetResult = {
 };
 
 export interface BlobStore {
+  /**
+   * True when a `put` that the store itself rejected (with an intact body) wrote nothing, so callers skip the
+   * cleanup delete and do not spend one of KV's capped daily deletes. False for R2, which keeps the safety delete.
+   * It says nothing about a body that broke mid-stream: local KV keeps the partial value then, so that is always
+   * cleaned up.
+   */
+  readonly failedPutLeavesNothing: boolean;
   /** `size` is the body's exact length; a stream body must deliver exactly that many bytes (FixedLengthStream). */
   put(key: string, body: ReadableStream | Uint8Array | ArrayBuffer, opts: { contentType?: string; size: number }): Promise<void>;
   /** null when the key does not exist. A malformed `ifNoneMatch` is ignored (the blob is served). */
@@ -38,8 +45,22 @@ export interface BlobStore {
 /** Metadata stored with every KV value (well under KV's 1 KB metadata limit). */
 export type KvBlobMeta = { contentType: string | null; size: number; etag: string };
 
-export const STORAGE_BUSY_MESSAGE = 'Storage is at its daily write limit. Try again tomorrow.';
+export const STORAGE_BUSY_MESSAGE = 'Storage has reached a free-tier limit. Try again later.';
 export const storageBusy = () => new ApiError(503, 'storage_busy', STORAGE_BUSY_MESSAGE);
+export const isStorageBusy = (e: unknown): boolean => e instanceof ApiError && e.code === 'storage_busy';
+
+/**
+ * Best-effort delete for cleanup paths outside the cron; never throws. At the KV daily limit the blob stays behind:
+ * logged as `blob_leaked` with its class only (never the key). Any other failure is logged as `failCode`.
+ */
+export async function deleteOrLog(store: BlobStore, key: string, kind: 'file' | 'thumb' | 'emoji', failCode: string): Promise<void> {
+  try {
+    await store.delete(key);
+  } catch (e) {
+    if (isStorageBusy(e)) console.warn(JSON.stringify({ level: 'warn', code: 'blob_leaked', kind }));
+    else console.error(JSON.stringify({ level: 'error', code: failCode }));
+  }
+}
 
 /**
  * The free tier's daily caps (1,000 writes, 1,000 deletes, 100,000 reads) surface as an error whose message says
@@ -155,6 +176,8 @@ function isMeta(m: unknown): m is KvBlobMeta {
  */
 export function kvBlobStore(ns: KVNamespace): BlobStore {
   return {
+    failedPutLeavesNothing: true,
+
     async put(key, body, opts) {
       const metadata: KvBlobMeta = { contentType: opts.contentType ?? null, size: opts.size, etag: crypto.randomUUID().replaceAll('-', '') };
       await kvCall(() => ns.put(key, body, { metadata }));
@@ -206,6 +229,8 @@ export function kvBlobStore(ns: KVNamespace): BlobStore {
 export function r2BlobStore(bucket: R2Bucket): BlobStore {
   const hasBody = (o: R2Object | R2ObjectBody): o is R2ObjectBody => 'body' in o;
   return {
+    failedPutLeavesNothing: false,
+
     async put(key, body, opts) {
       await bucket.put(key, body, opts.contentType === undefined ? undefined : { httpMetadata: { contentType: opts.contentType } });
     },

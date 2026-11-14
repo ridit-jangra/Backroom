@@ -1,10 +1,11 @@
 import { type Context, Hono } from 'hono';
 import { type FileInfo, FILE_MAX_BYTES, FILES_QUOTA_BYTES, THUMB_MAX_BYTES, THUMB_MAX_SIDE, isRasterImage, sanitizeFileName } from '@backroom/protocol';
 import type { AppEnv } from '../app';
-import { type BlobStore, getBlobStore } from '../lib/blobs';
+import { type BlobStore, deleteOrLog, getBlobStore } from '../lib/blobs';
 import { readCappedBody } from '../lib/body';
 import { newId } from '../lib/ids';
 import { ApiError } from '../lib/errors';
+import { blobBytesUsed, blobBytesUsedSql } from '../lib/quota';
 import { requireSession } from '../middleware/session';
 import { MEDIA_SECURITY_HEADERS } from '../lib/media';
 import { requireMember } from '../workspace/access';
@@ -65,11 +66,7 @@ fileRoutes.post('/w/:slug/files', requireSession, async (c) => {
   const name = sanitizeFileName(c.req.query('name') ?? '');
 
   // Fail fast before streaming; the conditional insert re-checks atomically.
-  const used = await db
-    .prepare('SELECT COALESCE(SUM(size), 0) AS used FROM files WHERE workspace_id = ?')
-    .bind(workspaceId)
-    .first<{ used: number }>();
-  if ((used?.used ?? 0) + length > FILES_QUOTA_BYTES) throw quotaExceeded();
+  if ((await blobBytesUsed(db, workspaceId)) + length > FILES_QUOTA_BYTES) throw quotaExceeded();
 
   const file = await surviveDisconnect(
     c,
@@ -127,14 +124,17 @@ fileRoutes.post('/files/:id/thumb', requireSession, async (c) => {
   ) {
     throw invalidThumbnail();
   }
+  // Thumbnails count toward the quota too. Fail fast before the KV write; the UPDATE re-checks atomically.
+  if ((await blobBytesUsed(db, row.workspaceId)) + bytes.byteLength > FILES_QUOTA_BYTES) throw quotaExceeded();
 
   const file = await surviveDisconnect(c, storeThumbnail(c.env, { workspaceId: row.workspaceId, id, bytes, now: c.var.deps.now() }));
   return c.json({ file });
 });
 
 /**
- * Writes the thumbnail under a fresh unique key, then links it only if the file still has no thumbnail and is
- * not attached. A loser of any race deletes only its own new object, so the live thumbnail is never touched.
+ * Writes the thumbnail under a fresh unique key, then links it (recording `thumb_size`) only if the file still has
+ * no thumbnail, is not attached, and the workspace's blob bytes stay within the quota. A loser of any race deletes
+ * only its own new object, so the live thumbnail is never touched.
  */
 async function storeThumbnail(
   env: AppEnv['Bindings'],
@@ -148,10 +148,11 @@ async function storeThumbnail(
   try {
     const r = await db
       .prepare(
-        `UPDATE files SET thumb_key = ?1
-         WHERE id = ?2 AND thumb_key IS NULL AND NOT EXISTS (SELECT 1 FROM message_files WHERE file_id = ?2)`,
+        `UPDATE files SET thumb_key = ?1, thumb_size = ?3
+         WHERE id = ?2 AND thumb_key IS NULL AND NOT EXISTS (SELECT 1 FROM message_files WHERE file_id = ?2)
+           AND ${blobBytesUsedSql('?4')} + ?3 <= ?5`,
       )
-      .bind(key, input.id)
+      .bind(key, input.id, input.bytes.byteLength, input.workspaceId, FILES_QUOTA_BYTES)
       .run();
     changes = r.meta.changes;
   } catch (e) {
@@ -160,21 +161,21 @@ async function storeThumbnail(
   }
   if (changes === 0) {
     await cleanupThumb(store, key);
-    const now = await db.prepare('SELECT thumb_key AS thumbKey FROM files WHERE id = ?').bind(input.id).first<{ thumbKey: string | null }>();
+    const now = await db
+      .prepare('SELECT thumb_key AS thumbKey, EXISTS (SELECT 1 FROM message_files WHERE file_id = ?1) AS attached FROM files WHERE id = ?1')
+      .bind(input.id)
+      .first<{ thumbKey: string | null; attached: number }>();
     if (!now) throw notFound();
     if (now.thumbKey !== null) throw alreadyHasThumbnail();
-    throw alreadyAttached();
+    if (now.attached) throw alreadyAttached();
+    throw quotaExceeded();
   }
   const file = await db.prepare(`SELECT ${FILE_INFO_COLUMNS} FROM files WHERE id = ?`).bind(input.id).first<FileInfoRow>();
   if (!file) throw notFound();
   return rowToFileInfo(file);
 }
 
-async function cleanupThumb(store: BlobStore, key: string): Promise<void> {
-  await store.delete(key).catch(() => {
-    console.error(JSON.stringify({ level: 'error', code: 'upload_cleanup_failed' }));
-  });
-}
+const cleanupThumb = (store: BlobStore, key: string): Promise<void> => deleteOrLog(store, key, 'thumb', 'upload_cleanup_failed');
 
 /** The id check plus §8 visibility; unknown and not visible give the identical 404. */
 async function requireFileAccess(c: Context<AppEnv>): Promise<FileAccess> {
@@ -217,7 +218,9 @@ fileRoutes.get('/files/:id', requireSession, async (c) => {
   if (range) {
     headers.set('Content-Range', `bytes ${range.offset}-${range.offset + range.length - 1}/${row.size}`);
     headers.set('Content-Length', String(range.length));
-    return new Response(obj.body, { status: 206, headers });
+    // A native fixed-length body, so the wire Content-Length is exact (the KV slice is a JS stream); a short source
+    // still errors the response rather than ending it early.
+    return new Response(obj.body!.pipeThrough(new FixedLengthStream(range.length)), { status: 206, headers });
   }
   headers.set('Content-Length', String(obj.size));
   return new Response(obj.body, { status: 200, headers });

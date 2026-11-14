@@ -140,6 +140,13 @@ describeBackends('BlobStore', (backend) => {
   });
 });
 
+describe('failedPutLeavesNothing', () => {
+  it('is true for KV (a rejected put writes nothing) and false for R2 (keep the safety delete)', () => {
+    expect(kvBlobStore(rawEnv.BLOBS).failedPutLeavesNothing).toBe(true);
+    expect(r2BlobStore(rawEnv.BUCKET!).failedPutLeavesNothing).toBe(false);
+  });
+});
+
 describe('sliceStream', () => {
   it('slices across chunk boundaries and stops reading once the range is served', async () => {
     let pulls = 0;
@@ -209,7 +216,7 @@ describe('KV daily limits', () => {
       expect(e).toBeInstanceOf(ApiError);
       expect(e).toMatchObject({ status: 503, code: 'storage_busy', message: STORAGE_BUSY_MESSAGE });
     }
-    expect(STORAGE_BUSY_MESSAGE).toBe('Storage is at its daily write limit. Try again tomorrow.');
+    expect(STORAGE_BUSY_MESSAGE).toBe('Storage has reached a free-tier limit. Try again later.');
     const other = await kvBlobStore(exhausted(() => new Error('boom')))
       .put(KEY, bytes(1), { size: 1 })
       .catch((x: unknown) => x);

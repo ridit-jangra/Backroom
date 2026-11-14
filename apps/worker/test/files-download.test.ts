@@ -1,5 +1,5 @@
 import { createExecutionContext, waitOnExecutionContext } from 'cloudflare:test';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { FileInfo } from '@backroom/protocol';
 import { createApp } from '../src/app';
 import { canDownload } from '../src/files/access';
@@ -7,6 +7,7 @@ import { deleteMessage, sendMessage } from '../src/messaging/store';
 import {
   GENERAL,
   captureMailer,
+  currentBackend,
   describeBackends,
   env,
   insertChannel,
@@ -90,6 +91,38 @@ describe('canDownload', () => {
 });
 
 describeBackends('file downloads', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it('a ranged 206 body goes through a native FixedLengthStream of the range length', async () => {
+    const s = await setup();
+    const data = Uint8Array.from({ length: 4000 }, (_, i) => i % 199);
+    const f = await s.upload(s.alice.cookie, 'data.bin', data);
+    const lengths: number[] = [];
+    const Real = FixedLengthStream;
+    vi.spyOn(globalThis as unknown as { FixedLengthStream: typeof FixedLengthStream }, 'FixedLengthStream').mockImplementation(function (n: number | bigint) {
+      lengths.push(Number(n));
+      return new Real(n);
+    } as never);
+    const res = await s.get(`/files/${f.id}`, s.alice.cookie, { Range: 'bytes=1001-1777' });
+    expect(res.status).toBe(206);
+    expect(res.headers.get('Content-Length')).toBe('777');
+    expect(await bytesOf(res)).toEqual(data.subarray(1001, 1778));
+    expect(lengths).toContain(777);
+  });
+
+  it('a ranged body from a blob shorter than the range errors instead of ending short (KV)', async () => {
+    if (currentBackend() !== 'kv') return;
+    const s = await setup();
+    const id = await insertFile({ uploaderId: s.alice.userId, name: 'cut.bin', size: 4000 });
+    const key = (await env.DB.prepare('SELECT r2_key AS k FROM files WHERE id = ?').bind(id).first<{ k: string }>())!.k;
+    // Metadata claims 4,000 bytes; only 100 are stored.
+    await env.BLOBS.put(key, new Uint8Array(100), { metadata: { contentType: null, size: 4000, etag: 'cut' } });
+    const res = await s.get(`/files/${id}`, s.alice.cookie, { Range: 'bytes=0-999' });
+    expect(res.status).toBe(206);
+    expect(res.headers.get('Content-Length')).toBe('1000');
+    await expect(res.arrayBuffer()).rejects.toThrow();
+  });
+
   it('uploader can fetch an unattached file; nobody else can', async () => {
     const s = await setup();
     const f = await s.upload(s.alice.cookie, 'notes.txt', text('hello'), 'text/plain');

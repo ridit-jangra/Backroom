@@ -5,6 +5,7 @@ import {
   CUSTOM_EMOJI_MAX_SIDE,
   CUSTOM_EMOJI_MIN_SIDE,
   CUSTOM_EMOJI_UPLOAD_MAX_BYTES,
+  FILES_QUOTA_BYTES,
   CustomEmojiAliasBody,
   EmojiName,
   type CustomEmoji,
@@ -14,6 +15,7 @@ import { lookupEmoji } from '@backroom/emoji';
 import type { AppEnv } from '../app';
 import { hubFor } from '../hub/client';
 import { getBlobStore } from '../lib/blobs';
+import { blobBytesUsed, quotaExceeded } from '../lib/quota';
 import { readCappedBody } from '../lib/body';
 import { ApiError } from '../lib/errors';
 import { MEDIA_SECURITY_HEADERS } from '../lib/media';
@@ -108,6 +110,8 @@ emojiRoutes.post('/w/:slug/emoji', requireSession, async (c) => {
     .first<{ n: number; taken: number }>();
   if (pre?.taken) throw nameTaken();
   if ((pre?.n ?? 0) >= CUSTOM_EMOJI_LIMIT) throw limitReached();
+  // Custom emoji share the workspace's blob quota with files and thumbnails; the insert re-checks atomically.
+  if ((await blobBytesUsed(db, workspaceId)) + bytes.byteLength > FILES_QUOTA_BYTES) throw quotaExceeded();
 
   const emoji = await createCustomEmoji(c.env, { workspaceId, userId, name, bytes, mime: sniffed.mime, now: c.var.deps.now() });
 

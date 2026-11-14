@@ -326,8 +326,8 @@ export async function insertFile(opts: {
   if (opts.object) await blobPut(key, opts.object);
   if (thumbKey) await blobPut(thumbKey, webp(10, 10), 'image/webp');
   await env.DB.prepare(
-    `INSERT INTO files (id, workspace_id, uploader_id, r2_key, thumb_key, name, mime, size, width, height, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?)`,
+    `INSERT INTO files (id, workspace_id, uploader_id, r2_key, thumb_key, thumb_size, name, mime, size, width, height, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?)`,
   )
     .bind(
       id,
@@ -335,6 +335,7 @@ export async function insertFile(opts: {
       opts.uploaderId,
       opts.r2Key ?? key,
       thumbKey,
+      thumbKey ? webp(10, 10).byteLength : 0,
       opts.name ?? 'file.bin',
       opts.mime ?? 'application/octet-stream',
       opts.size ?? opts.object?.length ?? 0,

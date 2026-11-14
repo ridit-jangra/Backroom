@@ -1,7 +1,8 @@
-import { CUSTOM_EMOJI_LIMIT, type CustomEmoji, type WorkspaceSettings } from '@backroom/protocol';
+import { CUSTOM_EMOJI_LIMIT, FILES_QUOTA_BYTES, type CustomEmoji, type WorkspaceSettings } from '@backroom/protocol';
 import type { Env } from '../env';
-import { getBlobStore } from '../lib/blobs';
+import { deleteOrLog, getBlobStore } from '../lib/blobs';
 import { ApiError } from '../lib/errors';
+import { blobBytesUsedSql, quotaExceeded } from '../lib/quota';
 import { newId } from '../lib/ids';
 import { lookupEmoji } from '@backroom/emoji';
 import type { Role } from '@backroom/protocol';
@@ -79,8 +80,9 @@ const isNameTaken = (e: unknown): boolean =>
 export const nameTaken = () => new ApiError(409, 'name_taken', 'A custom emoji with that name already exists.');
 
 /**
- * Stores the image in blob storage, then inserts the row. The insert re-checks the per-workspace limit so
- * concurrent uploads cannot pass it. On any insert failure the object is deleted again.
+ * Stores the image in blob storage, then inserts the row (recording its `size`). The insert re-checks the
+ * per-workspace count limit and the blob quota so concurrent uploads cannot pass them. On any insert failure the
+ * object is deleted again.
  */
 export async function createCustomEmoji(
   env: Env,
@@ -93,10 +95,11 @@ export async function createCustomEmoji(
   try {
     const [r] = await env.DB.batch([
       env.DB.prepare(
-        `INSERT INTO custom_emoji (id, workspace_id, name, r2_key, alias_for, created_by, created_at)
-         SELECT ?1, ?2, ?3, ?4, NULL, ?5, ?6
-         WHERE (SELECT COUNT(*) FROM custom_emoji WHERE workspace_id = ?2) < ?7`,
-      ).bind(id, input.workspaceId, input.name, key, input.userId, input.now, CUSTOM_EMOJI_LIMIT),
+        `INSERT INTO custom_emoji (id, workspace_id, name, r2_key, alias_for, created_by, created_at, size)
+         SELECT ?1, ?2, ?3, ?4, NULL, ?5, ?6, ?8
+         WHERE (SELECT COUNT(*) FROM custom_emoji WHERE workspace_id = ?2) < ?7
+           AND ${blobBytesUsedSql('?2')} + ?8 <= ?9`,
+      ).bind(id, input.workspaceId, input.name, key, input.userId, input.now, CUSTOM_EMOJI_LIMIT, input.bytes.byteLength, FILES_QUOTA_BYTES),
       bumpEmojiRev(env.DB, input.workspaceId, id),
     ]);
     inserted = r!.meta.changes === 1;
@@ -108,7 +111,8 @@ export async function createCustomEmoji(
   }
   if (!inserted) {
     await cleanupObject(env, key);
-    throw limitReached();
+    const n = await env.DB.prepare('SELECT COUNT(*) AS n FROM custom_emoji WHERE workspace_id = ?').bind(input.workspaceId).first<{ n: number }>();
+    throw (n?.n ?? 0) >= CUSTOM_EMOJI_LIMIT ? limitReached() : quotaExceeded();
   }
   return rowToCustomEmoji({
     id,
@@ -124,10 +128,8 @@ export const limitReached = () =>
   new ApiError(400, 'limit_reached', `A workspace can have at most ${CUSTOM_EMOJI_LIMIT.toLocaleString('en-US')} custom emoji.`);
 
 /** Best-effort blob delete: a failure is logged (no key, no ids) and never replaces the error the caller is about to raise. */
-async function cleanupObject(env: Env, key: string): Promise<void> {
-  await getBlobStore(env).delete(key).catch(() => {
-    console.error(JSON.stringify({ level: 'error', code: 'r2_cleanup_failed' }));
-  });
+function cleanupObject(env: Env, key: string): Promise<void> {
+  return deleteOrLog(getBlobStore(env), key, 'emoji', 'r2_cleanup_failed');
 }
 
 const invalidAlias = () => new ApiError(400, 'invalid_alias', 'Alias target not found.');

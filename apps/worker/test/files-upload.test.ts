@@ -267,7 +267,8 @@ describeBackends('file upload', () => {
       console.error = orig;
     }
     expect(errors.some((m) => m.includes('r2_put_failed'))).toBe(true);
-    expect(deleted).toHaveLength(1);
+    // A rejected KV put wrote nothing, so no delete is spent on it (KV deletes are capped); R2 keeps the safety delete.
+    expect(deleted).toHaveLength(currentBackend() === 'kv' ? 0 : 1);
     expect((await env.DB.prepare('SELECT COUNT(*) AS n FROM files').first<{ n: number }>())?.n).toBe(0);
 
     const broken = new ReadableStream<Uint8Array>({
@@ -411,7 +412,9 @@ describe('workspace quota (Workers KV sizing)', () => {
     await insertFile({ uploaderId: s.owner.userId, size: FILES_QUOTA_BYTES });
     const res = await uploadFile(s.app, s.alice.cookie, new Uint8Array(1), { name: 'one' });
     expect(res.status).toBe(413);
-    expect(await res.json()).toEqual({ error: { code: 'quota_exceeded', message: 'This workspace has used its 900 MB of file storage.' } });
+    expect(await res.json()).toEqual({
+      error: { code: 'quota_exceeded', message: 'This workspace has used its 900 MB of storage (files, thumbnails and custom emoji).' },
+    });
   });
 });
 
@@ -440,7 +443,7 @@ describe('KV daily write limit', () => {
     await waitOnExecutionContext(ctx);
     expect(res.status).toBe(503);
     expect(await res.json()).toEqual({
-      error: { code: 'storage_busy', message: 'Storage is at its daily write limit. Try again tomorrow.' },
+      error: { code: 'storage_busy', message: 'Storage has reached a free-tier limit. Try again later.' },
     });
     expect((await env.DB.prepare('SELECT COUNT(*) AS n FROM files').first<{ n: number }>())?.n).toBe(0);
   });

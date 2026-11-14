@@ -1,8 +1,9 @@
 import { FILES_QUOTA_BYTES, type FileInfo } from '@backroom/protocol';
 import type { Env } from '../env';
-import { type BlobStore, getBlobStore } from '../lib/blobs';
+import { type BlobStore, deleteOrLog, getBlobStore } from '../lib/blobs';
 import { ApiError } from '../lib/errors';
 import { newId } from '../lib/ids';
+import { blobBytesUsedSql, quotaExceeded } from '../lib/quota';
 import { SNIFF_BYTES, sniffFile } from './sniff';
 
 /** Blob key of an original upload. Both parts are server values (DB workspace id, server ULID), never user input. */
@@ -63,8 +64,9 @@ const isLengthMismatch = (e: unknown): boolean => e instanceof TypeError && /Fix
 
 /**
  * Streams exactly `length` bytes into blob storage without buffering: the native FixedLengthStream gives KV/R2 a
- * known length and errors on a short or long body. On any failure the key is deleted (best effort), except at the
- * KV daily limit (nothing was written, and deletes are capped too). A failure caused by the body (length mismatch,
+ * known length and errors on a short or long body. On failure the key is deleted (best effort), except when the
+ * store itself rejected an intact body and says such a put leaves nothing (KV, whose deletes are capped), and except
+ * at the KV daily limit. A broken body is always cleaned up: local KV keeps the partial value in that case. A failure caused by the body (length mismatch,
  * or the source stream erroring, e.g. a client disconnect) is thrown as `UploadStreamError`; anything else (a
  * storage failure, or `503 storage_busy`) is rethrown as is.
  */
@@ -82,23 +84,20 @@ export async function putExact(store: BlobStore, key: string, body: ReadableStre
     // Classify before anything else can settle: a later pipe rejection could be our own abort below.
     const streamFault = sourceFailed || isLengthMismatch(e);
     abort.abort();
-    if (!(e instanceof ApiError)) await store.delete(key).catch(() => {});
+    const mayHaveWritten = streamFault || !store.failedPutLeavesNothing;
+    if (mayHaveWritten && !(e instanceof ApiError)) await store.delete(key).catch(() => {});
     throw streamFault ? new UploadStreamError(e) : e;
   }
   await piped;
 }
 
-export const quotaExceeded = () => new ApiError(413, 'quota_exceeded', 'This workspace has used its 900 MB of file storage.');
+export { quotaExceeded };
 
-async function cleanup(store: BlobStore, key: string): Promise<void> {
-  await store.delete(key).catch(() => {
-    console.error(JSON.stringify({ level: 'error', code: 'upload_cleanup_failed' }));
-  });
-}
+const cleanup = (store: BlobStore, key: string): Promise<void> => deleteOrLog(store, key, 'file', 'upload_cleanup_failed');
 
 /**
  * Streams the body to blob storage, sniffs the stored type from the first bytes (peek), then inserts the row only if
- * the workspace's `SUM(files.size)` stays within the quota. Any failure after the put removes the object again.
+ * the workspace's blob bytes (files, thumbnails, custom emoji: `blobBytesUsedSql`) stay within the quota. Any failure after the put removes the object again.
  */
 export async function storeUpload(
   env: Env,
@@ -126,7 +125,7 @@ export async function storeUpload(
     const r = await env.DB.prepare(
       `INSERT INTO files (id, workspace_id, uploader_id, r2_key, thumb_key, name, mime, size, width, height, created_at)
        SELECT ?1, ?2, ?3, ?4, NULL, ?5, ?6, ?7, ?8, ?9, ?10
-       WHERE (SELECT COALESCE(SUM(size), 0) FROM files WHERE workspace_id = ?2) + ?7 <= ?11`,
+       WHERE ${blobBytesUsedSql('?2')} + ?7 <= ?11`,
     )
       .bind(id, input.workspaceId, input.userId, key, input.name, sniffed.mime, input.length, sniffed.width, sniffed.height, input.now, FILES_QUOTA_BYTES)
       .run();
