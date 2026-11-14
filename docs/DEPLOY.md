@@ -1,13 +1,19 @@
 # Deploying Backroom
 
-Backroom deploys to Cloudflare Workers (free tier) at **https://chat.ridit.space**. Steps 1 to 6 are one-time setup. Only steps 7 to 10 repeat on every later deploy.
+> **Cloudflare Workers deployment is unmaintained.** Backroom is now a self-hosted Node.js server: see **[SELF_HOSTING.md](SELF_HOSTING.md)** for how to run it. The notes below describe how the project was deployed to Cloudflare Workers before that. They were correct when written and are kept for anyone who wants to adapt that path, but nothing here is tested or supported any more, and newer features (backups, configurable limits, the trusted proxy settings) exist only in the Node server.
 
-> **Always deploy with `npm run deploy -w apps/worker`.** The committed `wrangler.jsonc` has `APP_ORIGIN=http://localhost:8787` so local dev works (origin guard, non-Secure cookie). A bare `wrangler deploy` would ship that value to production and break login. The npm script passes `--var APP_ORIGIN:https://chat.ridit.space --domain chat.ridit.space`.
+# Unmaintained: Cloudflare Workers
+
+Backroom used to deploy to Cloudflare Workers (free tier). Steps 1 to 6 are one-time setup. Only steps 7 to 10 repeat on every later deploy. `chat.example.com` and `example.com` below stand for your own hostname and zone.
+
+> **The committed `apps/worker/wrangler.jsonc` and the `deploy` scripts in `apps/worker/package.json` hold the original maintainer's values** (domain, D1 database id, KV namespace id, `EMAIL_FROM`). Replace them with your own before deploying.
+
+> **Always deploy with `npm run deploy -w apps/worker`.** The committed `wrangler.jsonc` has `APP_ORIGIN=http://localhost:8787` so local dev works (origin guard, non-Secure cookie). A bare `wrangler deploy` would ship that value to production and break login. The npm script passes `--var APP_ORIGIN:https://<your hostname> --domain <your hostname>`.
 
 ## 1. Prerequisites (one-time)
 
-- A free Cloudflare account that owns the DNS zone `ridit.space`.
-- A free Resend account with a verified sending domain (`ridit.space`). `EMAIL_FROM` is the committed var `Backroom <backroom@ridit.space>`.
+- A free Cloudflare account that owns your DNS zone (`example.com`).
+- A free Resend account with a verified sending domain. `EMAIL_FROM` is a committed var in `wrangler.jsonc` (for example `Backroom <backroom@example.com>`).
 - Node and npm, then `npm ci` at the repo root.
 
 ## 2. Log in (one-time)
@@ -17,9 +23,9 @@ npx wrangler login
 npx wrangler whoami
 ```
 
-## 3. Database (one-time, already done for this account)
+## 3. Database (one-time)
 
-The D1 database `backroom` exists (id `9af7495f-721b-4482-8ead-8768dbf2d33d`) and its id is already in `apps/worker/wrangler.jsonc`. On a fresh account:
+Create the D1 database:
 
 ```
 npx wrangler d1 create backroom
@@ -39,7 +45,7 @@ Paste the printed namespace id into `kv_namespaces[0].id` in `apps/worker/wrangl
 
 ## 5. Secrets (one-time; also how to rotate)
 
-`RESEND_API_KEY` and `OWNER_EMAIL` (the Gmail that signs in as workspace owner) are Worker secrets. They are already set for this account. To set or rotate one, run in `apps/worker`:
+`RESEND_API_KEY` and `OWNER_EMAIL` (the address that signs in as workspace owner) are Worker secrets. To set or rotate one, run in `apps/worker`:
 
 ```
 npx wrangler secret put RESEND_API_KEY
@@ -88,16 +94,16 @@ The first deploy creates the `WorkspaceHub` Durable Object class from migration 
 
 ## 10. Verify (every deploy)
 
-1. Open https://chat.ridit.space/health.
-2. Sign in as the owner (the Gmail in `OWNER_EMAIL`); the magic link arrives by email.
+1. Open https://chat.example.com/health.
+2. Sign in as the owner (the address in `OWNER_EMAIL`); the magic link arrives by email.
 3. In Admin, create an invite for the next member.
 
-If the first owner email does not arrive, the admin "emails failed" banner cannot help (nobody can sign in yet). Run `npx wrangler tail` in `apps/worker` in a second terminal, request the link again, and look for an `email_failed` line; then check the Resend dashboard logs (the send, the `ridit.space` domain still verified, the API key valid) and the spam folder. No `email_failed` line and no Resend log entry usually means `OWNER_EMAIL` does not match the address typed, or the request was rate limited (5 per hour per address).
+If the first owner email does not arrive, the admin "emails failed" banner cannot help (nobody can sign in yet). Run `npx wrangler tail` in `apps/worker` in a second terminal, request the link again, and look for an `email_failed` line; then check the Resend dashboard logs (the send, your domain still verified, the API key valid) and the spam folder. No `email_failed` line and no Resend log entry usually means `OWNER_EMAIL` does not match the address typed, or the request was rate limited (5 per hour per address).
 
 ## 11. Desktop app (when the address changes or for a new build)
 
 ```
-BACKROOM_APP_URL=https://chat.ridit.space npm run build -w apps/desktop
+BACKROOM_APP_URL=https://chat.example.com npm run build -w apps/desktop
 ```
 
 Install the produced `.deb` or AppImage. The `backroom://` deep-link handler is registered by the installed app (the `.deb` installs the desktop entry; an AppImage must be launched once, or integrated with a tool such as AppImageLauncher, before the OS routes `backroom://` links).
@@ -119,7 +125,7 @@ npx wrangler d1 time-travel restore backroom --timestamp=<unix-or-ISO-time>
 
 Restoring overwrites the database in place; check the timestamp first.
 
-## Free-tier limits (spec section 13)
+## Free-tier limits (historical; spec section 13)
 
 | Resource (Free) | Limit | Note |
 |---|---|---|
@@ -142,5 +148,5 @@ Past these, the Workers Paid plan ($5/month) needs no code changes.
 - **Cloudflare error 1027.** The daily Worker request limit was hit; it resets at 00:00 UTC.
 - **`503 storage_busy` on upload** ("Storage has reached a free-tier limit. Try again later."). A KV daily limit (1k writes, 1k deletes or 100k reads) is used up; it resets at 00:00 UTC. `blob_leaked` log lines mean a cleanup delete hit the limit and left a blob behind.
 - **`413 quota_exceeded`.** The workspace's files, thumbnails and custom emoji together reached 900 MB. Delete messages with large files (their files are removed by the next daily cron) or unused custom emoji.
-- **Custom-domain deploy errors.** The zone `ridit.space` must be on the same Cloudflare account, and `chat.ridit.space` must not already have an explicit DNS record (a wildcard record is fine). Remove a conflicting record, then deploy again.
+- **Custom-domain deploy errors.** The zone must be on the same Cloudflare account, and the hostname must not already have an explicit DNS record (a wildcard record is fine). Remove a conflicting record, then deploy again.
 - **Login redirects or cookies fail after deploy.** The deploy was probably a bare `wrangler deploy`, which ships `APP_ORIGIN=http://localhost:8787`. Redeploy with `npm run deploy -w apps/worker`.

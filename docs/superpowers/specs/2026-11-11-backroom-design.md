@@ -58,29 +58,45 @@ Storage, Cookies) were not opened.
 
 ## 3. Architecture
 
+*Updated in Phase 7: Backroom runs as a self-hosted Node.js server. The original
+Cloudflare design (Worker, Durable Object, D1, KV/R2) is described at the end of
+this section as history.*
+
 ```
- Browser / Tauri ────HTTPS──▶ Worker (Hono router) ──▶ D1 (SQLite + FTS5)
-        │                         │      │
-        └──WebSocket──────────────┘      ├──▶ Workers KV (files, custom emoji, thumbnails)
-                                  ▼      └──▶ Resend (magic-link email)
-                      Durable Object: WorkspaceHub
-                      (one per workspace: sockets, ordering, fan-out)
+ Browser / Tauri ──HTTPS──▶ reverse proxy (Caddy / nginx / Cloudflare) ──HTTP──▶ Node server (apps/server)
+        │                                                                  │  Hono app (apps/worker code)
+        └──WebSocket /ws ──────────── same path ──────────────────────────▶│  WorkspaceHub (in-process)
+                                                                           ├──▶ SQLite file (node:sqlite, WAL, FTS5)
+                                                                           ├──▶ blobs/ folder on local disk
+                                                                           └──▶ Resend (magic-link email)
 ```
 
 | Unit | Responsibility | Depends on |
 |---|---|---|
 | `apps/web` | React + Vite SPA: sidebar, channel view, threads, composer, emoji picker, search, uploads, admin | REST API, WebSocket protocol |
-| `apps/worker` | Hono API: auth, invites, history, search, files, custom emoji, admin; serves SPA static assets; routes WS upgrades | D1, Workers KV (blob store), Resend, WorkspaceHub |
-| `WorkspaceHub` (Durable Object, SQLite-backed) | Holds hibernatable sockets for one workspace; assigns per-channel `seq`; validates and persists writes to D1; fans out events; presence and typing | D1 |
+| `apps/server` | Node 26 HTTP server: static files and SPA fallback, API routing, WebSocket upgrades, trusted client IP, body limits, daily maintenance at 04:00 local time, graceful shutdown, `--maintenance` and `--backup`. Adapters give the worker code what Cloudflare used to: a D1-compatible database over `node:sqlite`, a filesystem `BlobStore`, a Durable Object runtime shim over `ws`. Bundled by esbuild into one file. | `apps/worker` code, SQLite file, `DATA_DIR/blobs`, Resend |
+| `apps/worker` | The application core: Hono API (auth, invites, history, search, files, custom emoji, admin), SQL migrations, maintenance job. Also keeps a Workers entry point so its test suite runs under workerd. | Database, blob store, Resend, WorkspaceHub (all injected) |
+| `WorkspaceHub` | One instance per workspace, in the server process: holds the sockets; assigns per-channel `seq`; validates and persists writes; fans out events; presence and typing | Database |
 | `packages/protocol` | Shared TypeScript types + zod schemas for REST and WS messages | — |
 | `packages/emoji` | Shortcode table (from `emoji-datasource`), shortcode parse/render, skin tones | — |
 | `apps/desktop` | Tauri 2 shell: locked-down remote window, capability-scoped commands, notifications, tray/badge, deep links, PKCE desktop login | Hosted web app |
 
+There is no Durable Object, R2, KV or Worker in production: one process, one
+SQLite file (`DATA_DIR/backroom.sqlite`) and one folder of files
+(`DATA_DIR/blobs/`). Only one server may use a data folder at a time
+(`server.lock`). Operator documentation: `docs/SELF_HOSTING.md`.
+
 Monorepo with npm workspaces (no global tool installs needed); TypeScript throughout.
 
-**Why one hub per workspace:** ordering and fan-out are trivial and one Durable
-Object comfortably serves <50 users. It can be split per channel later without a
+**Why one hub per workspace:** ordering and fan-out are trivial and one hub
+comfortably serves <50 users. It can be split per channel later without a
 data-model change.
+
+**History (Phases 1–6).** The app first ran on Cloudflare: a Worker served the
+API and the SPA, a SQLite-backed Durable Object per workspace held hibernatable
+sockets, D1 stored the data and Workers KV (with an optional R2 adapter) stored
+blobs. That path is kept in `apps/worker` for testing and is unmaintained as a
+deployment target (`docs/DEPLOY.md`).
 
 ## 4. Data model (D1)
 
@@ -240,28 +256,22 @@ state-changing requests require a matching `Origin`.
 
 ## 8. Files
 
-- Upload streams the request body to blob storage at `ws/<workspaceId>/<fileId>`.
-  Blob storage is Workers KV (free without a payment card), behind a small
-  `BlobStore` interface that also has an R2 adapter, used only if `BLOBS` is
-  not bound and an R2 `BUCKET` is.
-  Limits: 25 MB per file (the KV value limit is 25 MiB), 900 MB per workspace
-  for all blobs together: originals, thumbnails and custom emoji (tracked in
-  D1 as `SUM(files.size + files.thumb_size) + SUM(custom_emoji.size)`, checked
-  atomically by every upload, thumbnail and emoji insert), so the 1 GB KV
-  namespace cannot fill.
-- KV has no range or conditional reads. The KV adapter stores
-  `{contentType, size, etag}` as value metadata (a random etag per write, never
-  a hash of the bytes), serves `Range` by streaming from the start and slicing,
-  and answers `If-None-Match` by comparing the stored etag. When a KV daily
-  limit is reached, uploads fail with `503 storage_busy` ("Storage has reached
-  a free-tier limit. Try again later.").
-- KV is eventually consistent across locations (up to ~60 s). When D1 has the
-  row and the caller may see it but the blob read misses, `GET /files/:id`,
-  `/files/:id/thumb` and `/emoji/:id` answer `503 blob_pending` ("This file is
-  still syncing. Try again in a few seconds.") with `Retry-After: 5` and
-  `Cache-Control: no-store`; unknown or hidden ids keep the identical 404. The
-  web client retries images and custom emoji after 2, 4, 8, 16 and 30 s on the
-  same URL, then shows a failure.
+*Updated in Phase 7 for the Node server.*
+
+- Upload streams the request body to blob storage under the key
+  `ws/<workspaceId>/<fileId>`. On the server, blobs are files on local disk in
+  `DATA_DIR/blobs/<shard>/` behind the same `BlobStore` interface: bytes stream
+  to `blobs/.tmp`, are counted and fsynced, then renamed into place under a
+  name that carries a random etag, so data files are immutable; a small JSON
+  sidecar `{contentType, size, etag}` is the commit point. Ranges are native
+  positioned reads; `If-None-Match` compares the stored etag. Leftover temp
+  files are swept at startup.
+- Limits are configurable: `FILE_MAX_BYTES` (default 25 MB per file, also the
+  largest request body) and `FILES_QUOTA_BYTES` (default 900 MB per workspace
+  for all blobs together: originals, thumbnails and custom emoji, tracked as
+  `SUM(files.size + files.thumb_size) + SUM(custom_emoji.size)`, checked
+  atomically by every upload, thumbnail and emoji insert). The web client
+  refuses files over 25 MB on its own.
 - Image dimensions read from headers on upload. Thumbnails (max 720 px, WebP)
   are generated in the browser and uploaded alongside the original.
 - Download checks the user can see a message referencing the file (or is the
@@ -269,9 +279,22 @@ state-changing requests require a matching `Origin`.
   images (except SVG), PDF, audio and video; everything else, including HTML and
   SVG, is forced to `attachment`. Always `X-Content-Type-Options: nosniff` and a
   restrictive `Content-Security-Policy: sandbox` on file responses.
-- Orphaned uploads (never attached to a message) are deleted after 24 h by a
-  daily Cron Trigger, at most 200 blob deletes per run (KV allows 1,000
-  deletes a day); the rest wait for the next run.
+- Orphaned uploads (never attached to a message) are deleted after 24 h by the
+  daily maintenance job, at most 200 blob deletes per run; the rest wait for
+  the next run.
+- Backups: `--backup <dir>` snapshots the database (online backup, verified
+  with `PRAGMA integrity_check`) and mirrors `blobs/` incrementally.
+
+**Historical (Cloudflare, Phases 4–6).** Blobs lived in Workers KV (free
+without a payment card), with an R2 adapter used only when `BLOBS` was not
+bound. KV has no range or conditional reads, so its adapter stored the metadata
+on each value, served `Range` by streaming from the start and slicing, and
+answered `If-None-Match` from the stored etag. KV's daily limits (1k writes and
+1k deletes) led to `503 storage_busy`, the 200-deletes-per-run cap and the
+200-custom-emoji-uploads-per-day limit (the latter two are still in the code).
+KV's eventual consistency led to `503 blob_pending` with `Retry-After: 5`, which
+the web client retries; the filesystem store is strongly consistent, so on
+the server it only appears if a blob file has gone missing. The 25 MB file limit came from KV's 25 MiB value limit.
 
 ## 9. Emoji
 
@@ -366,23 +389,24 @@ state-changing requests require a matching `Origin`.
 - Logs: structured JSON via Workers Logs; never log message bodies, emails in
   full, or tokens.
 
-## 13. Free-tier budget (verified 2026-11-11 against Cloudflare docs)
+## 13. Capacity
 
-| Resource (Free) | Limit | Backroom usage estimate (50 users) |
-|---|---|---|
-| Worker requests | 100k/day | page loads, history, search, uploads — a few thousand/day |
-| Worker CPU | 10 ms/request | no heavy work server-side (thumbnails and zip import are client-side) |
-| Request body | 100 MB | uploads capped at 25 MB |
-| DO requests | 100k/day; incoming WS messages billed 20:1, outgoing free | ~2k–10k/day |
-| D1 rows written | 100k/day | ~5–10 rows per message incl. FTS → ~10k messages/day headroom |
-| D1 rows read | 5M/day | ample |
-| D1 / DO storage | 5 GB total | text is small |
-| Workers KV | 1 GB storage, 25 MiB/value, 100k reads/day, 1k writes/day, 1k deletes/day | all blobs (files, thumbnails, custom emoji) capped at 900 MB/workspace; an image message costs 2 writes (file + thumbnail) and 1 read (the sniff peek), plus per viewer 1 read for the thumbnail and 1 for the full file, so 1k writes/day is about 500 image messages a day for the whole deployment; every `304` also spends a KV read; custom emoji are 1 write each, at most 200 a day per workspace; the cron removes at most 200 orphans per run (≤ 200 deletes/day), so a large orphan backlog drains slowly; at a daily limit uploads get `503 storage_busy` |
-| Static assets | 20,000 files, 25 MiB/file | ~3,700 emoji SVGs + app bundle |
-| Resend | free tier (~100 emails/day) | magic links only |
+*Updated in Phase 7.* There is no platform quota any more: capacity is bounded
+by the server's hardware. One Node process with one SQLite connection handles
+every request; writes are synchronous and fsynced (`synchronous=FULL`), so they
+are serialised, which is ample for a team of a few dozen people on a small VPS.
+Disk holds the database and the files (900 MB per workspace by default,
+`FILES_QUOTA_BYTES`). `MAX_CONNECTIONS` (default 2048) caps open connections,
+WebSockets included. Email volume is bounded by the Resend plan (the free tier
+allows about 100 emails a day; only sign-in links are sent).
 
-If usage grows past these, the upgrade path is the Workers Paid plan ($5/month)
-with no code changes.
+**Historical note.** On the Cloudflare free tier (verified 2026-11-11) the
+budget was: Worker requests 100k/day, 10 ms CPU per request, Durable Object
+requests 100k/day (incoming WebSocket messages billed 20:1), D1 100k rows
+written and 5M read per day, 5 GB D1/DO storage, Workers KV 1 GB stored with
+1k writes and 1k deletes a day (about 500 image messages a day), and 20,000
+static asset files. Those limits shaped some rules that remain in the code
+(the custom emoji daily upload cap, the orphan cleanup cap per run).
 
 ## 14. Testing
 
@@ -403,15 +427,32 @@ with no code changes.
 
 ## 15. Deployment
 
-- `wrangler.toml` defines the Worker, `WorkspaceHub` DO (SQLite class),
-  D1 binding, Workers KV namespace `BLOBS` (no R2 bucket: R2 needs a payment
-  card on file), static assets, Cron Trigger.
-- Secrets: `RESEND_API_KEY`, `OWNER_EMAIL`, `APP_ORIGIN`, `EMAIL_FROM`.
-- `wrangler d1 migrations apply` for schema; seed migration creates `clubhack`.
-- Default URL `https://backroom.<account>.workers.dev`; custom domain optional.
-- Operator prerequisites: free Cloudflare account; free Resend account with a
+*Updated in Phase 7: self-hosted.*
+
+- Target: a Linux machine the operator controls, with Node 26+, a domain and a
+  reverse proxy for HTTPS (Caddy, nginx, or Cloudflare's proxy/tunnel in front
+  of one). Cloudflare Workers is not a supported target.
+- Build: `npm ci`, `npm run build -w apps/web`, `npm run build -w apps/server`
+  (one bundle, `apps/server/dist/server.mjs`, plus `dist/migrations/`; no
+  `node_modules` at runtime).
+- Configuration by environment: `APP_ORIGIN`, `OWNER_EMAIL`, `RESEND_API_KEY`,
+  `EMAIL_FROM`, `DATA_DIR`, `PORT`, `HOST`, `TRUSTED_PROXY_HEADER`,
+  `TRUSTED_PROXY_SECRET`, `WEB_DIST`, `FILES_QUOTA_BYTES`, `FILE_MAX_BYTES`,
+  `KEEP_ALIVE_TIMEOUT_MS`, `MAX_CONNECTIONS`. Unset `RESEND_API_KEY` selects the
+  console mailer (development only).
+- Migrations (the same `apps/worker/migrations/*.sql`, tracked in a
+  wrangler-compatible `d1_migrations` table) are applied at startup; the seed
+  migration creates `clubhack`.
+- Supervision: systemd (example unit in `docs/SELF_HOSTING.md`) or
+  `scripts/run-forever.sh` where there is no systemd. SIGTERM shuts down
+  gracefully.
+- Backups: `node server.mjs --backup <dir> --keep 7` from cron.
+- Operator prerequisites: a server, a domain, and a free Resend account with a
   verified sending domain (Resend requires a domain to email arbitrary
   recipients).
+- Historical: Phases 1–6 deployed with `wrangler` (Worker, SQLite-class Durable
+  Object, D1, KV namespace `BLOBS`, static assets, Cron Trigger); see
+  `docs/DEPLOY.md` (unmaintained).
 
 ## 16. Phases
 

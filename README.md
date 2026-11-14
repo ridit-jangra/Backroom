@@ -1,281 +1,123 @@
 # Backroom
 
-Backroom is a Slack-style chat app for small communities. It runs entirely on Cloudflare: a Worker serves the API and the React single-page app, and a D1 database stores the data. Sign-in is by emailed magic link; new people join through invite links created by the workspace owner. Phase 1 covers sign-in, the single `clubhack` workspace with its `#general` channel, invites, and the member list. Phase 2 adds real-time messaging and Phase 3 adds emoji and reactions, and Phase 4 adds file uploads and search (see below).
+Backroom is a Slack-style team chat for small groups (a club, a class, a small team). It is open source (MIT) and self-hosted: you run it on your own server.
 
-## Prerequisites
+What it does:
 
-- Node 26 and npm (the repo uses npm workspaces; no global installs needed, Wrangler runs via `npx`)
-- A free Cloudflare account (to deploy)
-- A free Resend account with a verified sending domain (to deploy; not needed locally)
+- Public and private channels, direct messages and group DMs
+- Threads, edits, deletes, `@name`, `@channel` and `@here` mentions
+- Reactions with every Unicode emoji (by `:shortcode:`, with skin tones) and custom emoji, added one by one or imported from a zip
+- File uploads (picker, drag and drop or paste) with image thumbnails, inline previews and ranged downloads
+- Full-text search with filters (`in:#channel`, `from:@name`, `has:file`, `before:`/`after:` dates, quoted phrases)
+- Live unread and mention badges, typing indicators, presence and browser notifications
+- Sign-in by emailed magic link (no passwords); new people join through invite links from an admin
+- A Linux desktop app (Tauri) with a tray, native notifications, an unread badge and `backroom://` links
 
-## Local development
+## How it works
 
-```sh
-npm install
-cp apps/worker/.dev.vars.example apps/worker/.dev.vars   # RESEND_API_KEY=dev, OWNER_EMAIL=you@example.com
-cd apps/worker && npx wrangler d1 migrations apply backroom --local && cd ../..
-npm run dev:all
-```
+- One Node.js process (`apps/server`) serves the REST API, the WebSocket at `/ws` and the web app.
+- Data lives in a single SQLite file (with FTS5 for search). Uploaded files live in a folder on disk, next to the database.
+- The web app (`apps/web`) is a React single-page app. The desktop app (`apps/desktop`) is a Tauri window around it.
+- Sign-in links are emailed through [Resend](https://resend.com). In development the links are printed in the terminal instead.
+- A built-in daily job (04:00 server time) removes abandoned uploads and expired sessions, tokens and rate-limit rows.
 
-`.dev.vars` is git-ignored; never commit it. With `RESEND_API_KEY=dev` no email is sent: the sign-in link is printed in the terminal as `Sign-in link for <email>: <url>`. Set `OWNER_EMAIL` to the address you will sign in with; that person becomes the workspace owner.
+## You need a server
 
-`npm run dev:all` (run from the repo root) builds the web app and starts `wrangler dev` on http://localhost:8787. `wrangler dev` also runs the `WorkspaceHub` Durable Object locally, so chat works end to end without deploying.
+Backroom is a self-hosted open source project. To use it, or to try it anywhere beyond your own machine, you need a server you control:
 
-Open the app at the same origin as APP_ORIGIN (http://localhost:8787 by default); other origins are rejected by design.
+- a VPS or any Linux machine with **Node.js 26 or newer**,
+- a **domain name** pointing at it,
+- a **reverse proxy for HTTPS** in front of it (Caddy, nginx, or Cloudflare's proxy or tunnel in front of one of those).
 
-Safari refuses Secure cookies on http://localhost — use Chrome or Firefox locally.
+It is **not** a serverless or Cloudflare app. This repository does not support Cloudflare Workers as a deployment target. The Workers entry point in `apps/worker` exists so the application code can be tested under Cloudflare's runtime (workerd), and the old deployment notes are kept in [docs/DEPLOY.md](docs/DEPLOY.md), marked as unmaintained. You are welcome to adapt it, but it is not maintained here.
 
-### Browser walkthrough
+The full guide (install, configuration, reverse proxy examples, systemd, backups, upgrades) is in **[docs/SELF_HOSTING.md](docs/SELF_HOSTING.md)**.
 
-1. Open http://localhost:8787 and request a sign-in link for your `OWNER_EMAIL`. Sign-in requests are rate limited to 5 per hour per email address and 100 per hour per IP address (enough for a whole club on one network); over the limit the page still says "check your email" but nothing is sent.
-2. Copy the `Sign-in link ...` URL from the terminal, open it, and click "Sign in". You land in `clubhack` with the `#general` channel.
-3. Create an invite. In the browser dev tools, copy the value of the `backroom_session` cookie, then run:
+One server runs one workspace, named `clubhack` in this version.
 
-   ```sh
-   curl -s http://localhost:8787/w/clubhack/invites \
-     -H 'Origin: http://localhost:8787' \
-     -H 'Content-Type: application/json' \
-     -H 'Cookie: backroom_session=<paste cookie value>' \
-     -d '{}'
-   ```
+## Quick start (local development)
 
-   The response contains a `url` like `http://localhost:8787/invite/<token>`.
-4. Open that URL in a private window, enter a second email, copy the new sign-in link from the terminal, and sign in. Both people now appear in the members list.
-
-## Messaging (Phase 2)
-
-What works:
-
-- Public and private channels, direct messages and group DMs.
-- Real-time sending, replies in threads, edits and deletes, `@name` mentions and `@channel` / `@here`.
-- Live unread and mention badges, typing indicators and presence, browser notifications (permission is requested only when you click the button), and automatic reconnect with a "Reconnecting..." banner.
-- Admins manage invites and members from the web app.
-- Reactions arrived in Phase 3, and file uploads and search in Phase 4 (below).
-
-Real time runs over a WebSocket at `GET /ws?workspace=clubhack`. The browser sends its session cookie. Checks run in this order: no valid session gives `401`, then an `Origin` other than `APP_ORIGIN` gives `403`. Each workspace has one `WorkspaceHub` Durable Object that holds the sockets, assigns message sequence numbers and fans out events. Message history, channel and DM management are plain REST routes (`/w/:slug/channels`, `/w/:slug/dms`, `/channels/:id/messages`, `/messages/:id/thread`).
-
-To check it locally without a browser, start `npm run dev:all`, sign in two users as in the walkthrough above, then open the socket with the session cookie:
+You need Node 26 and npm. Nothing is installed globally.
 
 ```sh
-curl -s -o /dev/null -w '%{http_code}\n' --max-time 2 \
-  -H 'Upgrade: websocket' -H 'Connection: Upgrade' -H 'Sec-WebSocket-Version: 13' \
-  -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' \
-  -H 'Origin: http://localhost:8787' -H 'Cookie: backroom_session=<cookie>' \
-  'http://localhost:8787/ws?workspace=clubhack'   # 101; with another Origin: 403
+git clone <this repository's URL> backroom
+cd backroom
+npm ci                         # also generates the emoji table
+npm run build -w apps/web      # -> apps/web/dist
+npm run build -w apps/server   # -> apps/server/dist/server.mjs
+APP_ORIGIN=http://localhost:8080 OWNER_EMAIL=you@example.com npm start -w apps/server
 ```
 
-For the real thing, sign in as two different people in two browser windows (one private) and chat in `#general`.
+Open http://localhost:8080 (the same origin as `APP_ORIGIN`; other origins are refused by design) and request a sign-in link for the `OWNER_EMAIL` address. That address becomes the workspace owner.
 
-## Emoji & reactions (Phase 3)
+`RESEND_API_KEY` is not set, so the server uses the console mailer: no email is sent, and the link is printed in the terminal as
 
-What works:
-
-- Every standard Unicode emoji by its `:shortcode:`, including aliases (`:+1:` and `:thumbsup:`) and skin tones (`:wave::skin-tone-3:`), in messages, an emoji picker, composer autocomplete and reactions. All art is Twemoji, served from Backroom's own origin at `/twemoji/<name>.svg`, never from a CDN.
-- Reactions over the existing WebSocket (`react` frame in, `reaction` frame out). Aliases collapse into one reaction; skin tones stay distinct. At most 50 distinct emoji per message. Reacting needs channel membership.
-- Custom emoji, added one at a time or by importing a zip in the browser (the server never unzips). Changes reach open tabs as an `emoji.update` frame.
-
-Custom emoji limits:
-
-- PNG, GIF or JPEG only, detected from the file's magic bytes (the filename and declared type are ignored).
-- At most 131,072 bytes (128 KB), and 32x32 to 4,096x4,096 pixels.
-- Name matches `^[a-z0-9_-]{1,32}$`, is unique per workspace and cannot equal a built-in emoji name or alias.
-- At most 2,000 per workspace.
-- At most 200 image uploads per workspace per UTC day (each is one KV write; aliases are free), so a bulk import leaves about 800 of KV's 1,000 daily writes for files. Over it, uploads get `429 emoji_daily_limit` ("Custom emoji limit reached for today. Try again tomorrow."). The zip importer stops at the first 429 or 503 and shows how many were imported and how many remain; importing the same zip again later skips the names already added.
-- By default only admins may add them. The owner can allow everyone with `PATCH /w/:slug/settings` and body `{"customEmojiPolicy":"everyone"}` (or `"admins"` to switch back). The creator, an admin or the owner may delete an emoji (`DELETE /emoji/:id`); deleting it also deletes aliases pointing to it.
-- Images are served by `GET /emoji/:id` to active workspace members only, with `X-Content-Type-Options: nosniff`, `Content-Security-Policy: default-src 'none'; sandbox` and long-lived private caching.
-
-Build and deploy notes:
-
-- `npm install` generates the emoji table from `emoji-datasource` into `packages/emoji/src/generated/` (git-ignored); `pretest`, `predev` and `prebuild` hooks regenerate it.
-- `npm run build` copies 3,526 Twemoji SVGs into `apps/web/dist/twemoji/`.
-- Custom emoji, files and thumbnails live in a Workers KV namespace (free, no payment card; R2 would need one). Before the first deploy, create it with `npx wrangler kv namespace create BLOBS` and put the printed id into the `kv_namespaces` entry for the `BLOBS` binding in `apps/worker/wrangler.jsonc` (it says `<set at deploy>` until then; local `wrangler dev` and the tests use a local KV and need no id). There is deliberately no `r2_buckets` entry: an R2 binding makes `wrangler deploy` fail while R2 is not enabled. The worker still has an R2 adapter (`apps/worker/src/lib/blobs.ts`): it is used only when `BLOBS` is not bound and an R2 `BUCKET` is.
-- `assets.run_worker_first` must now be `["/auth/*", "/me", "/w/*", "/invites/*", "/health", "/channels/*", "/messages/*", "/emoji/*", "/files/*", "/ws"]`. Twemoji live under `/twemoji/`, which is served from static assets and deliberately does not collide with `/emoji/*`.
-- `apps/web/public/_headers` gives every static response, the SPA document included, `X-Content-Type-Options: nosniff`, `Referrer-Policy: same-origin` and `X-Frame-Options: DENY`, and caches `/twemoji/*` for a week. Worker routes set their own headers.
-
-Check it locally without a browser (replace `<cookie>` with the `backroom_session` value; use a PNG of at least 32x32):
-
-```sh
-curl -s -w '%{http_code}\n' -H 'Origin: http://localhost:8787' -H 'Cookie: backroom_session=<cookie>' \
-  -F name=smoke -F image=@smoke.png http://localhost:8787/w/clubhack/emoji          # 201; again 409
-curl -sI -H 'Cookie: backroom_session=<cookie>' http://localhost:8787/emoji/<id>   # 200 image/png; no cookie 401
-curl -sI http://localhost:8787/twemoji/1f44d.svg                                   # 200 image/svg+xml
+```
+Sign-in link for you@example.com: http://localhost:8080/verify?t=...
 ```
 
-Attribution: emoji graphics by Twemoji, CC-BY 4.0. Twemoji is from [jdecked/twemoji](https://github.com/jdecked/twemoji); the graphics are licensed under [CC-BY 4.0](https://creativecommons.org/licenses/by/4.0/), and the code under MIT. The app shows this notice on its About page (`/about`).
+Open it and click "Sign in". To add people, open Admin in the web app, create an invite and send its link. Each person signs in through the link with their own email.
 
-## Files & search (Phase 4)
+Data goes to `apps/server/data/` (the default `DATA_DIR` when started this way). Delete that folder to start over. Stop the server with Ctrl+C; it shuts down gracefully.
 
-What works:
+For working on the code: rebuild the web app or the server and restart after changes. `npm run dev` still starts the older `wrangler dev` loop on port 8787 (Cloudflare's local runtime; no Cloudflare account needed), which some contributors use for the API.
 
-- Upload files from the composer (picker, drag-and-drop or paste), with progress, cancel and retry. Up to 10 files per message; a message may be only files. Images get a WebP thumbnail made in the browser; the server never decodes images, runs a transform over upload bytes, or unzips anything.
-- Files are shown inline or as a download card, and download only for people who can see the message they are attached to. Deleting a message detaches its files.
-- Search the workspace from the top bar: free text, filters, 20 results per page, jump to the message.
-- A daily cron deletes files that were uploaded but never attached, and purges expired sessions, old sign-in tokens, desktop codes and rate-limit rows.
+## Desktop app
 
-Limits:
+Desktop installers: coming soon. Until then, build from source.
 
-| Limit | Value |
-|---|---|
-| File size | 26,214,400 bytes (25 MB) |
-| Workspace storage | 943,718,400 bytes (900 MB) for files, thumbnails and custom emoji together (KV holds 1 GB in total) |
-| Thumbnail | at most 524,288 bytes and 720 px on the long side |
-| Files per message | 10 |
-| File name | 255 code points |
-| Unattached upload lifetime | 86,400,000 ms (24 h), then the cron removes it |
-| Search query | 200 characters, 8 terms |
-| Search page | 20 results; at most offset 480 |
-
-Blob key layout (KV namespace `BLOBS`, or R2 bucket `BUCKET` if that is the bound backend):
-
-- original: `ws/<workspaceId>/<fileId>`
-- thumbnail: `ws/<workspaceId>/<fileId>-thumb-<ULID>`
-- custom emoji (Phase 3): `ws/<workspaceId>/emoji/<id>`
-
-Code that deletes file objects first checks the key against `/^ws\/[0-9A-Z]{26}\/[0-9A-Z]{26}(-thumb-[0-9A-Z]{26})?$/`, which can never match an `emoji/` key, so cleanup and quota never touch emoji. Nothing lists blob storage to compute quota or find orphans; both come from D1.
-
-Workers KV free tier: 1 GB stored, 25 MiB per value, 100,000 reads, 1,000 writes and 1,000 deletes a day. Each upload, thumbnail or custom emoji is one write. An image message costs 2 writes (file and thumbnail) and 1 read (the type sniff), plus, per viewer, 1 read for the thumbnail and 1 for the full file, so 1,000 writes a day is about 500 image messages a day for the whole deployment. Every `304` also spends a read. The workspace quota counts every blob: `SUM(files.size + files.thumb_size) + SUM(custom_emoji.size)` must stay within 900 MB, checked atomically by uploads, thumbnails and custom emoji (an over-quota emoji upload is also `413 quota_exceeded`). KV has no range or conditional reads, so the KV adapter keeps `{contentType, size, etag}` in each value's metadata (the etag is a random id per write), serves `Range` by streaming from the start and slicing, and answers `If-None-Match` from the stored etag. When a daily limit is hit, uploads answer `503 storage_busy` ("Storage has reached a free-tier limit. Try again later.") until the limit resets (00:00 UTC). KV is eventually consistent across locations (up to ~60 s), so a blob that D1 lists but KV does not have yet is served as `503 blob_pending` with `Retry-After: 5` and `Cache-Control: no-store` (unknown or hidden ids are still the same 404); the web client retries images and custom emoji after 2, 4, 8, 16 and 30 s on the same URL. A cleanup delete that hits the limit outside the cron leaves the blob behind and logs `blob_leaked` with its class (`file`, `thumb` or `emoji`), never the key.
-
-Cleanup cron: `triggers.crons` is `["0 4 * * *"]` (daily, 04:00 UTC). To run it locally:
-
-```sh
-cd apps/worker && npx wrangler dev --test-scheduled
-curl "http://localhost:8787/cdn-cgi/handler/scheduled?cron=0+4+*+*+*"   # use the port wrangler prints; answers "ok"
-```
-
-The log shows `orphans_cleaned` with a count. (The older `/__scheduled` path is not in `run_worker_first`, so the static-asset layer answers it with the SPA page; use the `/cdn-cgi/handler/scheduled` path.) Each run deletes at most 200 blobs (an original and its thumbnail count as two), because KV allows 1,000 deletes a day and deletes keys one by one; the remaining orphans wait for the next run. If KV's daily delete limit is hit mid-run, the run stops (log `orphan_delete_limited`) and keeps those rows for the next run.
-
-Search syntax: free text; `"quoted phrases"`; `in:#channel`; `from:@name`; `has:file`; `before:YYYY-MM-DD`; `after:YYYY-MM-DD`. Filters are case-insensitive and a repeated filter keeps the last one. Dates are UTC days. Every term is matched literally, so `OR`, `NEAR(`, `*` and quotes typed by a user are just words, and terms with no letter or digit are ignored. Punctuation inside a term splits it into an adjacent-word phrase, so `x.html` matches a file named `x.html` but not one whose tokens are not adjacent (such as `<b>x</b>.html`). Results come only from messages you can see: public channels and channels or DMs you are in; deleted messages never appear.
-
-Serving rules (`GET /files/:id`, `GET /files/:id/thumb`):
-
-- Always sent with `X-Content-Type-Options: nosniff`, `Content-Security-Policy: default-src 'none'; sandbox`, `Cache-Control: private, max-age=31536000, immutable` and an `ETag` (`If-None-Match` gives `304`). Single `Range` requests give `206`; an unsatisfiable range gives `416`.
-- The stored type is decided at upload from magic bytes for PNG, GIF, JPEG, WebP and PDF. Audio and video are taken as declared only if on the whitelist (mp3/mp4/aac/ogg/wav/webm/flac audio; mp4/webm/ogg/quicktime video). A declared image or PDF without matching bytes becomes `application/octet-stream`.
-- Inline (`Content-Disposition: inline`, real `Content-Type`) only for PNG, GIF, JPEG, WebP, PDF and the audio/video whitelist. Everything else (HTML, SVG, text, archives) is an `attachment` served as `application/octet-stream`.
-- The file name is sent as `filename="<ASCII fallback>"; filename*=UTF-8''<percent-encoded>`.
-- PDF and sandbox: the `sandbox` CSP applies to a PDF opened inline, and some browsers' built-in PDF viewers refuse to render sandboxed documents. If a PDF shows blank in your browser, download it instead.
-
-D1 write budget (index entries count as rows written; the free plan allows 100k rows/day): a text message writes about 15 rows, each attached file adds about 3, and an upload writes about 8. That leaves roughly 6k messages/day of headroom.
-
-Troubleshooting: while developing, workerd may print `uncaught` pipe or stream errors when a client aborts a request (a cancelled upload or download). These are expected and harmless.
-
-Troubleshooting: each WebSocket may send about 10 frames per second (burst 20). Past that, a send shows "You're sending too fast. Wait a moment.", while edits, deletes and reactions are dropped silently (the web client sends them without a clientId).
-
-Deploy notes: `assets.run_worker_first` must now be `["/auth/*", "/me", "/w/*", "/invites/*", "/health", "/channels/*", "/messages/*", "/emoji/*", "/files/*", "/ws"]`, and `wrangler.jsonc` must keep the `triggers.crons` entry. Run `npx wrangler d1 migrations apply backroom --remote` for the new migrations.
-
-## Desktop app (Phase 5)
-
-`apps/desktop` is a Tauri 2 shell (Rust) that loads the deployed Backroom web app in a native window. It adds a system tray, native notifications and unread badge, file downloads to your Downloads folder, and `backroom://` deep links. Linux only for now (`.deb` and AppImage).
-
-### Prerequisites
-
-- Rust (stable) and cargo
-- WebKitGTK 4.1 and libsoup 3 development packages (Arch: `webkit2gtk-4.1`, `libsoup3`; Debian/Ubuntu: `libwebkit2gtk-4.1-dev`, `libsoup-3.0-dev`), plus the usual Tauri Linux build libraries (`libayatana-appindicator`, `librsvg`, `patchelf`)
-- `xvfb` for the smoke test (Arch: `sudo pacman -S xorg-server-xvfb`; Debian/Ubuntu: `sudo apt install xvfb`)
-
-### Build
-
-`BACKROOM_APP_URL` is compiled into the binary (default `http://localhost:8787`). It must be the final canonical origin of your deployment: scheme and host (and port) only, no path, and no redirects. A redirect to another origin would be treated as an external link and leave the app blank. A value that is not an http(s) URL fails the build.
+`apps/desktop` is a Tauri 2 app (Rust) that opens your Backroom server in a locked-down native window. Linux only for now (`.deb` and AppImage). You need Rust (stable), the WebKitGTK 4.1 and libsoup 3 development packages and the usual Tauri Linux build libraries. On Debian/Ubuntu that is `libwebkit2gtk-4.1-dev libsoup-3.0-dev libayatana-appindicator3-dev librsvg2-dev`.
 
 ```sh
 BACKROOM_APP_URL=https://chat.example.com npm run build -w apps/desktop
 ```
 
-Artifacts land in `apps/desktop/src-tauri/target/release/bundle/` (`deb/` and `appimage/`). Install the `.deb` with `sudo apt install ./Backroom_0.1.0_amd64.deb` (or `sudo dpkg -i`). The `.deb` installs the `.desktop` file that registers the `backroom://` scheme. That file comes from the custom template `apps/desktop/src-tauri/linux/backroom.desktop.hbs` (`bundle.linux.deb.desktopTemplate`), which adds the `%u` field code to `Exec` so GIO, KDE and Firefox pass the link to the app. The AppImage reuses the same template.
+`BACKROOM_APP_URL` is compiled in. It must be your server's exact public origin (scheme, host and port, no path, no redirects). The packages land in `apps/desktop/src-tauri/target/release/bundle/`. Sign-in uses the same email link: the link opens in your browser, which hands a one-time code back to the app through a `backroom://` link (PKCE, so an intercepted code is useless).
 
-The AppImage is not installed, so it registers the scheme itself on every start: it writes `~/.local/share/applications/backroom-desktop-handler.desktop` (with `Exec="<path to the AppImage>" %u`) and makes it your default `backroom://` handler with `xdg-mime`. If you move the AppImage, start it once from the new place.
+## Repository layout
 
-The AppImage bundle needs `linuxdeploy`, which Tauri downloads at build time; if that download or FUSE is unavailable the build can fail while the `.deb` still works.
+| Path | What it is |
+|---|---|
+| `apps/server` | The Node server: HTTP and WebSocket server, SQLite and filesystem adapters, static files, daily maintenance, backups. Built with esbuild into one file, `dist/server.mjs`. |
+| `apps/worker` | The application core: the Hono API, the `WorkspaceHub` real-time hub, auth, files, search, and the SQL migrations. The server bundles this code. It also has a Cloudflare Workers entry point, used to run its test suite under workerd. |
+| `apps/web` | The React + Vite single-page app. |
+| `apps/desktop` | The Tauri desktop app. |
+| `packages/protocol` | Shared types and zod schemas for the REST API and WebSocket frames. |
+| `packages/emoji` | The emoji table (generated from `emoji-datasource`), shortcode helpers, and the Twemoji copy script. |
+| `e2e` | Playwright end-to-end tests. |
+| `scripts` | `run-forever.sh` (a supervisor for hosts without systemd) and the old Cloudflare preflight script. |
+| `docs` | The self-hosting guide, the design spec and the implementation plans. |
 
-For development run `npm run dev -w apps/desktop` (with the worker on http://localhost:8787); a dev build registers the scheme for its own binary on every start (`register_all`). This writes the same per-user handler file as the AppImage and becomes your default handler, which outranks an installed `.deb` (see Troubleshooting).
-
-### Smoke test
-
-`apps/desktop/scripts/smoke.sh` builds a debug binary for `http://localhost:8788`, starts `wrangler dev` on port 8788 with its own scratch state, runs the app under `xvfb-run -a` with `BACKROOM_SMOKE=1`, and expects `smoke ok http://localhost:8788`. It exits 2 with an install hint if `xvfb-run` is missing. Pass `--direct` (or `SMOKE_DIRECT=1`) to use your current display instead of xvfb. It needs `apps/web/dist` to exist (`npm run build -w apps/web`). The smoke app uses its own XDG data, cache and config dirs under the scratch dir and its own single-instance id, so it never touches your profile or hands off to a Backroom you have running. In smoke mode the app exits right after the first page load on the app origin, or with `smoke timeout` after 30 seconds.
-
-### How sign-in works
-
-1. In the desktop app, request a sign-in link on the normal login page. The app creates a one-time PKCE verifier in memory and gives the page only its SHA-256 challenge. Requesting again within 20 minutes reuses the same verifier, so any of the emails you received can finish sign-in (only the first one used works).
-2. Open the emailed link: it opens Backroom in your browser.
-3. In the browser, click "Sign in". The server issues a one-time code bound to the challenge and the browser opens `backroom://auth?code=...`.
-4. The desktop app receives the link, loads `/desktop-auth` in the main window with the code and its verifier, and the server exchanges them for a normal session cookie.
-
-If the app has no pending login when the link arrives (it was restarted, the 20 minutes ran out, or the link was already used), it shows its window and a notification: "Sign-in link expired. Request a new one from Backroom." If the browser shows "Opening Backroom…" and nothing happens, use its "Open Backroom" link within 2 minutes, or request a new link from the app.
-
-The code alone is useless without the verifier, which never leaves the app and is never logged.
-
-### Security notes (threat model)
-
-- Origin lock: only the app origin loads in the app windows. Other http(s) links open in your default browser (rate limited), and every other scheme is dropped.
-- Capability scope: the desktop commands (`notify`, `set_badge`, `platform`, `login_challenge`, `take_pending_navigation`) are granted at runtime only to the main window and only for the app origin. Each command also checks that it was called from the main window.
-- PKCE: the one-time login code is bound to a challenge made by the app, so a code intercepted from the custom-scheme link cannot be redeemed without the in-memory verifier. Codes are single use and expire quickly.
-- Viewer windows: file links that open in a new window get a `viewer-<n>` window with no IPC access at all and no opener link back to the page; viewer creation is rate limited.
-- Downloads: the file name suggested by the server is reduced to a safe basename (no paths, leading dots or spaces, control or bidi characters, length-capped) and never overwrites an existing file.
-- Session storage: the webview keeps the session cookie in a plain-text cookie jar under `~/.local/share/app.backroom.desktop/`, like a browser profile. The app sets that directory to `0700` at every start so other local users cannot read it; any program running as you can.
-
-### Known limitations
-
-- A local application can send a fake `backroom://auth` link and spoil a pending desktop login by consuming the verifier. This can only cause a failed sign-in; request a new email and try again.
-- Deep links need the installed `.desktop` file (the `.deb`) or a started AppImage (it registers itself); a bare release binary does not register the scheme.
-
-### Tray and channel links
-
-- Closing the window hides it to the tray; use the tray's Quit to exit. At startup the app asks the session D-Bus whether a tray host (`org.kde.StatusNotifierWatcher`) is running. If there is none (for example GNOME without the AppIndicator extension), or the check cannot run, closing the main window quits the app instead, and it logs `tray_unavailable`. A tray host started after Backroom is not noticed until the next launch. Trays that only support the old XEmbed protocol (no StatusNotifier watcher) count as no tray, so there closing the window quits too.
-- A `backroom://channel/<id>` link opens that channel whether the app was already running or the link started it. The app keeps the last channel link for 60 seconds until the page asks for it.
-
-### Troubleshooting
-
-- `backroom://` links do nothing: install the `.deb`, start the AppImage once, or in development run the app once so `register_all` registers it. Check with `xdg-mime query default x-scheme-handler/backroom`.
-- Links open a dev build (or an old AppImage) instead of the installed `.deb`: a dev build or AppImage made `backroom-desktop-handler.desktop` your per-user default, which wins over the `.deb`. Point it back with `xdg-mime default Backroom.desktop x-scheme-handler/backroom`, or delete `~/.local/share/applications/backroom-desktop-handler.desktop`.
-- Blank window or the app opens your browser instead: `BACKROOM_APP_URL` does not match the final origin the site serves (redirect, `www.`, wrong port). Rebuild with the exact origin.
-- Sign-in from the browser says the link expired: request a fresh email from the desktop app.
-
-## Look and feel
-
-Fonts are Atkinson Hyperlegible (body) and Bricolage Grotesque (workspace name, channel title and auth headings), self-hosted through `@fontsource`.
-Colour and font tokens live at the top of `apps/web/src/styles.css` (`:root`, with dark values under `prefers-color-scheme: dark`).
-
-## Running tests
+## Testing
 
 ```sh
-npm test                       # all workspaces
-npx tsc -p apps/worker         # type-check the worker
-npx tsc -p apps/web            # type-check the web app
+npm test                         # every workspace (the desktop part needs Rust and the GTK libraries)
+npm test -w apps/server          # or one workspace at a time: apps/server, apps/worker, apps/web, packages/protocol
+npx tsc -p apps/server           # type checks: apps/server, apps/worker, apps/web
+npm run e2e                      # Playwright end-to-end suite
 ```
 
-## Continuous integration
+The end-to-end suite builds the web app into `e2e/.tmp/dist` and the server into `e2e/.tmp/server`. It then starts the server on `127.0.0.1:8788` with a fresh data folder and the console mailer, and signs people in with the links the server prints. Locally it uses your installed Chrome. In CI (`CI=1`) it uses Playwright's Chromium (`npx playwright install chromium`).
 
-`.github/workflows/ci.yml` runs on every push and pull request. Job `test` runs `npm test` (all workspaces, including `cargo test` for the desktop app), type-checks `apps/web` and `apps/worker`, and runs `cargo clippy -- -D warnings` on the desktop app. Job `e2e` (after `test`) runs the Playwright suite against `wrangler dev` with bundled chromium and uploads traces on failure. It needs no secrets (the e2e server uses the console mailer). Actions are pinned to commit SHAs. The workflow only runs once the repository has a GitHub remote; none is configured yet, so it has been validated locally (YAML parse) only.
+CI (`.github/workflows/ci.yml`) runs the unit tests, type checks, `cargo clippy` for the desktop app, and the end-to-end suite. It needs no secrets.
 
-## Deploying to Cloudflare
+## Security notes
 
-1. `npx wrangler login`
-2. `npx wrangler d1 create backroom` and paste the printed `database_id` into `apps/worker/wrangler.jsonc`.
-3. `npx wrangler d1 migrations apply backroom --remote` (run from `apps/worker`, or pass `-c apps/worker/wrangler.jsonc`).
-4. `npx wrangler secret put RESEND_API_KEY` and `npx wrangler secret put OWNER_EMAIL` (same `-c` note applies).
-5. In `apps/worker/wrangler.jsonc`, set the `APP_ORIGIN` var to the deployed URL exactly, with no trailing slash (e.g. `https://backroom.example.workers.dev`), and `EMAIL_FROM` to a sender on your Resend-verified domain. Resend will refuse to send from an unverified domain.
-6. `npx wrangler r2 bucket create backroom` (the `BUCKET` binding in `wrangler.jsonc`; custom emoji images live there).
-7. `npm run build && npx wrangler deploy -c apps/worker/wrangler.jsonc`
+- Sign-in is by single-use magic link (15 minutes). Sign-in requests are rate limited to 5 per hour per email address and 100 per hour per client IP. Desktop code exchanges are limited to 30 per hour per IP. Over the limit nothing is sent, and the page shows the same message, so it reveals nothing. Each WebSocket may send about 10 frames per second.
+- Rate limits use the TCP peer address unless you configure `TRUSTED_PROXY_HEADER`. Only do that when the server can be reached through your proxy alone, otherwise clients can forge the header. See [the guide](docs/SELF_HOSTING.md#security).
+- The API checks `Origin` against `APP_ORIGIN`. Cookies are `HttpOnly`, `SameSite=Lax`, and `Secure` when `APP_ORIGIN` is https.
+- Uploaded files are served with `nosniff` and a sandboxing Content-Security-Policy. Only images, PDF, audio and video are shown inline; everything else is a download. The server never decodes images or unzips archives (thumbnails and zip imports happen in the browser).
+- Logs are JSON lines without message bodies, email addresses, tokens or file keys. The console mailer's sign-in line is the one exception, and it is meant for development only. The server warns at startup when it is used with an https `APP_ORIGIN`.
+- The data folder is created with mode 700. Keep your environment file (it holds the Resend key) at mode 600.
 
-The first deploy after Phase 2 creates the `WorkspaceHub` Durable Object class from the `v1` migration tag in `wrangler.jsonc`; do not rename the class or change that tag. The `assets.run_worker_first` list in `wrangler.jsonc` must keep every API prefix so the Worker, not the SPA, answers them: `["/auth/*", "/me", "/w/*", "/invites/*", "/health", "/channels/*", "/messages/*", "/emoji/*", "/files/*", "/ws"]`. (The SPA route `/client/:slug` is served from static assets.)
+## License
 
-Do not set `RESEND_API_KEY` to `dev` in production; that value switches to the console mailer.
+MIT, see [LICENSE](LICENSE).
 
-## Deploying
+Emoji graphics by Twemoji, CC-BY 4.0. Twemoji is from [jdecked/twemoji](https://github.com/jdecked/twemoji); the graphics are licensed under [CC-BY 4.0](https://creativecommons.org/licenses/by/4.0/), and the code under MIT. The app shows this notice on its About page (`/about`). Fonts: Atkinson Hyperlegible and Bricolage Grotesque (SIL Open Font License), self-hosted through `@fontsource`.
 
-Backroom runs on the Cloudflare free tier at https://chat.ridit.space. The full operator procedure, the preflight check (`scripts/deploy-preflight.sh`), rollback and troubleshooting are in [docs/DEPLOY.md](docs/DEPLOY.md). Always deploy with `npm run deploy -w apps/worker`, never a bare `wrangler deploy`.
+## More
 
-## Project layout
-
-- `apps/worker` - Cloudflare Worker (Hono API, D1 migrations, tests)
-- `apps/web` - React single-page app, built to `apps/web/dist` and served by the Worker as static assets
-- `packages/protocol` - shared types and schemas used by both apps
-- `packages/emoji` - generated emoji table, shortcode helpers and the Twemoji copy script
-- `docs/superpowers` - design spec and implementation plan
-
-## Links
-
-- Spec: [docs/superpowers/specs/2026-11-11-backroom-design.md](docs/superpowers/specs/2026-11-11-backroom-design.md)
-- Phase 1 plan: [docs/superpowers/plans/2026-11-11-phase-1-foundation.md](docs/superpowers/plans/2026-11-11-phase-1-foundation.md)
-- Phase 2 plan: [docs/superpowers/plans/2026-11-11-phase-2-messaging.md](docs/superpowers/plans/2026-11-11-phase-2-messaging.md)
-- Phase 3 plan: [docs/superpowers/plans/2026-11-12-phase-3-emoji.md](docs/superpowers/plans/2026-11-12-phase-3-emoji.md)
-- Phase 4 plan: [docs/superpowers/plans/2026-11-12-phase-4-files-search.md](docs/superpowers/plans/2026-11-12-phase-4-files-search.md)
+- [docs/SELF_HOSTING.md](docs/SELF_HOSTING.md): running Backroom on your server
+- [docs/superpowers/specs/2026-11-11-backroom-design.md](docs/superpowers/specs/2026-11-11-backroom-design.md): the design spec (data model, protocol, limits)
+- [docs/DEPLOY.md](docs/DEPLOY.md): the unmaintained Cloudflare Workers notes
