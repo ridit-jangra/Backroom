@@ -334,56 +334,69 @@ function lazyFileStream(path: string, size: number, start: number, length: numbe
   let pos = start;
   let left = length;
   let cancelled = false;
+  /** The pull in progress, so cancel() can wait for an open that is still in flight. */
+  let inflight: Promise<void> | null = null;
   const token = {};
-  const close = () => {
+  const closeRaw = (f: number) => new Promise<void>((resolve) => fs.close(f, () => resolve()));
+  /** Resolves once the fd (if any) is closed, so end, error and cancel only report after the file is released. */
+  const close = async (): Promise<void> => {
     const f = fd;
     fd = null;
     if (f !== null) {
       abandoned.unregister(token);
-      fs.close(f, () => {});
+      await closeRaw(f);
+    }
+  };
+  const pullOnce = async (ctrl: ReadableStreamDefaultController<Uint8Array>): Promise<void> => {
+    try {
+      if (left === 0) {
+        await close();
+        ctrl.close();
+        return;
+      }
+      if (fd === null) {
+        const f = await openFd(path, 'r');
+        if (cancelled) {
+          await closeRaw(f);
+          return;
+        }
+        fd = f;
+        abandoned.register(stream, f, token);
+        if ((await fstatFd(f)).size !== size) throw new Error('blob changed before it was read');
+      }
+      const buf = new Uint8Array(Math.min(left, READ_CHUNK));
+      const { bytesRead } = await readFd(fd, buf, 0, buf.byteLength, pos);
+      if (cancelled) {
+        await close();
+        return;
+      }
+      if (bytesRead === 0) throw new Error('blob ended before the requested range');
+      pos += bytesRead;
+      left -= bytesRead;
+      ctrl.enqueue(buf.subarray(0, bytesRead));
+      if (left === 0) {
+        await close();
+        ctrl.close();
+      }
+    } catch (e) {
+      await close();
+      if (!cancelled) ctrl.error(streamError(e));
     }
   };
   const stream = new ReadableStream<Uint8Array>(
     {
-      async pull(ctrl) {
-        try {
-          if (left === 0) {
-            close();
-            ctrl.close();
-            return;
-          }
-          if (fd === null) {
-            const f = await openFd(path, 'r');
-            if (cancelled) {
-              fs.close(f, () => {});
-              return;
-            }
-            fd = f;
-            abandoned.register(stream, f, token);
-            if ((await fstatFd(f)).size !== size) throw new Error('blob changed before it was read');
-          }
-          const buf = new Uint8Array(Math.min(left, READ_CHUNK));
-          const { bytesRead } = await readFd(fd, buf, 0, buf.byteLength, pos);
-          if (cancelled) {
-            close();
-            return;
-          }
-          if (bytesRead === 0) throw new Error('blob ended before the requested range');
-          pos += bytesRead;
-          left -= bytesRead;
-          ctrl.enqueue(buf.subarray(0, bytesRead));
-          if (left === 0) {
-            close();
-            ctrl.close();
-          }
-        } catch (e) {
-          close();
-          ctrl.error(streamError(e));
-        }
+      pull(ctrl) {
+        const p = pullOnce(ctrl);
+        inflight = p;
+        return p.finally(() => {
+          if (inflight === p) inflight = null;
+        });
       },
-      cancel() {
+      async cancel() {
         cancelled = true;
-        close();
+        // An open or read still in flight closes its own fd once it sees `cancelled`; wait for it.
+        if (inflight) await inflight.catch(() => {});
+        await close();
       },
     },
     { highWaterMark: 0 },

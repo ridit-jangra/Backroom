@@ -1,5 +1,5 @@
 import { existsSync, readdirSync } from 'node:fs';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fileKey } from '../../worker/src/files/store';
 import type { BlobStore } from '../../worker/src/lib/blobs';
 import { createFsBlobStore } from '../src/platform/fs-blobs';
@@ -15,6 +15,8 @@ const BIG = 200 * 1024; // well above one 64 KiB read
 const FD_DIR = existsSync('/proc/self/fd') ? '/proc/self/fd' : '/dev/fd';
 const openFds = (): number => readdirSync(FD_DIR).length;
 const tick = () => new Promise((r) => setImmediate(r));
+/** Polls until the open fd count is back at (or below) `baseline`, instead of trusting a single tick. */
+const backTo = (baseline: number) => vi.waitFor(() => expect(openFds()).toBeLessThanOrEqual(baseline), { timeout: 2_000, interval: 5 });
 
 async function collectGarbage(): Promise<void> {
   const gc = (globalThis as { gc?: () => void }).gc;
@@ -59,10 +61,31 @@ describe('fs blob store: file handles', () => {
     expect(first.done).toBe(false);
     expect(first.value!.byteLength).toBeLessThan(BIG);
     expect(openFds()).toBe(baseline + 1);
+    // cancel() resolves only once the file is closed: no tick needed.
     await reader.cancel();
-    await tick();
-    expect(openFds()).toBe(baseline);
+    expect(openFds()).toBeLessThanOrEqual(baseline);
     await collectGarbage();
+  });
+
+  it('a cancel that lands while the first open is still in flight waits for that file to close', async () => {
+    const baseline = openFds();
+    for (let i = 0; i < 20; i++) {
+      const reader = (await store.get(KEY))!.body!.getReader();
+      const pending = reader.read().catch(() => null); // starts the lazy open
+      await reader.cancel();
+      expect(openFds()).toBeLessThanOrEqual(baseline);
+      await pending;
+    }
+  });
+
+  it('body.cancel() on an open stream waits for the close too', async () => {
+    const baseline = openFds();
+    const r = (await store.get(KEY))!;
+    const reader = r.body!.getReader();
+    await reader.read();
+    reader.releaseLock();
+    await r.body!.cancel();
+    expect(openFds()).toBeLessThanOrEqual(baseline);
   });
 
   it('a stream read once and then abandoned (no cancel) is closed when collected, without crashing', async () => {
@@ -80,14 +103,12 @@ describe('fs blob store: file handles', () => {
   it('a stream read to the end closes its file; so does a stream that errors', async () => {
     const baseline = openFds();
     expect(await read((await store.get(KEY))!.body)).toEqual(bytes(BIG));
-    await tick();
-    expect(openFds()).toBe(baseline);
+    await backTo(baseline);
 
     const gone = (await store.get(KEY))!;
     await store.delete(KEY); // removed before the first read: the lazy open finds nothing
     await expect(read(gone.body)).rejects.toThrow();
-    await tick();
-    expect(openFds()).toBe(baseline);
+    await backTo(baseline);
   });
 
   it('a reader that started keeps its bytes across an overwrite and a delete (positioned reads after unlink)', async () => {
@@ -115,7 +136,6 @@ describe('fs blob store: file handles', () => {
       await store.peek(KEY, 16);
       await store.get(KEY, { ifNoneMatch: full.etag });
     }
-    await tick();
-    expect(openFds()).toBe(baseline);
+    await backTo(baseline);
   });
 });
