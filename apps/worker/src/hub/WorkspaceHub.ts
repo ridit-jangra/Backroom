@@ -23,6 +23,7 @@ import { toggleReaction } from '../emoji/reactions';
 import { withFiles } from '../files/attach';
 import { addChannel, channelsOf, getAtt, removeChannel, setAtt } from './attachment';
 import { frameCost, takeFrameBudget } from './budget';
+import { autoResponsePair, newWebSocketPair, upgradeResponse } from './platform';
 
 export type MembershipChange =
   | {
@@ -112,7 +113,7 @@ export class WorkspaceHub extends DurableObject<Env> {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     // Answered by the runtime without waking the hub (free-tier budget, §13).
-    ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair(PING_FRAME, PONG_FRAME));
+    ctx.setWebSocketAutoResponse(autoResponsePair(PING_FRAME, PONG_FRAME));
   }
 
   async fetch(req: Request): Promise<Response> {
@@ -127,7 +128,7 @@ export class WorkspaceHub extends DurableObject<Env> {
     // A new tab of a user who is already active inherits their latest activity, so the alarm keeps
     // treating them consistently.
     const lastActivityAt = Math.max(0, ...this.socketsForUser(userId).map((ws) => getAtt(ws).lastActivityAt));
-    const pair = new WebSocketPair();
+    const pair = newWebSocketPair();
     const [client, server] = [pair[0], pair[1]];
     // Accept before reading the channel set, and log membership changes that arrive during the read:
     // the read may predate a change whose RPC lands meanwhile, so the log is replayed on top of it.
@@ -153,7 +154,7 @@ export class WorkspaceHub extends DurableObject<Env> {
       ]);
       if (active!.results.length === 0) {
         server.close(4001, 'deactivated');
-        return new Response(null, { status: 101, webSocket: client });
+        return upgradeResponse(client);
       }
       const ids = new Set((channels!.results as { id: string }[]).map((r) => r.id));
       for (const change of log) {
@@ -171,7 +172,7 @@ export class WorkspaceHub extends DurableObject<Env> {
     } finally {
       this.connecting.delete(server);
     }
-    return new Response(null, { status: 101, webSocket: client });
+    return upgradeResponse(client);
   }
 
   async webSocketMessage(ws: WebSocket, raw: string | ArrayBuffer): Promise<void> {
