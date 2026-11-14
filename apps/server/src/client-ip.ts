@@ -53,6 +53,9 @@ function headerBagFromRaw(raw: string[]): HeaderBag {
  * exactly one `cf-connecting-ip` remains, holding the trusted address. Returns that address.
  */
 export function applyClientIp(req: IncomingMessage, trustedHeader: string | null): string {
+  // Materialise `headers` BEFORE replacing rawHeaders: Node builds it lazily from rawHeaders using the header count
+  // it parsed, so computing it from a shorter replacement array (repeated header lines removed) would throw.
+  const headers = req.headers;
   const ip = trustedClientIp(headerBagFromRaw(req.rawHeaders), req.socket?.remoteAddress, trustedHeader);
   const raw: string[] = [];
   for (let i = 0; i + 1 < req.rawHeaders.length; i += 2) {
@@ -60,8 +63,6 @@ export function applyClientIp(req: IncomingMessage, trustedHeader: string | null
   }
   raw.push('CF-Connecting-IP', ip);
   req.rawHeaders = raw;
-  // `headers` may already have been computed (and cached) from the old rawHeaders.
-  const headers = req.headers;
   delete headers[CLIENT_IP_HEADER];
   headers[CLIENT_IP_HEADER] = ip;
   return ip;

@@ -125,13 +125,14 @@ export function normalizeTarget(req: IncomingMessage, appHost: string): boolean 
     return false;
   }
   req.url = target;
+  const headers = req.headers; // materialised before rawHeaders changes (see applyClientIp)
   const raw: string[] = [];
   for (let i = 0; i + 1 < req.rawHeaders.length; i += 2) {
     if (req.rawHeaders[i]!.toLowerCase() !== 'host') raw.push(req.rawHeaders[i]!, req.rawHeaders[i + 1]!);
   }
   raw.unshift('Host', appHost);
   req.rawHeaders = raw;
-  req.headers.host = appHost;
+  headers.host = appHost;
   return true;
 }
 

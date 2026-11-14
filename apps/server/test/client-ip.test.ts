@@ -93,6 +93,20 @@ describe('applyClientIp on real requests', () => {
     expect(rawValues(seen[0]!.raw, 'cf-connecting-ip')).toEqual(['127.0.0.1']);
   });
 
+  it('repeated header lines on the wire (fetch would merge them) are all removed without throwing', async () => {
+    const { port, seen } = await serve(null);
+    const { connect } = await import('node:net');
+    await new Promise<void>((resolve) => {
+      const s = connect(port, '127.0.0.1', () =>
+        s.write('GET / HTTP/1.1\r\nHost: x\r\nCF-Connecting-IP: 6.6.6.6\r\nCF-Connecting-IP: 5.5.5.5\r\ncf-connecting-ip: 4.4.4.4\r\nConnection: close\r\n\r\n'),
+      );
+      s.on('data', () => {});
+      s.on('close', () => resolve());
+    });
+    expect(seen[0]!.headers['cf-connecting-ip']).toBe('127.0.0.1');
+    expect(rawValues(seen[0]!.raw, 'cf-connecting-ip')).toEqual(['127.0.0.1']);
+  });
+
   it('a configured trusted header is honoured', async () => {
     const { port, seen } = await serve('x-real-ip');
     await fetch(`http://127.0.0.1:${port}/`, { headers: { 'X-Real-IP': '203.0.113.9', 'CF-Connecting-IP': '6.6.6.6' } });
