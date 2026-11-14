@@ -245,13 +245,16 @@ state-changing requests require a matching `Origin`.
   `BlobStore` interface that also has an R2 adapter, used only if `BLOBS` is
   not bound and an R2 `BUCKET` is.
   Limits: 25 MB per file (the KV value limit is 25 MiB), 900 MB per workspace
-  (tracked by summing `files.size`; KV holds 1 GB in total and custom emoji
-  share it).
+  for all blobs together: originals, thumbnails and custom emoji (tracked in
+  D1 as `SUM(files.size + files.thumb_size) + SUM(custom_emoji.size)`, checked
+  atomically by every upload, thumbnail and emoji insert), so the 1 GB KV
+  namespace cannot fill.
 - KV has no range or conditional reads. The KV adapter stores
   `{contentType, size, etag}` as value metadata (a random etag per write, never
   a hash of the bytes), serves `Range` by streaming from the start and slicing,
-  and answers `If-None-Match` by comparing the stored etag. When KV's daily
-  write/delete limit is reached, uploads fail with `503 storage_busy`.
+  and answers `If-None-Match` by comparing the stored etag. When a KV daily
+  limit is reached, uploads fail with `503 storage_busy` ("Storage has reached
+  a free-tier limit. Try again later.").
 - Image dimensions read from headers on upload. Thumbnails (max 720 px, WebP)
   are generated in the browser and uploaded alongside the original.
 - Download checks the user can see a message referencing the file (or is the
@@ -363,7 +366,7 @@ state-changing requests require a matching `Origin`.
 | D1 rows written | 100k/day | ~5–10 rows per message incl. FTS → ~10k messages/day headroom |
 | D1 rows read | 5M/day | ample |
 | D1 / DO storage | 5 GB total | text is small |
-| Workers KV | 1 GB storage, 25 MiB/value, 100k reads/day, 1k writes/day, 1k deletes/day | files capped at 900 MB/workspace, custom emoji share the rest; each upload, thumbnail or emoji is 1 write; cron cleanup ≤ 200 deletes/day; over the daily limit uploads get `503 storage_busy` |
+| Workers KV | 1 GB storage, 25 MiB/value, 100k reads/day, 1k writes/day, 1k deletes/day | all blobs (files, thumbnails, custom emoji) capped at 900 MB/workspace; an image message costs 2 writes (file + thumbnail) and 1 read (the sniff peek), plus per viewer 1 read for the thumbnail and 1 for the full file, so 1k writes/day is about 500 image messages a day for the whole deployment; every `304` also spends a KV read; custom emoji are 1 write each; the cron removes at most 200 orphans per run (≤ 200 deletes/day), so a large orphan backlog drains slowly; at a daily limit uploads get `503 storage_busy` |
 | Static assets | 20,000 files, 25 MiB/file | ~3,700 emoji SVGs + app bundle |
 | Resend | free tier (~100 emails/day) | magic links only |
 

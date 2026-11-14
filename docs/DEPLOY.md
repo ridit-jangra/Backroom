@@ -128,7 +128,7 @@ Restoring overwrites the database in place; check the timestamp first.
 | D1 rows written | 100k/day | about 5 to 10 rows per message including FTS |
 | D1 rows read | 5M/day | ample |
 | D1 / DO storage | 5 GB total | text is small |
-| Workers KV | 1 GB storage, 25 MiB per value, 100k reads/day, 1k writes/day, 1k deletes/day | files capped at 900 MB per workspace; each upload, thumbnail or emoji is 1 write; cron cleanup at most 200 deletes/day |
+| Workers KV | 1 GB storage, 25 MiB per value, 100k reads/day, 1k writes/day, 1k deletes/day | files, thumbnails and custom emoji together capped at 900 MB per workspace; an image message is 2 writes and 1 read, plus 2 reads per viewer, so about 500 image messages a day; each 304 is a read; cron cleanup at most 200 deletes/day, so a big orphan backlog drains slowly |
 | Static assets | 20,000 files, 25 MiB/file | about 3,700 emoji SVGs plus the app |
 | Resend | about 100 emails/day | magic links only |
 
@@ -138,6 +138,7 @@ Past these, the Workers Paid plan ($5/month) needs no code changes.
 
 - **Sign-in email not arriving.** Check the Resend dashboard (logs, domain still verified, API key valid) and the admin "emails failed" banner. Requests are rate limited to 5 per hour per email address, so repeated attempts are silently held back. If the key was stored empty (see the step 5 warning), re-set it with the stdin form.
 - **Cloudflare error 1027.** The daily Worker request limit was hit; it resets at 00:00 UTC.
-- **`503 storage_busy` on upload.** The KV daily write limit (1k/day) is used up; uploads resume after 00:00 UTC.
+- **`503 storage_busy` on upload** ("Storage has reached a free-tier limit. Try again later."). A KV daily limit (1k writes, 1k deletes or 100k reads) is used up; it resets at 00:00 UTC. `blob_leaked` log lines mean a cleanup delete hit the limit and left a blob behind.
+- **`413 quota_exceeded`.** The workspace's files, thumbnails and custom emoji together reached 900 MB. Delete messages with large files (their files are removed by the next daily cron) or unused custom emoji.
 - **Custom-domain deploy errors.** The zone `ridit.space` must be on the same Cloudflare account, and `chat.ridit.space` must not already have an explicit DNS record (a wildcard record is fine). Remove a conflicting record, then deploy again.
 - **Login redirects or cookies fail after deploy.** The deploy was probably a bare `wrangler deploy`, which ships `APP_ORIGIN=http://localhost:8787`. Redeploy with `npm run deploy -w apps/worker`.

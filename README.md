@@ -115,7 +115,7 @@ Limits:
 | Limit | Value |
 |---|---|
 | File size | 26,214,400 bytes (25 MB) |
-| Workspace storage | 943,718,400 bytes (900 MB, sum of file sizes; KV holds 1 GB in total and custom emoji share it) |
+| Workspace storage | 943,718,400 bytes (900 MB) for files, thumbnails and custom emoji together (KV holds 1 GB in total) |
 | Thumbnail | at most 524,288 bytes and 720 px on the long side |
 | Files per message | 10 |
 | File name | 255 code points |
@@ -131,7 +131,7 @@ Blob key layout (KV namespace `BLOBS`, or R2 bucket `BUCKET` if that is the boun
 
 Code that deletes file objects first checks the key against `/^ws\/[0-9A-Z]{26}\/[0-9A-Z]{26}(-thumb-[0-9A-Z]{26})?$/`, which can never match an `emoji/` key, so cleanup and quota never touch emoji. Nothing lists blob storage to compute quota or find orphans; both come from D1.
 
-Workers KV free tier: 1 GB stored, 25 MiB per value, 100,000 reads, 1,000 writes and 1,000 deletes a day. Each upload, thumbnail or custom emoji is one write. KV has no range or conditional reads, so the KV adapter keeps `{contentType, size, etag}` in each value's metadata (the etag is a random id per write), serves `Range` by streaming from the start and slicing, and answers `If-None-Match` from the stored etag. When a daily limit is hit, uploads answer `503 storage_busy` ("Storage is at its daily write limit. Try again tomorrow.") until the limit resets.
+Workers KV free tier: 1 GB stored, 25 MiB per value, 100,000 reads, 1,000 writes and 1,000 deletes a day. Each upload, thumbnail or custom emoji is one write. An image message costs 2 writes (file and thumbnail) and 1 read (the type sniff), plus, per viewer, 1 read for the thumbnail and 1 for the full file, so 1,000 writes a day is about 500 image messages a day for the whole deployment. Every `304` also spends a read. The workspace quota counts every blob: `SUM(files.size + files.thumb_size) + SUM(custom_emoji.size)` must stay within 900 MB, checked atomically by uploads, thumbnails and custom emoji (an over-quota emoji upload is also `413 quota_exceeded`). KV has no range or conditional reads, so the KV adapter keeps `{contentType, size, etag}` in each value's metadata (the etag is a random id per write), serves `Range` by streaming from the start and slicing, and answers `If-None-Match` from the stored etag. When a daily limit is hit, uploads answer `503 storage_busy` ("Storage has reached a free-tier limit. Try again later.") until the limit resets (00:00 UTC). A cleanup delete that hits the limit outside the cron leaves the blob behind and logs `blob_leaked` with its class (`file`, `thumb` or `emoji`), never the key.
 
 Cleanup cron: `triggers.crons` is `["0 4 * * *"]` (daily, 04:00 UTC). To run it locally:
 
