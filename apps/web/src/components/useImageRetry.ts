@@ -29,19 +29,23 @@ export function useImageRetry(src: string, retry = true): ImageRetry {
     [src],
   );
 
+  const latest = useRef(current);
+  latest.current = current;
+
   const onError = useCallback(() => {
-    setState((prev) => {
-      const s = prev.src === src ? prev : { src, attempt: 0, waiting: false, failed: false };
-      if (s.waiting || s.failed) return s;
-      const delay = retry ? IMAGE_RETRY_DELAYS_MS[s.attempt] : undefined;
-      if (delay === undefined) return { ...s, failed: true };
-      if (timer.current !== null) clearTimeout(timer.current);
-      timer.current = setTimeout(() => {
-        timer.current = null;
-        setState((p) => (p.src === src ? { ...p, attempt: p.attempt + 1, waiting: false } : p));
-      }, delay);
-      return { ...s, waiting: true };
-    });
+    const s = latest.current;
+    if (s.src !== src || s.waiting || s.failed) return;
+    const delay = retry ? IMAGE_RETRY_DELAYS_MS[s.attempt] : undefined;
+    if (delay === undefined) {
+      setState({ ...s, failed: true });
+      return;
+    }
+    if (timer.current !== null) clearTimeout(timer.current);
+    timer.current = setTimeout(() => {
+      timer.current = null;
+      setState((p) => (p.src === src ? { ...p, attempt: p.attempt + 1, waiting: false } : p));
+    }, delay);
+    setState({ ...s, waiting: true });
   }, [src, retry]);
 
   return { attempt: current.attempt, waiting: current.waiting, failed: current.failed, onError };
