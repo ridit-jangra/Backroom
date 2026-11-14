@@ -33,6 +33,7 @@ describe('loadConfig', () => {
       fileMaxBytes: null,
       keepAliveTimeoutMs: 190_000,
       maxConnections: 2048,
+      trustedProxySecret: null,
       maintenance: false,
     });
     expect(DEFAULT_EMAIL_FROM).toBe('Backroom <noreply@localhost>');
@@ -130,6 +131,20 @@ describe('loadConfig', () => {
     for (const v of ['0', 'x', '-3', '1000001']) {
       expect(errorOf({ ...base, MAX_CONNECTIONS: v })).toMatch(/MAX_CONNECTIONS must be a whole number from 1 to 1000000/);
     }
+  });
+
+  it('TRUSTED_PROXY_SECRET: at least 24 visible characters, needs TRUSTED_PROXY_HEADER, never echoed', () => {
+    const secret = 'S3cr3t-value-that-is-long-enough';
+    expect(load({ ...base, TRUSTED_PROXY_HEADER: 'cf-connecting-ip', TRUSTED_PROXY_SECRET: secret }).config.trustedProxySecret).toBe(secret);
+    const short = errorOf({ ...base, TRUSTED_PROXY_HEADER: 'cf-connecting-ip', TRUSTED_PROXY_SECRET: 'short-secret-x' });
+    expect(short).toMatch(/TRUSTED_PROXY_SECRET must be at least 24 characters/);
+    expect(short).not.toContain('short-secret-x');
+    const spaced = errorOf({ ...base, TRUSTED_PROXY_HEADER: 'cf-connecting-ip', TRUSTED_PROXY_SECRET: 'has spaces in it but is long enough' });
+    expect(spaced).toMatch(/TRUSTED_PROXY_SECRET must be at least 24 characters/);
+    const alone = errorOf({ ...base, TRUSTED_PROXY_SECRET: secret });
+    expect(alone).toMatch(/TRUSTED_PROXY_SECRET needs TRUSTED_PROXY_HEADER/);
+    expect(alone).not.toContain(secret);
+    expect(load({ ...base, TRUSTED_PROXY_SECRET: '' }).config.trustedProxySecret).toBeNull();
   });
 
   it('EMAIL_FROM: an empty value falls back to the default', () => {

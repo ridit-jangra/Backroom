@@ -27,6 +27,8 @@ export interface ServerConfig {
   webDist: string;
   filesQuotaBytes: number | null;
   fileMaxBytes: number | null;
+  /** With TRUSTED_PROXY_HEADER: believe it only on requests carrying X-Backroom-Origin-Secret with this value. */
+  trustedProxySecret: string | null;
   /** Idle keep-alive timeout; above the reverse proxy's own (180 s on the production host). */
   keepAliveTimeoutMs: number;
   /** Open connections (WebSockets included) beyond which new ones are dropped. */
@@ -135,6 +137,16 @@ export function loadConfig(
     else trustedProxyHeader = rawHeader;
   }
 
+  let trustedProxySecret: string | null = null;
+  const rawSecret = env.TRUSTED_PROXY_SECRET ?? '';
+  if (rawSecret) {
+    if (rawSecret.length < 24 || !/^[\x21-\x7e]+$/.test(rawSecret)) {
+      problems.push('TRUSTED_PROXY_SECRET must be at least 24 characters of visible ASCII (no spaces); generate one with: openssl rand -hex 32');
+    } else if (!trustedProxyHeader && !rawHeader) {
+      problems.push('TRUSTED_PROXY_SECRET needs TRUSTED_PROXY_HEADER (the secret only decides when that header is believed)');
+    } else trustedProxySecret = rawSecret;
+  }
+
   const filesQuotaBytes = positiveBytes('FILES_QUOTA_BYTES', env.FILES_QUOTA_BYTES, problems);
   const fileMaxBytes = positiveBytes('FILE_MAX_BYTES', env.FILE_MAX_BYTES, problems);
 
@@ -163,6 +175,7 @@ export function loadConfig(
       webDist: webDistFlag !== null ? resolve(opts.cwd, webDistFlag) : env.WEB_DIST ? resolve(opts.cwd, env.WEB_DIST) : opts.defaultWebDist,
       filesQuotaBytes,
       fileMaxBytes,
+      trustedProxySecret,
       keepAliveTimeoutMs,
       maxConnections,
       maintenance,

@@ -167,8 +167,8 @@ async function connect(): Promise<Client> {
   return c;
 }
 
-function rateLimitRows(): { key: string; count: number }[] {
-  const db = new DatabaseSync(join(dataDir, 'backroom.sqlite'));
+function rateLimitRows(dir = dataDir): { key: string; count: number }[] {
+  const db = new DatabaseSync(join(dir, 'backroom.sqlite'));
   try {
     return db.prepare("SELECT key, count FROM rate_limits WHERE key LIKE 'start:ip:%' ORDER BY key").all() as never;
   } finally {
@@ -235,6 +235,7 @@ describe('the built server (dist/server.mjs)', () => {
       migrationsApplied: 8,
       mailer: 'console',
       trustedProxyHeader: null,
+      trustedProxySecret: false,
       keepAliveTimeoutMs: 190_000,
       maxConnections: 2048,
     });
@@ -425,6 +426,40 @@ describe('the built server (dist/server.mjs)', () => {
     expect(run.out).toContain('"code":"server_started"');
     expect(run.code).toBe(0);
     expect(existsSync(join(dir, 'server.lock'))).toBe(false);
+  });
+
+  it('TRUSTED_PROXY_SECRET: CF-Connecting-IP is believed only with the right origin secret', { timeout: 30_000 }, async () => {
+    const SECRET = 'bundle-origin-secret-0123456789abcdef';
+    const dir = join(scratch, 'secret', 'data');
+    const p2 = await freePort(port + 1);
+    const o2 = `http://localhost:${p2}`;
+    const child = spawn(process.execPath, [join(outDir, 'server.mjs')], {
+      cwd: scratch,
+      env: serverEnv({ DATA_DIR: dir, PORT: String(p2), APP_ORIGIN: o2, TRUSTED_PROXY_HEADER: 'cf-connecting-ip', TRUSTED_PROXY_SECRET: SECRET }),
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let out = '';
+    child.stdout.on('data', (d) => (out += d));
+    child.stderr.on('data', (d) => (out += d));
+    const exited = new Promise<number | null>((r) => child.on('exit', (code) => r(code)));
+    await vi.waitFor(() => expect(out).toContain('"code":"server_started"'), { timeout: 15_000 });
+    const start = (headers: Record<string, string>) =>
+      fetch(`http://127.0.0.1:${p2}/auth/start`, {
+        method: 'POST',
+        headers: { Origin: o2, 'Content-Type': 'application/json', ...headers },
+        body: JSON.stringify({ email: 'nobody@test.local' }),
+      });
+    expect((await start({ 'CF-Connecting-IP': '203.0.113.5', 'X-Backroom-Origin-Secret': SECRET })).status).toBe(200);
+    expect((await start({ 'CF-Connecting-IP': '6.6.6.6', 'X-Backroom-Origin-Secret': 'wrong-secret-0123456789abcdef-xx' })).status).toBe(200);
+    expect((await start({ 'CF-Connecting-IP': '7.7.7.7' })).status).toBe(200);
+    child.kill('SIGTERM');
+    expect(await exited).toBe(0);
+    expect(rateLimitRows(dir)).toEqual([
+      { key: 'start:ip:127.0.0.1', count: 2 },
+      { key: 'start:ip:203.0.113.5', count: 1 },
+    ]);
+    expect(out).toContain('"trustedProxySecret":true');
+    expect(out).not.toContain(SECRET);
   });
 
   it('an upload declaring more than FILE_MAX_BYTES gets the Workers 413 at once and the connection is closed', async () => {

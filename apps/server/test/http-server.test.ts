@@ -21,6 +21,7 @@ function make(opts: { keepAliveTimeoutMs?: number; maxConnections?: number } = {
     bridge,
     appOrigin: 'http://localhost:8900',
     trustedProxyHeader: null,
+    trustedProxySecret: null,
     keepAliveTimeoutMs: opts.keepAliveTimeoutMs ?? 190_000,
     maxConnections: opts.maxConnections ?? 2048,
     log: () => {},

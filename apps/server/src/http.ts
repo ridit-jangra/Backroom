@@ -183,6 +183,7 @@ export interface HttpServerDeps {
   bridge: UpgradeBridge;
   appOrigin: string;
   trustedProxyHeader: string | null;
+  trustedProxySecret: string | null;
   keepAliveTimeoutMs: number;
   maxConnections: number;
   log: Log;
@@ -250,7 +251,7 @@ export function createHttpServer(deps: HttpServerDeps): HttpServer {
         refuseResponse(res, 400, 'invalid_request', 'Bad request target.');
         return;
       }
-      applyClientIp(req, deps.trustedProxyHeader);
+      applyClientIp(req, deps.trustedProxyHeader, deps.trustedProxySecret);
       listener(req, res).catch((e: unknown) => {
         log('error', 'request_failed', errorFields(e));
         refuseResponse(res, 500, 'internal', 'Internal error.');
@@ -266,7 +267,7 @@ export function createHttpServer(deps: HttpServerDeps): HttpServer {
     try {
       if (req.method !== 'GET') return refuseSocket(socket, 405, 'Method not allowed.');
       if (!normalizeTarget(req, appHost)) return refuseSocket(socket, 400, 'Bad request target.');
-      applyClientIp(req, deps.trustedProxyHeader);
+      applyClientIp(req, deps.trustedProxyHeader, deps.trustedProxySecret);
       const request = upgradeRequest(req, deps.appOrigin);
       upgraded.add(socket);
       socket.once('close', () => upgraded.delete(socket));

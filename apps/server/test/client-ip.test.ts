@@ -1,6 +1,6 @@
 import { type IncomingMessage, createServer } from 'node:http';
 import { afterEach, describe, expect, it } from 'vitest';
-import { applyClientIp, normalizeIp, trustedClientIp } from '../src/client-ip';
+import { ORIGIN_SECRET_HEADER, applyClientIp, normalizeIp, originSecretMatches, trustedClientIp } from '../src/client-ip';
 import { listenLocal } from './helpers';
 
 describe('normalizeIp', () => {
@@ -53,10 +53,10 @@ describe('applyClientIp on real requests', () => {
   });
 
   /** Starts a server that applies the rule and reports what the app would see. */
-  async function serve(trusted: string | null) {
+  async function serve(trusted: string | null, secret: string | null = null) {
     const seen: { headers: Record<string, unknown>; raw: string[] }[] = [];
     const record = (req: IncomingMessage) => {
-      applyClientIp(req, trusted);
+      applyClientIp(req, trusted, secret);
       seen.push({ headers: { ...req.headers }, raw: [...req.rawHeaders] });
     };
     const server = createServer((req, res) => {
@@ -128,5 +128,75 @@ describe('applyClientIp on real requests', () => {
     });
     expect(seen[0]!.headers['cf-connecting-ip']).toBe('127.0.0.1');
     expect(rawValues(seen[0]!.raw, 'cf-connecting-ip')).toEqual(['127.0.0.1']);
+  });
+});
+
+describe('TRUSTED_PROXY_SECRET', () => {
+  const SECRET = 'a-very-long-origin-secret-0123456789';
+
+  it('originSecretMatches: exactly one header with exactly the secret', () => {
+    expect(originSecretMatches([SECRET], SECRET)).toBe(true);
+    expect(originSecretMatches([], SECRET)).toBe(false);
+    expect(originSecretMatches(['wrong'], SECRET)).toBe(false);
+    expect(originSecretMatches([`${SECRET}x`], SECRET)).toBe(false);
+    expect(originSecretMatches([SECRET.slice(0, -1)], SECRET)).toBe(false);
+    expect(originSecretMatches([SECRET, SECRET], SECRET)).toBe(false);
+  });
+
+  let close: (() => Promise<void>) | null = null;
+  afterEach(async () => {
+    await close?.();
+    close = null;
+  });
+
+  async function serve() {
+    const seen: Record<string, unknown>[] = [];
+    const record = (req: IncomingMessage) => {
+      applyClientIp(req, 'cf-connecting-ip', SECRET);
+      seen.push({ ...req.headers, raw: [...req.rawHeaders] });
+    };
+    const server = createServer((req, res) => {
+      record(req);
+      res.end('ok');
+    });
+    server.on('upgrade', (req, socket) => {
+      record(req);
+      socket.end('HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\nconnection: close\r\n\r\n');
+    });
+    const port = await listenLocal(server);
+    close = () => {
+      server.closeAllConnections();
+      return new Promise((r) => server.close(() => r()));
+    };
+    return { port, seen };
+  }
+
+  const cases: [string, Record<string, string>, string][] = [
+    ['absent', {}, '127.0.0.1'],
+    ['wrong', { 'X-Backroom-Origin-Secret': 'not-the-secret-but-24-chars-long' }, '127.0.0.1'],
+    ['right', { 'X-Backroom-Origin-Secret': SECRET }, '6.6.6.6'],
+  ];
+
+  it.each(cases)('plain request, secret %s: the trusted header counts only with the right secret; the secret is stripped', async (_n, extra, want) => {
+    const { port, seen } = await serve();
+    await fetch(`http://127.0.0.1:${port}/auth/start`, { headers: { 'CF-Connecting-IP': '6.6.6.6', ...extra } });
+    expect(seen[0]!['cf-connecting-ip']).toBe(want);
+    expect(seen[0]![ORIGIN_SECRET_HEADER]).toBeUndefined();
+    expect(JSON.stringify(seen[0])).not.toContain(SECRET);
+  });
+
+  it.each(cases)('upgrade request, secret %s: same rule', async (_n, extra, want) => {
+    const { port, seen } = await serve();
+    const { connect } = await import('node:net');
+    const lines = Object.entries(extra).map(([k, v]) => `${k}: ${v}\r\n`).join('');
+    await new Promise<void>((resolve) => {
+      const s = connect(port, '127.0.0.1', () =>
+        s.write(`GET /ws HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nCF-Connecting-IP: 6.6.6.6\r\n${lines}\r\n`),
+      );
+      s.on('data', () => {});
+      s.on('close', () => resolve());
+    });
+    expect(seen[0]!['cf-connecting-ip']).toBe(want);
+    expect(JSON.stringify(seen[0])).not.toContain(SECRET);
   });
 });

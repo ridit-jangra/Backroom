@@ -3,10 +3,29 @@
  * incoming `CF-Connecting-IP` is removed, then the header is set from the socket address or, when
  * TRUSTED_PROXY_HEADER is configured, from that header as written by the proxy in front of the server.
  */
+import { timingSafeEqual } from 'node:crypto';
 import type { IncomingMessage } from 'node:http';
 import { isIP } from 'node:net';
 
 export const CLIENT_IP_HEADER = 'cf-connecting-ip';
+/**
+ * Proof that a request came through the operator's own edge (e.g. a Cloudflare Transform Rule adds it): with
+ * TRUSTED_PROXY_SECRET set, TRUSTED_PROXY_HEADER is believed only on requests carrying this header with the secret.
+ * Always removed before the app sees the request.
+ */
+export const ORIGIN_SECRET_HEADER = 'x-backroom-origin-secret';
+
+/** Exactly one header value, equal to the secret (constant-time on equal lengths). */
+export function originSecretMatches(values: string[], secret: string): boolean {
+  if (values.length !== 1) return false;
+  const got = Buffer.from(values[0]!, 'utf8');
+  const want = Buffer.from(secret, 'utf8');
+  if (got.length !== want.length) {
+    timingSafeEqual(want, want); // same work either way
+    return false;
+  }
+  return timingSafeEqual(got, want);
+}
 
 /** A bare IPv4/IPv6 address (IPv4-mapped IPv6 unwrapped), or null for anything else. */
 export function normalizeIp(value: string | undefined): string | null {
@@ -50,19 +69,27 @@ function headerBagFromRaw(raw: string[]): HeaderBag {
 
 /**
  * Rewrites the request's headers in place (both `rawHeaders`, which @hono/node-server reads, and `headers`) so
- * exactly one `cf-connecting-ip` remains, holding the trusted address. Returns that address.
+ * exactly one `cf-connecting-ip` remains, holding the trusted address, and no origin-secret header is left.
+ * With `secret` set, `trustedHeader` is honoured only when the request proves the secret. Returns the address.
  */
-export function applyClientIp(req: IncomingMessage, trustedHeader: string | null): string {
+export function applyClientIp(req: IncomingMessage, trustedHeader: string | null, secret: string | null = null): string {
   // Materialise `headers` BEFORE replacing rawHeaders: Node builds it lazily from rawHeaders using the header count
-  // it parsed, so computing it from a shorter replacement array (repeated header lines removed) would throw.
+  // it parsed, so computing it from a shorter replacement array would throw.
   const headers = req.headers;
-  const ip = trustedClientIp(headerBagFromRaw(req.rawHeaders), req.socket?.remoteAddress, trustedHeader);
+  const secretValues: string[] = [];
+  for (let i = 0; i + 1 < req.rawHeaders.length; i += 2) {
+    if (req.rawHeaders[i]!.toLowerCase() === ORIGIN_SECRET_HEADER) secretValues.push(req.rawHeaders[i + 1]!);
+  }
+  const effective = secret === null || originSecretMatches(secretValues, secret) ? trustedHeader : null;
+  const ip = trustedClientIp(headerBagFromRaw(req.rawHeaders), req.socket?.remoteAddress, effective);
   const raw: string[] = [];
   for (let i = 0; i + 1 < req.rawHeaders.length; i += 2) {
-    if (req.rawHeaders[i]!.toLowerCase() !== CLIENT_IP_HEADER) raw.push(req.rawHeaders[i]!, req.rawHeaders[i + 1]!);
+    const name = req.rawHeaders[i]!.toLowerCase();
+    if (name !== CLIENT_IP_HEADER && name !== ORIGIN_SECRET_HEADER) raw.push(req.rawHeaders[i]!, req.rawHeaders[i + 1]!);
   }
   raw.push('CF-Connecting-IP', ip);
   req.rawHeaders = raw;
+  delete headers[ORIGIN_SECRET_HEADER];
   delete headers[CLIENT_IP_HEADER];
   headers[CLIENT_IP_HEADER] = ip;
   return ip;
