@@ -59,7 +59,7 @@ The server reads its settings from environment variables. It does not load `.env
 APP_ORIGIN=https://chat.example.com
 OWNER_EMAIL=you@example.com
 RESEND_API_KEY=re_xxxxxxxxxxxxxxxx
-EMAIL_FROM=Backroom <backroom@example.com>
+EMAIL_FROM="Backroom <backroom@example.com>"
 DATA_DIR=/var/lib/backroom
 PORT=8080
 HOST=127.0.0.1
@@ -77,7 +77,7 @@ sudoedit /etc/backroom/backroom.env
 | `APP_ORIGIN` | required | The public URL people open, for example `https://chat.example.com`. http or https, no path, no trailing slash needed. Sign-in links point here, the API refuses requests whose `Origin` differs, and cookies are `Secure` when it is https. |
 | `OWNER_EMAIL` | required | The workspace owner's email address. This person can sign in without an invite and creates the first invites. |
 | `RESEND_API_KEY` | unset | Your Resend API key. When it is unset, empty or `dev`, the **console mailer** prints sign-in links to stdout instead of emailing them (development only; see [Email](#email)). |
-| `EMAIL_FROM` | `Backroom <noreply@localhost>` | The sender of sign-in emails. It must be on a domain verified in Resend. |
+| `EMAIL_FROM` | `Backroom <noreply@localhost>` | The sender of sign-in emails. It must be on a domain verified in Resend. Keep the double quotes in the env file (`EMAIL_FROM="Backroom <backroom@example.com>"`): unquoted, `<` is a redirect when a shell sources the file. |
 | `DATA_DIR` | `./data` | Folder for `backroom.sqlite` and `blobs/`. Relative to the working directory. Created with mode 700. |
 | `PORT` | `8080` | TCP port. |
 | `HOST` | `127.0.0.1` | Listen address. The default accepts connections from the same machine only, which is right behind a local reverse proxy. Use `0.0.0.0` in a container whose port is published to a proxy outside it. |
