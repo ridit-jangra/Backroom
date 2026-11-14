@@ -5,3 +5,6 @@ dist
 .superpowers/
 packages/emoji/src/generated/
 apps/web/public/twemoji/
+
+# Playwright e2e scratch (built app, server state, logs, results)
+e2e/.tmp/

@@ -7,6 +7,10 @@
     "test": "npm test --workspaces --if-present",
     "build": "npm run build -w apps/web",
     "dev": "npm run dev -w apps/worker",
-    "dev:all": "npm run build -w apps/web && npm run dev -w apps/worker"
+    "dev:all": "npm run build -w apps/web && npm run dev -w apps/worker",
+    "e2e": "playwright test -c e2e"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.65.1"
   }
 }
