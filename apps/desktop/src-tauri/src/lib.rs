@@ -87,6 +87,13 @@ fn smoke_enabled() -> bool {
     std::env::var("BACKROOM_SMOKE").is_ok_and(|v| v == "1")
 }
 
+/// Single-instance D-Bus id: a smoke run gets its own per-process id, so it can
+/// never hand off to (and show) a Backroom the user already has running.
+/// `None` keeps the plugin default (the bundle identifier).
+fn single_instance_dbus_id(smoke: bool, pid: u32) -> Option<String> {
+    smoke.then(|| format!("app.backroom.desktop.Smoke_{pid}"))
+}
+
 /// A finished page load counts for the smoke check only on the app origin.
 fn smoke_load_matches(loaded: &Url, origin: &Url) -> bool {
     loaded.origin() == origin.origin()
@@ -118,14 +125,19 @@ fn smoke_builder<'a, R: Runtime, M: Manager<R>>(
 }
 
 pub fn run() {
+    let mut single_instance =
+        tauri_plugin_single_instance::Builder::new().callback(|app: &AppHandle, _argv, _cwd| {
+            show_main(app);
+        });
+    if let Some(id) = single_instance_dbus_id(smoke_enabled(), std::process::id()) {
+        single_instance = single_instance.dbus_id(id);
+    }
     tauri::Builder::default()
         // Registered first: a second launch hands its argv to this instance and
         // exits before anything else starts. With the `deep-link` feature the
         // plugin forwards argv to the deep-link plugin before this callback, and
         // its `deep-link://new-url` event reaches `handle_deep_link`.
-        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            show_main(app);
-        }))
+        .plugin(single_instance.build())
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
@@ -689,6 +701,20 @@ mod tests {
             queries.push(main.url().unwrap().query().unwrap().to_string());
         }
         assert_ne!(queries[0], queries[1]);
+    }
+
+    #[test]
+    fn smoke_runs_get_their_own_single_instance_id() {
+        // A smoke run must never hand off to (and show) a running Backroom.
+        assert_eq!(single_instance_dbus_id(false, 42), None, "normal: app id");
+        assert_eq!(
+            single_instance_dbus_id(true, 42),
+            Some("app.backroom.desktop.Smoke_42".to_string())
+        );
+        assert_ne!(
+            single_instance_dbus_id(true, 1),
+            single_instance_dbus_id(true, 2)
+        );
     }
 
     #[test]

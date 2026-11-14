@@ -48,20 +48,20 @@ export async function desktopLoginChallenge(): Promise<string> {
  *   once. This covers a link that cold-started the app before the page loaded.
  *
  * A live event also drains the slot, so a later remount within the TTL does
- * not replay an old link. If one link reaches both paths (it lands between
- * subscribing and the pull), the pull's copy is skipped; a repeat would only
- * open the same channel again, which is harmless.
+ * not replay an old link. Once any live event has arrived after subscribing,
+ * the pull's result is dropped: the live one is the same link or a newer one.
  */
 export function onDesktopNavigate(cb: (channelId: string) => void): () => void {
   if (!isDesktop()) return () => {};
   let off: (() => void) | null = null;
   let stopped = false;
-  const liveSeen = new Set<string>();
+  let sawLive = false;
   listen<{ channelId: string }>(NAVIGATE_EVENT, (e) => {
     const id = e.payload?.channelId;
     if (typeof id !== 'string' || !id) return;
-    liveSeen.add(id);
+    sawLive = true;
     cb(id);
+    // Drain: harmless, since the slot holds this link (or a newer one that arrives live too).
     void call('take_pending_navigation');
   }).then(
     (un) => {
@@ -71,7 +71,7 @@ export function onDesktopNavigate(cb: (channelId: string) => void): () => void {
       }
       off = un;
       void call<unknown>('take_pending_navigation').then((id) => {
-        if (stopped || typeof id !== 'string' || !id || liveSeen.has(id)) return;
+        if (stopped || sawLive || typeof id !== 'string' || !id) return;
         cb(id);
       });
     },

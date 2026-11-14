@@ -36,6 +36,11 @@ trap cleanup EXIT
 
 mkdir -p "$SCRATCH"
 
+# Own XDG dirs: the smoke app never shares the user's WebKit profile, cookies
+# or config, and restrict_data_dir only ever touches scratch directories.
+export XDG_DATA_HOME="$SCRATCH/xdg-data" XDG_CACHE_HOME="$SCRATCH/xdg-cache" XDG_CONFIG_HOME="$SCRATCH/xdg-config"
+mkdir -p "$XDG_DATA_HOME" "$XDG_CACHE_HOME" "$XDG_CONFIG_HOME"
+
 echo "building debug desktop binary for $ORIGIN"
 BACKROOM_APP_URL="$ORIGIN" cargo build --manifest-path "$ROOT/apps/desktop/src-tauri/Cargo.toml" >"$SCRATCH/build.log" 2>&1 \
   || { echo "cargo build failed (see $SCRATCH/build.log)" >&2; exit 1; }
@@ -66,6 +71,9 @@ echo "$OUT"
 
 if [ "$STATUS" -eq 0 ] && printf '%s\n' "$OUT" | grep -qx "smoke ok $ORIGIN"; then
   exit 0
+fi
+if [ "$STATUS" -eq 0 ]; then
+  echo "launch exited 0 without loading (handed off to a running Backroom instance?)" >&2
 fi
 echo "smoke failed (exit $STATUS; stderr in $SCRATCH/app.err)" >&2
 exit 1

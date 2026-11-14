@@ -159,6 +159,27 @@ describe('pending navigation pull (P5-R9)', () => {
     off();
   });
 
+  it('a live click after subscribing wins over a late pull result', async () => {
+    markDesktop();
+    const OTHER = '01HZX3K7Q9M2N4P6R8T0V2W4Y7';
+    let handler: Handler | undefined;
+    listen.mockImplementation(async (_name: string, h: Handler) => {
+      handler = h;
+      return () => {};
+    });
+    let resolvePull: (v: string | null) => void = () => {};
+    invoke.mockImplementationOnce(() => new Promise((r) => (resolvePull = r)));
+    invoke.mockImplementation(async () => null);
+    const cb = vi.fn();
+    const off = onDesktopNavigate(cb);
+    await waitFor(() => expect(takes()).toBe(1));
+    act(() => handler!({ payload: { channelId: OTHER } }));
+    resolvePull(PENDING);
+    await flush();
+    expect(cb.mock.calls).toEqual([[OTHER]]);
+    off();
+  });
+
   it('Workspace opens the channel from a cold-start link', async () => {
     markDesktop();
     invoke.mockImplementation(async (cmd: string) => (cmd === 'take_pending_navigation' ? RAND : undefined));

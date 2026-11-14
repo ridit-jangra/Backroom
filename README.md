@@ -186,7 +186,7 @@ For development run `npm run dev -w apps/desktop` (with the worker on http://loc
 
 ### Smoke test
 
-`apps/desktop/scripts/smoke.sh` builds a debug binary for `http://localhost:8788`, starts `wrangler dev` on port 8788 with its own scratch state, runs the app under `xvfb-run -a` with `BACKROOM_SMOKE=1`, and expects `smoke ok http://localhost:8788`. It exits 2 with an install hint if `xvfb-run` is missing. Pass `--direct` (or `SMOKE_DIRECT=1`) to use your current display instead of xvfb. It needs `apps/web/dist` to exist (`npm run build -w apps/web`). In smoke mode the app exits right after the first page load on the app origin, or with `smoke timeout` after 30 seconds.
+`apps/desktop/scripts/smoke.sh` builds a debug binary for `http://localhost:8788`, starts `wrangler dev` on port 8788 with its own scratch state, runs the app under `xvfb-run -a` with `BACKROOM_SMOKE=1`, and expects `smoke ok http://localhost:8788`. It exits 2 with an install hint if `xvfb-run` is missing. Pass `--direct` (or `SMOKE_DIRECT=1`) to use your current display instead of xvfb. It needs `apps/web/dist` to exist (`npm run build -w apps/web`). The smoke app uses its own XDG data, cache and config dirs under the scratch dir and its own single-instance id, so it never touches your profile or hands off to a Backroom you have running. In smoke mode the app exits right after the first page load on the app origin, or with `smoke timeout` after 30 seconds.
 
 ### How sign-in works
 
@@ -215,7 +215,7 @@ The code alone is useless without the verifier, which never leaves the app and i
 
 ### Tray and channel links
 
-- Closing the window hides it to the tray; use the tray's Quit to exit. At startup the app asks the session D-Bus whether a tray host (`org.kde.StatusNotifierWatcher`) is running. If there is none (for example GNOME without the AppIndicator extension), or the check cannot run, closing the main window quits the app instead, and it logs `tray_unavailable`. A tray host started after Backroom is not noticed until the next launch.
+- Closing the window hides it to the tray; use the tray's Quit to exit. At startup the app asks the session D-Bus whether a tray host (`org.kde.StatusNotifierWatcher`) is running. If there is none (for example GNOME without the AppIndicator extension), or the check cannot run, closing the main window quits the app instead, and it logs `tray_unavailable`. A tray host started after Backroom is not noticed until the next launch. Trays that only support the old XEmbed protocol (no StatusNotifier watcher) count as no tray, so there closing the window quits too.
 - A `backroom://channel/<id>` link opens that channel whether the app was already running or the link started it. The app keeps the last channel link for 60 seconds until the page asks for it.
 
 ### Troubleshooting
