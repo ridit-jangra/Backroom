@@ -117,7 +117,7 @@ async function main(): Promise<void> {
 
   const env = {} as Env;
   const hubs = new DurableObjectNamespaceShim(WorkspaceHub, () => env);
-  const site = config.maintenance ? null : await createStaticSite(config.webDist).catch((e: Error) => fail(e.message));
+  const site = config.maintenance ? null : await createStaticSite(config.webDist, log).catch((e: Error) => fail(e.message));
   Object.assign(env, {
     DB: db,
     BLOB_STORE: createFsBlobStore(blobDir),

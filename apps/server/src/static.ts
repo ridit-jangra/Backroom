@@ -10,6 +10,7 @@
  */
 import { readFile, realpath, stat } from 'node:fs/promises';
 import { extname, join, sep } from 'node:path';
+import type { Log } from './log';
 
 /** apps/worker/wrangler.jsonc `assets.run_worker_first` (a test keeps the two identical). */
 export const API_ROUTES = ['/auth/*', '/me', '/w/*', '/invites/*', '/health', '/channels/*', '/messages/*', '/emoji/*', '/files/*', '/ws'] as const;
@@ -35,12 +36,22 @@ export interface HeaderRule {
   detach: string[];
 }
 
-/** Parses a Cloudflare `_headers` file. Rules for absolute URLs (other hosts) are ignored. */
-export function parseHeadersFile(text: string): HeaderRule[] {
+/** RFC 9110 token (header field name). */
+const TOKEN_RE = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
+/** Field values may not carry NUL, CR or LF (the fetch Headers class would throw on them). */
+const BAD_VALUE_RE = /[\u0000\r\n]/;
+
+/**
+ * Parses a Cloudflare `_headers` file. Rules for absolute URLs (other hosts) are ignored. A line whose header name
+ * is not a token or whose value holds NUL/CR/LF is skipped and reported through `onInvalid` (1-based line number).
+ */
+export function parseHeadersFile(text: string, onInvalid: (line: number, reason: string) => void = () => {}): HeaderRule[] {
   const rules: HeaderRule[] = [];
   let current: HeaderRule | null = null;
   let skipping = false;
-  for (const line of text.split(/\r?\n/)) {
+  const lines = text.split(/\r?\n/);
+  for (let n = 0; n < lines.length; n++) {
+    const line = lines[n]!;
     if (line.trim() === '' || line.trimStart().startsWith('#')) continue;
     if (!/^\s/.test(line)) {
       const pattern = line.trim();
@@ -52,12 +63,21 @@ export function parseHeadersFile(text: string): HeaderRule[] {
     if (skipping || !current) continue;
     const body = line.trim();
     if (body.startsWith('!')) {
-      current.detach.push(body.slice(1).trim().toLowerCase());
+      const name = body.slice(1).trim();
+      if (!TOKEN_RE.test(name)) onInvalid(n + 1, 'name');
+      else current.detach.push(name.toLowerCase());
       continue;
     }
     const colon = body.indexOf(':');
-    if (colon <= 0) continue;
-    current.set.push([body.slice(0, colon).trim().toLowerCase(), body.slice(colon + 1).trim()]);
+    if (colon <= 0) {
+      onInvalid(n + 1, 'syntax');
+      continue;
+    }
+    const name = body.slice(0, colon).trim();
+    const value = body.slice(colon + 1).trim();
+    if (!TOKEN_RE.test(name)) onInvalid(n + 1, 'name');
+    else if (BAD_VALUE_RE.test(value)) onInvalid(n + 1, 'value');
+    else current.set.push([name.toLowerCase(), value]);
   }
   return rules;
 }
@@ -171,14 +191,16 @@ function etagMatches(header: string | null, etag: string): boolean {
   return header.split(',').some((t) => t.trim().replace(/^W\//, '') === bare);
 }
 
-export async function createStaticSite(root: string): Promise<StaticSite> {
+export async function createStaticSite(root: string, log: Log = () => {}): Promise<StaticSite> {
   const realRoot = await realpath(root).catch(() => root);
   try {
     if (!(await stat(join(realRoot, 'index.html'))).isFile()) throw new Error('not a file');
   } catch {
     throw new Error(`the web build at ${root} has no index.html (build it with: npm run build -w apps/web, or set WEB_DIST)`);
   }
-  const rules = parseHeadersFile(await readFile(join(realRoot, '_headers'), 'utf8').catch(() => ''));
+  const rules = parseHeadersFile(await readFile(join(realRoot, '_headers'), 'utf8').catch(() => ''), (line, reason) =>
+    log('warn', 'headers_rule_invalid', { line, reason }),
+  );
 
   async function respond(req: Request, rel: string, urlPath: string): Promise<Response | null> {
     const abs = join(realRoot, rel);

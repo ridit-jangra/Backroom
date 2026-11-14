@@ -1,7 +1,7 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   API_ROUTES,
   type StaticSite,
@@ -203,6 +203,23 @@ describe('createStaticSite', () => {
     expect(r.headers.get('cache-control')).toBe('public, max-age=0, must-revalidate');
     expect(r.headers.get('x-frame-options')).toBe('DENY');
     expect(await r.text()).toContain('<div id="root">');
+  });
+
+  it('invalid _headers lines (bad names, NUL or CR in values) are skipped with a warning, never a 500', async () => {
+    const root = fixtureDist(tempDir('backroom-web-bad-'));
+    writeFileSync(
+      join(root, '_headers'),
+      '/*\n  X-Content-Type-Options: nosniff\n  Bad Name: x\n  X-Nul: a\u0000b\n  X-Cr: a\rb\n  (x): y\n  X-Ok: fine\n',
+    );
+    const log = vi.fn();
+    const s = await createStaticSite(root, log);
+    const r = (await s.serve(req('/')))!;
+    expect(r.status).toBe(200);
+    expect(r.headers.get('x-content-type-options')).toBe('nosniff');
+    expect(r.headers.get('x-ok')).toBe('fine');
+    expect(await r.text()).toContain('<div id="root">');
+    expect(log).toHaveBeenCalledTimes(4);
+    expect(log).toHaveBeenCalledWith('warn', 'headers_rule_invalid', expect.objectContaining({ line: 3 }));
   });
 
   it('refuses a root without index.html', async () => {
