@@ -258,6 +258,10 @@ The first deploy after Phase 2 creates the `WorkspaceHub` Durable Object class f
 
 Do not set `RESEND_API_KEY` to `dev` in production; that value switches to the console mailer.
 
+## Deploying
+
+Backroom runs on the Cloudflare free tier at https://chat.ridit.space. The full operator procedure, the preflight check (`scripts/deploy-preflight.sh`), rollback and troubleshooting are in [docs/DEPLOY.md](docs/DEPLOY.md). Always deploy with `npm run deploy -w apps/worker`, never a bare `wrangler deploy`.
+
 ## Project layout
 
 - `apps/worker` - Cloudflare Worker (Hono API, D1 migrations, tests)
