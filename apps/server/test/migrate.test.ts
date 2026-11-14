@@ -2,7 +2,7 @@ import { readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { type NodeD1Database, createD1 } from '../src/platform/d1';
-import { applyMigrations } from '../src/platform/migrate';
+import { applyMigrations, pendingMigrations } from '../src/platform/migrate';
 import { MIGRATIONS_DIR, tempDir } from './helpers';
 
 let db: NodeD1Database;
@@ -66,5 +66,15 @@ describe('applyMigrations', () => {
     writeFileSync(join(dir, '0001_a.sql'), 'this would fail if it ran');
     writeFileSync(join(dir, '0002_b.sql'), 'CREATE TABLE b (v);');
     expect(await applyMigrations(db, dir)).toEqual(['0002_b.sql']);
+  });
+});
+
+describe('pendingMigrations', () => {
+  it('lists every file for a fresh database, none after applying, and never changes the database', async () => {
+    const all = readdirSync(MIGRATIONS_DIR).filter((n) => n.endsWith('.sql')).sort();
+    expect(await pendingMigrations(db, MIGRATIONS_DIR)).toEqual(all);
+    expect(db.sqlite.prepare("SELECT name FROM sqlite_master WHERE name = 'd1_migrations'").get()).toBeUndefined();
+    await applyMigrations(db, MIGRATIONS_DIR);
+    expect(await pendingMigrations(db, MIGRATIONS_DIR)).toEqual([]);
   });
 });

@@ -16,12 +16,13 @@ import { fileMaxBytes } from '../../worker/src/lib/quota';
 import { ConfigError, type ServerConfig, loadConfig } from './config';
 import { runMaintenance, startDailySchedule, withMaintenanceLock } from './cron';
 import { createHttpServer, createRequestHandler } from './http';
+import { acquireLock } from './lockfile';
 import { errorFields, log } from './log';
 import { type NodeD1Database, createD1 } from './platform/d1';
 import { DurableObjectNamespaceShim } from './platform/do-runtime';
 import { installFixedLengthStream } from './platform/fixed-length-stream';
 import { createFsBlobStore, sweepBlobDir } from './platform/fs-blobs';
-import { applyMigrations } from './platform/migrate';
+import { applyMigrations, pendingMigrations } from './platform/migrate';
 import { createUpgradeBridge } from './platform/ws-bridge';
 import { createShutdown } from './shutdown';
 import { createStaticSite } from './static';
@@ -72,23 +73,44 @@ function checkpointAndClose(db: NodeD1Database): void {
 async function main(): Promise<void> {
   const config = readConfig();
 
-  ensurePrivateDir(config.dataDir);
   const blobDir = join(config.dataDir, 'blobs');
-  ensurePrivateDir(blobDir);
   const dbPath = join(config.dataDir, 'backroom.sqlite');
   const firstRun = !existsSync(dbPath);
+  let swept = { tempFiles: 0, orphanData: 0, danglingSidecars: 0 };
+  let db: NodeD1Database;
+  let applied: string[] = [];
 
-  // Crash leftovers (temp files, unreferenced data files) go before anything can write a blob.
-  const swept = await sweepBlobDir(blobDir);
+  if (config.maintenance) {
+    // A maintenance run may share the data dir with a live server: it never takes the server lock, never sweeps
+    // the blob directory (that would remove the server's in-flight uploads) and never migrates.
+    if (!existsSync(dbPath)) fail(`no database at ${dbPath}: start the server once (it creates and migrates it) before running --maintenance`);
+    db = createD1(dbPath);
+    const pending = await pendingMigrations(db, migrationsDir());
+    if (pending.length > 0) {
+      db.close();
+      fail(`${pending.length} database migration(s) are pending (${pending.join(', ')}): start the server, which applies them, before running --maintenance`);
+    }
+  } else {
+    ensurePrivateDir(config.dataDir);
+    ensurePrivateDir(blobDir);
+    // One server per data directory: a second one would sweep the first one's uploads and race its writes.
+    const serverLock = await acquireLock(join(config.dataDir, 'server.lock'));
+    if (!serverLock) {
+      fail(`another Backroom server (see ${join(config.dataDir, 'server.lock')}) is using this DATA_DIR; stop it first, or use a different DATA_DIR`);
+    }
+    process.once('exit', () => serverLock.releaseSync());
 
-  const db = createD1(dbPath);
-  let applied: string[];
-  try {
-    applied = await applyMigrations(db, migrationsDir());
-  } catch (e) {
-    db.close();
-    // The message names the migration file and SQLite's error; it holds no user data.
-    fail(e instanceof Error ? e.message : 'migrations failed');
+    // Crash leftovers (temp files, unreferenced data files) go before anything can write a blob.
+    swept = await sweepBlobDir(blobDir);
+
+    db = createD1(dbPath);
+    try {
+      applied = await applyMigrations(db, migrationsDir());
+    } catch (e) {
+      db.close();
+      // The message names the migration file and SQLite's error; it holds no user data.
+      fail(e instanceof Error ? e.message : 'migrations failed');
+    }
   }
 
   installFixedLengthStream();
@@ -127,15 +149,16 @@ async function main(): Promise<void> {
     );
 
   if (config.maintenance) {
+    let code = 0;
     try {
-      await maintenance();
+      if ((await maintenance()) === 'locked') log('info', 'maintenance_not_run', { reason: 'another run holds the lock' });
     } catch (e) {
       log('error', 'maintenance_failed', errorFields(e));
-      checkpointAndClose(db);
-      process.exit(1);
+      code = 1;
     }
-    checkpointAndClose(db);
-    process.exit(0);
+    // No TRUNCATE checkpoint here: the live server owns the WAL.
+    db.close();
+    process.exit(code);
   }
 
   const work = createWorkTracker(log);

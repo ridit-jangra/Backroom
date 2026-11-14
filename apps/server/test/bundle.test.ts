@@ -3,8 +3,8 @@
  * DATA_DIR, a tiny web fixture, a free port at 8790+) and drives HTTP and WebSocket traffic through it.
  */
 import { type ChildProcess, execFileSync, spawn } from 'node:child_process';
-import { get as httpGet } from 'node:http';
-import { existsSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { get as httpGet, request as httpRequest } from 'node:http';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { connect as netConnect, createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -34,6 +34,42 @@ let origin: string;
 let proc: ChildProcess;
 const lines: string[] = [];
 let exitCode: Promise<number | null>;
+let web: string;
+
+/** The environment of the server under test (overrides for the extra processes some tests start). */
+function serverEnv(over: Record<string, string> = {}): Record<string, string | undefined> {
+  return {
+    PATH: process.env.PATH,
+    TZ: 'UTC',
+    APP_ORIGIN: origin,
+    OWNER_EMAIL: OWNER,
+    RESEND_API_KEY: 'dev',
+    DATA_DIR: dataDir,
+    PORT: String(port),
+    HOST: '127.0.0.1',
+    WEB_DIST: web,
+    ...over,
+  };
+}
+
+/** Runs the built server with extra arguments/env to completion (or kills it after `timeoutMs`). */
+function runServer(args: string[], env: Record<string, string | undefined>, timeoutMs = 15_000, until?: RegExp) {
+  return new Promise<{ code: number | null; out: string }>((resolve) => {
+    const p = spawn(process.execPath, [join(outDir, 'server.mjs'), ...args], { cwd: scratch, env, stdio: ['ignore', 'pipe', 'pipe'] });
+    let out = '';
+    const onData = (d: Buffer) => {
+      out += d.toString();
+      if (until && until.test(out)) p.kill('SIGTERM');
+    };
+    p.stdout.on('data', onData);
+    p.stderr.on('data', onData);
+    const timer = setTimeout(() => p.kill('SIGKILL'), timeoutMs);
+    p.on('exit', (code) => {
+      clearTimeout(timer);
+      resolve({ code, out });
+    });
+  });
+}
 let cookie = '';
 let fileId = '';
 const sockets: Client[] = [];
@@ -144,7 +180,7 @@ beforeAll(async () => {
   scratch = mkdtempSync(join(tmpdir(), 'backroom-bundle-'));
   outDir = join(scratch, 'dist');
   execFileSync(process.execPath, [BUILD, '--outdir', outDir], { stdio: 'pipe', timeout: 120_000 });
-  const web = fixtureDist(join(scratch, 'web'));
+  web = fixtureDist(join(scratch, 'web'));
   const gcHook = join(scratch, 'gc-hook.mjs');
   writeFileSync(
     gcHook,
@@ -158,17 +194,7 @@ beforeAll(async () => {
     lines.length = 0;
     proc = spawn(process.execPath, ['--expose-gc', '--import', pathToFileURL(gcHook).href, join(outDir, 'server.mjs')], {
       cwd: scratch,
-      env: {
-        PATH: process.env.PATH,
-        TZ: 'UTC',
-        APP_ORIGIN: origin,
-        OWNER_EMAIL: OWNER,
-        RESEND_API_KEY: 'dev',
-        DATA_DIR: dataDir,
-        PORT: String(port),
-        HOST: '127.0.0.1',
-        WEB_DIST: web,
-      },
+      env: serverEnv(),
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     const p = proc;
@@ -339,6 +365,64 @@ describe('the built server (dist/server.mjs)', () => {
     const after = rateLimitRows();
     expect(after.map((x) => x.key)).toEqual(['start:ip:127.0.0.1']);
     expect(after[0]!.count).toBe(before[0]!.count + 1);
+  });
+
+  it('--maintenance while an upload is streaming: the upload still succeeds (no sweep, no migrations)', { timeout: 30_000 }, async () => {
+    const N = 300_000;
+    const data = Buffer.alloc(N, 3);
+    const r = httpRequest({
+      host: '127.0.0.1',
+      port,
+      method: 'POST',
+      path: '/w/clubhack/files?name=slow.bin',
+      headers: { Origin: origin, Cookie: cookie, 'Content-Type': 'application/octet-stream', 'Content-Length': N },
+    });
+    const response = new Promise<{ status: number; body: string }>((resolve, reject) => {
+      r.on('response', (res) => {
+        let body = '';
+        res.on('data', (d) => (body += d));
+        res.on('end', () => resolve({ status: res.statusCode!, body }));
+      });
+      r.on('error', reject);
+    });
+    r.write(data.subarray(0, N / 2));
+    // Give the server time to start the blob's temp file.
+    await vi.waitFor(() => expect(readdirSync(join(dataDir, 'blobs', '.tmp')).length).toBeGreaterThan(0), { timeout: 3_000 });
+    const m = await runServer(['--maintenance'], serverEnv());
+    expect(m.code, m.out).toBe(0);
+    expect(m.out).toContain('"code":"maintenance_done"');
+    r.end(data.subarray(N / 2));
+    const res = await response;
+    expect(res.status, res.body).toBe(201);
+    const id = (JSON.parse(res.body) as { file: { id: string } }).file.id;
+    expect(Buffer.from(await (await req(`/files/${id}`)).arrayBuffer()).equals(data)).toBe(true);
+  });
+
+  it('--maintenance refuses a data dir without a database (never creates or migrates one)', { timeout: 30_000 }, async () => {
+    const empty = join(scratch, 'empty-data');
+    const m = await runServer(['--maintenance'], serverEnv({ DATA_DIR: empty }));
+    expect(m.code).toBe(1);
+    expect(m.out).toMatch(/no database/i);
+    expect(existsSync(join(empty, 'backroom.sqlite'))).toBe(false);
+  });
+
+  it('a second server on the same DATA_DIR refuses to start, and the first keeps serving', { timeout: 30_000 }, async () => {
+    const second = await runServer([], serverEnv({ PORT: String(await freePort(port + 1)) }));
+    expect(second.code).toBe(1);
+    expect(second.out).toMatch(/another Backroom server .*is using this DATA_DIR/);
+    expect(existsSync(join(dataDir, 'server.lock'))).toBe(true);
+    expect((await req('/health')).status).toBe(200);
+  });
+
+  it('a server.lock left by a crashed server is taken over', { timeout: 30_000 }, async () => {
+    const dir = join(scratch, 'crashed', 'data');
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    writeFileSync(join(dir, 'server.lock'), JSON.stringify({ pid: 2 ** 22 + 4321, start: null, at: Date.now() - 60_000, token: 'old' }));
+    const other = await freePort(port + 1);
+    const run = await runServer([], serverEnv({ DATA_DIR: dir, PORT: String(other), APP_ORIGIN: `http://localhost:${other}` }), 20_000, /"code":"server_started"/);
+    expect(run.out).toContain('"code":"server_started"');
+    expect(run.code).toBe(0);
+    expect(existsSync(join(dir, 'server.lock'))).toBe(false);
   });
 
   it('an upload declaring more than FILE_MAX_BYTES gets the Workers 413 at once and the connection is closed', async () => {

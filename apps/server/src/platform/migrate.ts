@@ -40,3 +40,14 @@ export async function applyMigrations(db: NodeD1Database, dir: string): Promise<
   }
   return applied;
 }
+
+/** The `.sql` files in `dir` that `d1_migrations` does not list (all of them for a database never migrated). */
+export async function pendingMigrations(db: NodeD1Database, dir: string): Promise<string[]> {
+  const sqlite = db.sqlite;
+  const hasTable = sqlite.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'd1_migrations'").get() !== undefined;
+  const done = hasTable ? new Set((sqlite.prepare('SELECT name FROM d1_migrations').all() as { name: string }[]).map((r) => r.name)) : new Set<string>();
+  return (await readdir(dir, { withFileTypes: true }))
+    .filter((e) => e.isFile() && e.name.endsWith('.sql') && !done.has(e.name))
+    .map((e) => e.name)
+    .sort();
+}
