@@ -284,9 +284,16 @@ describeBackends('custom emoji', () => {
     const aliasId = await insertCustomEmoji({ name: 'srv', aliasFor: 'served' });
     expect((await getImage(s.app, `/emoji/${aliasId}`, { Cookie: s.alice.cookie })).status).toBe(404);
 
-    // Row exists but the object is gone; unknown and malformed ids.
+    // Row exists but the object has not arrived (KV propagation, P6-R8): 503 blob_pending, never cached.
     const orphan = await insertCustomEmoji({ name: 'orphan' });
-    expect((await getImage(s.app, `/emoji/${orphan}`, { Cookie: s.alice.cookie })).status).toBe(404);
+    const pending = await getImage(s.app, `/emoji/${orphan}`, { Cookie: s.alice.cookie });
+    expect(pending.status).toBe(503);
+    expect(pending.headers.get('Retry-After')).toBe('5');
+    expect(pending.headers.get('Cache-Control')).toBe('no-store');
+    expect(await pending.json()).toEqual({
+      error: { code: 'blob_pending', message: 'This file is still syncing. Try again in a few seconds.' },
+    });
+    // Unknown and malformed ids stay the identical 404 (as does another workspace's emoji, above).
     expect((await getImage(s.app, '/emoji/01AAAAAAAAAAAAAAAAAAAAAAAA', { Cookie: s.alice.cookie })).status).toBe(404);
     expect((await getImage(s.app, '/emoji/..%2F..%2Fx', { Cookie: s.alice.cookie })).status).toBe(404);
 

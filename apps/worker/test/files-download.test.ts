@@ -332,14 +332,37 @@ describeBackends('file downloads', () => {
     expect((await s.get(`/files/${f.id}/thumb`, s.carol.cookie)).status).toBe(404);
   });
 
-  it('a missing stored object is 404', async () => {
+  it('a row whose blob has not arrived yet is 503 blob_pending (P6-R8); unknown and forbidden stay 404', async () => {
     const s = await setup();
     const id = await insertFile({ uploaderId: s.alice.userId, name: 'gone.txt', mime: 'text/plain', size: 5 });
-    expect(await errCode(await s.get(`/files/${id}`, s.alice.cookie))).toBe('not_found');
+    const pending = async (res: Response) => {
+      expect(res.status).toBe(503);
+      expect(res.headers.get('Retry-After')).toBe('5');
+      expect(res.headers.get('Cache-Control')).toBe('no-store');
+      expect(await res.json()).toEqual({
+        error: { code: 'blob_pending', message: 'This file is still syncing. Try again in a few seconds.' },
+      });
+    };
+    await pending(await s.get(`/files/${id}`, s.alice.cookie));
     const m = await s.say(GENERAL, [], s.alice.userId, 'raw attach');
     await env.DB.prepare('INSERT INTO message_files (message_id, file_id) VALUES (?, ?)').bind(m.id, id).run();
-    const res = await s.get(`/files/${id}`, s.bob.cookie);
-    expect(res.status).toBe(404);
-    expect(await errCode(res)).toBe('not_found');
+    await pending(await s.get(`/files/${id}`, s.bob.cookie));
+    await pending(await s.get(`/files/${id}`, s.bob.cookie, { Range: 'bytes=0-1' }));
+
+    // Thumbnail: the row names a thumb key whose blob is not there.
+    const t = await insertFile({ uploaderId: s.alice.userId, name: 'cat.png', mime: 'image/png', size: 5, object: text('hello') });
+    await env.DB.prepare('UPDATE files SET thumb_key = r2_key || ? WHERE id = ?').bind('-thumb-01JXXXXXXXXXXXXXXXXXXXXXXX', t).run();
+    await pending(await s.get(`/files/${t}/thumb`, s.alice.cookie));
+
+    // Isolation (P4): an unknown id and a file the caller cannot see answer the identical 404.
+    const unknown = await s.get('/files/01JZZZZZZZZZZZZZZZZZZZZZZZ', s.carol.cookie);
+    const hidden = await s.get(`/files/${t}`, s.carol.cookie);
+    const hiddenThumb = await s.get(`/files/${t}/thumb`, s.carol.cookie);
+    for (const r of [unknown, hidden, hiddenThumb]) {
+      expect(r.status).toBe(404);
+      expect(r.headers.get('Retry-After')).toBeNull();
+    }
+    const bodies = await Promise.all([unknown.text(), hidden.text(), hiddenThumb.text()]);
+    expect(new Set(bodies).size).toBe(1);
   });
 });

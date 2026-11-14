@@ -159,6 +159,48 @@ describe('EmojiImg fallback', () => {
     expect(container.querySelector('img')).toBeNull();
     expect(container.textContent).toBe('🫨:gone:');
   });
+
+  it('a custom emoji that fails retries with backoff on the same URL, then gives up (P6-R8)', () => {
+    vi.useFakeTimers();
+    try {
+      const src = '/emoji/01JNEW0000000000000000000';
+      const { container } = render(<EmojiImg e={{ src, alt: ':new:', title: ':new:' }} />);
+      const img = () => container.querySelector('img');
+      // Twemoji never retries (static files), custom emoji retry after 2, 4, 8, 16 and 30 s.
+      for (const wait of [2000, 4000, 8000, 16000, 30000]) {
+        expect(img()!.getAttribute('src')).toBe(src);
+        fireEvent.error(img()!);
+        expect(img()).toBeNull();
+        expect(container.textContent).toBe(':new:');
+        act(() => vi.advanceTimersByTime(wait - 1));
+        expect(img()).toBeNull();
+        act(() => vi.advanceTimersByTime(1));
+        expect(img()).not.toBeNull();
+      }
+      fireEvent.error(img()!);
+      act(() => vi.advanceTimersByTime(120_000));
+      expect(img()).toBeNull();
+      expect(container.textContent).toBe(':new:');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a retry that loads shows the image', () => {
+    vi.useFakeTimers();
+    try {
+      const src = '/emoji/01JNEW0000000000000000001';
+      const { container } = render(<EmojiImg e={{ src, alt: ':late:', title: ':late:' }} />);
+      fireEvent.error(container.querySelector('img')!);
+      act(() => vi.advanceTimersByTime(2000));
+      const img = container.querySelector('img')!;
+      fireEvent.load(img);
+      act(() => vi.advanceTimersByTime(120_000));
+      expect(container.querySelector('img')!.getAttribute('src')).toBe(src);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe('composer emoji button layout', () => {

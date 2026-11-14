@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import type { FileInfo } from '@backroom/protocol';
 import { FakeWebSocket } from './fakeSocket';
 import { GEN, ME, msg, id } from './harness';
@@ -34,6 +34,34 @@ describe('MessageFiles', () => {
     expect(ia.closest('a')!.getAttribute('href')).toBe(`/files/${a.id}`);
     const ib = container.querySelector(`img[src="/files/${b.id}"]`)!;
     expect(ib.closest('a')!.getAttribute('href')).toBe(`/files/${b.id}`);
+  });
+
+  it('an image that fails (blob still syncing) retries with backoff on the same URL, then shows a failure (P6-R8)', () => {
+    vi.useFakeTimers();
+    try {
+      const f = file('01JIMGR', { name: 'r.png', mime: 'image/png', width: 100, height: 50, hasThumb: true });
+      const { container } = render(<MessageFiles files={[f]} />);
+      const img = () => container.querySelector('img.file-image');
+      let first = img();
+      for (const wait of [2000, 4000, 8000, 16000, 30000]) {
+        expect(img()!.getAttribute('src')).toBe(`/files/${f.id}/thumb`);
+        fireEvent.error(img()!);
+        act(() => vi.advanceTimersByTime(wait - 1));
+        expect(img()).toBe(first);
+        act(() => vi.advanceTimersByTime(1));
+        // A fresh element on the same stable URL makes the browser request it again.
+        expect(img()).not.toBe(first);
+        expect(img()!.getAttribute('src')).toBe(`/files/${f.id}/thumb`);
+        first = img();
+      }
+      fireEvent.error(img()!);
+      act(() => vi.advanceTimersByTime(120_000));
+      expect(img()).toBeNull();
+      expect(container.textContent).toContain('Couldn’t load r.png');
+      expect(screen.getByRole('link', { name: 'Download r.png' })).toBeTruthy();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('audio and video play inline; other files are cards', () => {

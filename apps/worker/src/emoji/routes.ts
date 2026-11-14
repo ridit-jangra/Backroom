@@ -18,7 +18,7 @@ import { getBlobStore } from '../lib/blobs';
 import { blobBytesUsed, quotaExceeded } from '../lib/quota';
 import { readCappedBody } from '../lib/body';
 import { ApiError } from '../lib/errors';
-import { MEDIA_SECURITY_HEADERS } from '../lib/media';
+import { MEDIA_SECURITY_HEADERS, blobPendingResponse } from '../lib/media';
 import { requireSession } from '../middleware/session';
 import { requireMember } from '../workspace/access';
 import { readJson } from '../lib/http';
@@ -134,7 +134,7 @@ emojiRoutes.get('/emoji/:id', requireSession, async (c) => {
 
   // A malformed If-None-Match is ignored by the store, never a 500 (P3-R16); an empty one counts as absent.
   const obj = await getBlobStore(c.env).get(row.key, { ifNoneMatch: c.req.header('If-None-Match') || undefined });
-  if (!obj) throw notFound;
+  if (!obj) return blobPendingResponse();
 
   const stored = obj.contentType ?? '';
   const headers = new Headers({

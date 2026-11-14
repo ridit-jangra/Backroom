@@ -1,3 +1,4 @@
+import { useImageRetry } from '../components/useImageRetry';
 import { fileUrl, isInlineMime, isRasterImage, thumbUrl, type FileInfo } from '@backroom/protocol';
 
 const UNITS = ['KB', 'MB', 'GB'];
@@ -20,6 +21,32 @@ export function fitBox(w: number | null, h: number | null, box = 360): { width: 
   return { width: Math.max(1, Math.round(w * s)), height: Math.max(1, Math.round(h * s)) };
 }
 
+/** P6-R8: a fresh image may still be syncing to this location; retry with backoff, then say it failed. */
+function RetryingImage({ f, url }: { f: FileInfo; url: string }) {
+  const src = f.hasThumb ? thumbUrl(f.id) : url;
+  const { attempt, failed, onError } = useImageRetry(src);
+  if (failed) {
+    return (
+      <span className="file-image-failed muted" dir="auto">
+        Couldn’t load {f.name}
+      </span>
+    );
+  }
+  return (
+    <a href={url} target="_blank" rel="noopener noreferrer">
+      <img
+        key={attempt}
+        className="file-image"
+        src={src}
+        alt={f.name}
+        loading="lazy"
+        onError={onError}
+        {...(fitBox(f.width, f.height) ?? {})}
+      />
+    </a>
+  );
+}
+
 function Entry({ f }: { f: FileInfo }) {
   const url = fileUrl(f.id);
   const download = (
@@ -30,16 +57,7 @@ function Entry({ f }: { f: FileInfo }) {
   if (isRasterImage(f.mime)) {
     return (
       <div className="file-entry">
-        <a href={url} target="_blank" rel="noopener noreferrer">
-          <img
-            className="file-image"
-            src={f.hasThumb ? thumbUrl(f.id) : url}
-            alt={f.name}
-            loading="lazy"
-            {...(fitBox(f.width, f.height) ?? {})}
-          />
-        </a>{' '}
-        {download}
+        <RetryingImage f={f} url={url} /> {download}
       </div>
     );
   }

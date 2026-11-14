@@ -255,6 +255,13 @@ state-changing requests require a matching `Origin`.
   and answers `If-None-Match` by comparing the stored etag. When a KV daily
   limit is reached, uploads fail with `503 storage_busy` ("Storage has reached
   a free-tier limit. Try again later.").
+- KV is eventually consistent across locations (up to ~60 s). When D1 has the
+  row and the caller may see it but the blob read misses, `GET /files/:id`,
+  `/files/:id/thumb` and `/emoji/:id` answer `503 blob_pending` ("This file is
+  still syncing. Try again in a few seconds.") with `Retry-After: 5` and
+  `Cache-Control: no-store`; unknown or hidden ids keep the identical 404. The
+  web client retries images and custom emoji after 2, 4, 8, 16 and 30 s on the
+  same URL, then shows a failure.
 - Image dimensions read from headers on upload. Thumbnails (max 720 px, WebP)
   are generated in the browser and uploaded alongside the original.
 - Download checks the user can see a message referencing the file (or is the

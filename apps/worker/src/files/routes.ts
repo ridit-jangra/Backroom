@@ -7,7 +7,7 @@ import { newId } from '../lib/ids';
 import { ApiError } from '../lib/errors';
 import { blobBytesUsed, blobBytesUsedSql } from '../lib/quota';
 import { requireSession } from '../middleware/session';
-import { MEDIA_SECURITY_HEADERS } from '../lib/media';
+import { MEDIA_SECURITY_HEADERS, blobPendingResponse } from '../lib/media';
 import { requireMember } from '../workspace/access';
 import { type FileAccess, loadFileAccess } from './access';
 import { fileHeaders, parseRange } from './http';
@@ -212,7 +212,7 @@ fileRoutes.get('/files/:id', requireSession, async (c) => {
   }
 
   const obj = await conditionalGet(c, row.r2Key, range ?? undefined);
-  if (!obj) throw notFound();
+  if (!obj) return blobPendingResponse();
   const headers = fileHeaders(row, obj.etag);
   if (obj.notModified) return new Response(null, { status: 304, headers });
   if (range) {
@@ -232,7 +232,7 @@ fileRoutes.get('/files/:id/thumb', requireSession, async (c) => {
   // P4-R22: always the stored key (`…-thumb-<ULID>`), never a derived one.
   if (row.thumbKey === null) throw notFound();
   const obj = await conditionalGet(c, row.thumbKey);
-  if (!obj) throw notFound();
+  if (!obj) return blobPendingResponse();
   const headers = fileHeaders({ mime: 'image/webp', name: 'thumbnail.webp' }, obj.etag);
   if (obj.notModified) return new Response(null, { status: 304, headers });
   headers.set('Content-Length', String(obj.size));
