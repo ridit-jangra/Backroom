@@ -1,0 +1,20 @@
+{
+  "name": "@backroom/server",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "pretest": "node ../../packages/emoji/scripts/generate.mjs",
+    "test": "vitest run",
+    "typecheck": "tsc -p ."
+  },
+  "dependencies": {
+    "@backroom/emoji": "*",
+    "@backroom/protocol": "*"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "5.20261110.1",
+    "@types/node": "26.6.6",
+    "typescript": "6.0.3",
+    "vitest": "4.1.12"
+  }
+}

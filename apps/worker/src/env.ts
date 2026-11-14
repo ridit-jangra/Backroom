@@ -1,4 +1,5 @@
 import type { WorkspaceHub } from './hub/WorkspaceHub';
+import type { BlobStore } from './lib/blobs';
 
 export interface Env {
   HUB: DurableObjectNamespace<WorkspaceHub>;
@@ -7,6 +8,8 @@ export interface Env {
   BLOBS: KVNamespace;
   /** Optional R2 alternative, used only when BLOBS is not bound (see lib/blobs.ts). */
   BUCKET?: R2Bucket;
+  /** A ready blob store injected by a non-Workers host (the Node server's filesystem store); wins over BLOBS/BUCKET. */
+  BLOB_STORE?: BlobStore;
   ASSETS: Fetcher;
   RESEND_API_KEY: string;
   OWNER_EMAIL: string;

@@ -2,8 +2,9 @@ import type { Env } from '../env';
 import { ApiError } from './errors';
 
 /**
- * Blob storage behind one small interface, so the app runs on Workers KV (free, no payment card) or R2.
- * `getBlobStore` picks KV whenever `BLOBS` is bound, otherwise R2 over `BUCKET`.
+ * Blob storage behind one small interface, so the app runs on Workers KV (free, no payment card), R2, or a store the
+ * host injects as `BLOB_STORE` (the Node server's filesystem store, apps/server/src/platform/fs-blobs.ts).
+ * `getBlobStore` picks an injected `BLOB_STORE` first, then KV whenever `BLOBS` is bound, otherwise R2 over `BUCKET`.
  *
  * Etags: the R2 adapter returns R2's `httpEtag`. The KV adapter stores a random id per put in the value's metadata
  * (never a hash of the bytes: hashing 25 MB would blow the 10 ms CPU limit) and returns it quoted, the same shape.
@@ -266,8 +267,9 @@ export function r2BlobStore(bucket: R2Bucket): BlobStore {
   };
 }
 
-/** KV when `BLOBS` is bound (production), else R2 over `BUCKET`. */
-export function getBlobStore(env: Pick<Env, 'BLOBS' | 'BUCKET'>): BlobStore {
+/** An injected `BLOB_STORE` (the Node server), else KV when `BLOBS` is bound (Workers production), else R2 over `BUCKET`. */
+export function getBlobStore(env: Pick<Env, 'BLOBS' | 'BUCKET' | 'BLOB_STORE'>): BlobStore {
+  if (env.BLOB_STORE) return env.BLOB_STORE;
   if (env.BLOBS) return kvBlobStore(env.BLOBS);
   if (env.BUCKET) return r2BlobStore(env.BUCKET);
   throw new Error('no blob storage binding (BLOBS or BUCKET)');
