@@ -8,6 +8,8 @@ export const DEFAULT_PORT = 8080;
 export const DEFAULT_HOST = '127.0.0.1';
 export const DEFAULT_EMAIL_FROM = 'Backroom <noreply@localhost>';
 export const DEFAULT_DATA_DIR = './data';
+export const DEFAULT_KEEP_ALIVE_TIMEOUT_MS = 190_000;
+export const DEFAULT_MAX_CONNECTIONS = 2048;
 
 export interface ServerConfig {
   appOrigin: string;
@@ -25,6 +27,10 @@ export interface ServerConfig {
   webDist: string;
   filesQuotaBytes: number | null;
   fileMaxBytes: number | null;
+  /** Idle keep-alive timeout; above the reverse proxy's own (180 s on the production host). */
+  keepAliveTimeoutMs: number;
+  /** Open connections (WebSockets included) beyond which new ones are dropped. */
+  maxConnections: number;
   /** `--maintenance`: run the daily maintenance once and exit. */
   maintenance: boolean;
 }
@@ -47,6 +53,16 @@ function originOf(value: string): string | null {
   if (u.username || u.password || u.search || u.hash || value.includes('?') || value.includes('#')) return null;
   if (u.pathname !== '/') return null;
   return u.origin;
+}
+
+function boundedInt(value: string | undefined, fallback: number, max: number, problem: string, problems: string[]): number {
+  if (value === undefined || value === '') return fallback;
+  const n = /^\d+$/.test(value) ? Number(value) : NaN;
+  if (!Number.isSafeInteger(n) || n < 1 || n > max) {
+    problems.push(`${problem} (got "${value}")`);
+    return fallback;
+  }
+  return n;
 }
 
 function positiveBytes(name: string, value: string | undefined, problems: string[]): number | null {
@@ -122,6 +138,15 @@ export function loadConfig(
   const filesQuotaBytes = positiveBytes('FILES_QUOTA_BYTES', env.FILES_QUOTA_BYTES, problems);
   const fileMaxBytes = positiveBytes('FILE_MAX_BYTES', env.FILE_MAX_BYTES, problems);
 
+  const keepAliveTimeoutMs = boundedInt(
+    env.KEEP_ALIVE_TIMEOUT_MS,
+    DEFAULT_KEEP_ALIVE_TIMEOUT_MS,
+    3_600_000,
+    'KEEP_ALIVE_TIMEOUT_MS must be a whole number of milliseconds from 1 to 3600000',
+    problems,
+  );
+  const maxConnections = boundedInt(env.MAX_CONNECTIONS, DEFAULT_MAX_CONNECTIONS, 1_000_000, 'MAX_CONNECTIONS must be a whole number from 1 to 1000000', problems);
+
   if (problems.length > 0) throw new ConfigError(problems.join('\n'));
 
   return {
@@ -138,6 +163,8 @@ export function loadConfig(
       webDist: webDistFlag !== null ? resolve(opts.cwd, webDistFlag) : env.WEB_DIST ? resolve(opts.cwd, env.WEB_DIST) : opts.defaultWebDist,
       filesQuotaBytes,
       fileMaxBytes,
+      keepAliveTimeoutMs,
+      maxConnections,
       maintenance,
     },
     warnings,

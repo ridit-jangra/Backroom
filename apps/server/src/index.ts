@@ -179,10 +179,10 @@ async function main(): Promise<void> {
     bridge,
     appOrigin: config.appOrigin,
     trustedProxyHeader: config.trustedProxyHeader,
+    keepAliveTimeoutMs: config.keepAliveTimeoutMs,
+    maxConnections: config.maxConnections,
     log,
   });
-  // Longer than a reverse proxy's usual idle timeout, so the proxy never reuses a connection we are closing.
-  http.server.keepAliveTimeout = 65_000;
 
   await new Promise<void>((resolveListen) => {
     const onListenError = (e: NodeJS.ErrnoException) => {
@@ -248,6 +248,8 @@ async function main(): Promise<void> {
     migrationsApplied: applied.length,
     mailer: config.mailer,
     trustedProxyHeader: config.trustedProxyHeader,
+    keepAliveTimeoutMs: config.keepAliveTimeoutMs,
+    maxConnections: config.maxConnections,
     webDist: config.webDist,
     blobLeftoversRemoved: swept.tempFiles + swept.orphanData + swept.danglingSidecars,
     nextMaintenance: schedule.nextAt()?.toISOString() ?? null,

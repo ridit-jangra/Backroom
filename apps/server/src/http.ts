@@ -182,8 +182,15 @@ export interface HttpServerDeps {
   bridge: UpgradeBridge;
   appOrigin: string;
   trustedProxyHeader: string | null;
+  keepAliveTimeoutMs: number;
+  maxConnections: number;
   log: Log;
 }
+
+/** A whole request (a 25 MB upload on a slow link included) must arrive within this. */
+export const REQUEST_TIMEOUT_MS = 15 * 60_000;
+/** The request line and headers must arrive within this (below REQUEST_TIMEOUT_MS). */
+export const HEADERS_TIMEOUT_MS = 60_000;
 
 export interface HttpServer {
   server: Server;
@@ -271,6 +278,12 @@ export function createHttpServer(deps: HttpServerDeps): HttpServer {
       refuseSocket(socket, 400, 'Bad request.');
     }
   });
+
+  server.requestTimeout = REQUEST_TIMEOUT_MS;
+  server.headersTimeout = HEADERS_TIMEOUT_MS;
+  // Longer than the reverse proxy's idle timeout, so the proxy never reuses a connection we are closing.
+  server.keepAliveTimeout = deps.keepAliveTimeoutMs;
+  server.maxConnections = deps.maxConnections;
 
   server.on('clientError', (_err, socket) => {
     if (socket.writable) socket.end('HTTP/1.1 400 Bad Request\r\nconnection: close\r\ncontent-length: 0\r\n\r\n');

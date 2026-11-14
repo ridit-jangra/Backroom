@@ -235,6 +235,8 @@ describe('the built server (dist/server.mjs)', () => {
       migrationsApplied: 8,
       mailer: 'console',
       trustedProxyHeader: null,
+      keepAliveTimeoutMs: 190_000,
+      maxConnections: 2048,
     });
     expect(JSON.stringify(started)).not.toContain(OWNER);
     expect(statSync(dataDir).mode & 0o777).toBe(0o700);

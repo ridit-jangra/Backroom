@@ -31,6 +31,8 @@ describe('loadConfig', () => {
       webDist: '/opt/backroom/web',
       filesQuotaBytes: null,
       fileMaxBytes: null,
+      keepAliveTimeoutMs: 190_000,
+      maxConnections: 2048,
       maintenance: false,
     });
     expect(DEFAULT_EMAIL_FROM).toBe('Backroom <noreply@localhost>');
@@ -118,6 +120,16 @@ describe('loadConfig', () => {
   it.each(['0', '-5', '1.5', '1e9', 'lots', '9007199254740993'])('FILES_QUOTA_BYTES / FILE_MAX_BYTES: %s is refused', (v) => {
     expect(errorOf({ ...base, FILES_QUOTA_BYTES: v })).toMatch(/FILES_QUOTA_BYTES must be a positive whole number of bytes/);
     expect(errorOf({ ...base, FILE_MAX_BYTES: v })).toMatch(/FILE_MAX_BYTES must be a positive whole number of bytes/);
+  });
+
+  it('KEEP_ALIVE_TIMEOUT_MS and MAX_CONNECTIONS', () => {
+    expect(load({ ...base, KEEP_ALIVE_TIMEOUT_MS: '65000', MAX_CONNECTIONS: '100' }).config).toMatchObject({ keepAliveTimeoutMs: 65_000, maxConnections: 100 });
+    for (const v of ['0', 'x', '1.5', '3600001']) {
+      expect(errorOf({ ...base, KEEP_ALIVE_TIMEOUT_MS: v })).toMatch(/KEEP_ALIVE_TIMEOUT_MS must be a whole number of milliseconds from 1 to 3600000/);
+    }
+    for (const v of ['0', 'x', '-3', '1000001']) {
+      expect(errorOf({ ...base, MAX_CONNECTIONS: v })).toMatch(/MAX_CONNECTIONS must be a whole number from 1 to 1000000/);
+    }
   });
 
   it('EMAIL_FROM: an empty value falls back to the default', () => {
