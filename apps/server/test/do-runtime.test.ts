@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   ATTACHMENT_MAX_BYTES,
   DurableObject,
+  MAX_BUFFERED_BYTES,
   DurableObjectNamespaceShim,
   attachRawSocket,
   createWebSocketPair,
@@ -14,6 +15,8 @@ import { DurableObject as ShimExport } from '../src/platform/cloudflare-workers-
 /** A stand-in for a `ws` connection: records what the shim sends and lets a test play the peer. */
 class FakeRaw extends EventEmitter implements RawSocket {
   readyState = 1;
+  /** Bytes queued but not yet written to the kernel (ws's bufferedAmount). */
+  bufferedAmount = 0;
   sent: (string | ArrayBuffer | ArrayBufferView)[] = [];
   closes: { code?: number; reason?: string }[] = [];
   /** Delivered to the send callback (the socket died while the frame was queued). */
@@ -35,8 +38,11 @@ class FakeRaw extends EventEmitter implements RawSocket {
   }
 
   terminate(): void {
+    if (this.terminated) return;
     this.terminated = true;
     this.readyState = 3;
+    // Like ws: the socket is destroyed and 'close' (1006) follows asynchronously.
+    queueMicrotask(() => this.emit('close', 1006, Buffer.alloc(0)));
   }
 
   text(s: string): void {
@@ -555,5 +561,61 @@ describe('closeAll (graceful shutdown)', () => {
     ns.closeAll(1001, 'going away');
     expect(s1.raw.closes).toEqual([{ code: 1001, reason: 'going away' }]);
     expect(s2.raw.closes).toEqual([{ code: 1001, reason: 'going away' }]);
+  });
+});
+
+describe('outbound backpressure', () => {
+  it(`defaults to ${MAX_BUFFERED_BYTES} bytes (4 MiB)`, () => {
+    expect(MAX_BUFFERED_BYTES).toBe(4 * 1024 * 1024);
+  });
+
+  it('a socket whose peer stops reading is terminated past the cap; the close path cleans it up; others carry on', async () => {
+    const small = new DurableObjectNamespaceShim(Probe, () => ({ label: 'x' }), { maxBufferedBytes: 1_000 });
+    try {
+      const p = small.instance('w');
+      const slow = open(p, ['slow']);
+      const fine = open(p, ['fine']);
+      slow.raw.bufferedAmount = 999;
+      slow.server.send('a'); // at the cap: still fine
+      expect(slow.raw.terminated).toBe(false);
+      slow.raw.bufferedAmount = 1_001;
+      expect(() => slow.server.send('b')).not.toThrow();
+      expect(slow.raw.terminated).toBe(true);
+      await tick();
+      expect(p.events).toEqual([['close', 1006, '', false]]);
+      expect(p.state.getWebSockets()).toEqual([fine.server]);
+      fine.raw.bufferedAmount = 900;
+      fine.server.send('still');
+      expect(fine.raw.terminated).toBe(false);
+      expect(fine.raw.sent).toEqual(['still']);
+    } finally {
+      small.dispose();
+    }
+  });
+
+  it('frames held before attach count too: a peer already backed up is terminated on flush', async () => {
+    const small = new DurableObjectNamespaceShim(Probe, () => ({ label: 'x' }), { maxBufferedBytes: 10 });
+    try {
+      const p = small.instance('w');
+      const pair = createWebSocketPair();
+      p.state.acceptWebSocket(pair[1]);
+      pair[1].send('held');
+      const raw = new FakeRaw();
+      raw.bufferedAmount = 50;
+      attachRawSocket(pair[1], raw);
+      expect(raw.terminated).toBe(true);
+    } finally {
+      small.dispose();
+    }
+  });
+
+  it('the default namespace uses the 4 MiB cap', () => {
+    const { server, raw } = open(probe());
+    raw.bufferedAmount = MAX_BUFFERED_BYTES;
+    server.send('ok');
+    expect(raw.terminated).toBe(false);
+    raw.bufferedAmount = MAX_BUFFERED_BYTES + 1;
+    server.send('over');
+    expect(raw.terminated).toBe(true);
   });
 });

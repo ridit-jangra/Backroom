@@ -19,6 +19,11 @@ import { deserialize, serialize } from 'node:v8';
 
 /** workerd's limit for `serializeAttachment` (bytes of V8-serialized data). */
 export const ATTACHMENT_MAX_BYTES = 2048;
+/**
+ * Outbound bytes a socket may have queued (ws `bufferedAmount`) before it is terminated: a peer that stops
+ * reading must not grow server memory without bound. Termination takes the normal abnormal-close path (1006).
+ */
+export const MAX_BUFFERED_BYTES = 4 * 1024 * 1024;
 
 const OPEN = 1;
 const CLOSING = 2;
@@ -33,6 +38,7 @@ type Frame = string | ArrayBuffer | ArrayBufferView;
 /** The part of a `ws` WebSocket the runtime uses (a structural type, so tests can stand in for it). */
 export interface RawSocket {
   readonly readyState: number;
+  readonly bufferedAmount: number;
   send(data: Frame, cb?: (err?: Error) => void): void;
   close(code?: number, reason?: string): void;
   terminate(): void;
@@ -193,12 +199,14 @@ export class NodeWebSocket {
   }
 
   #rawSend(data: Frame): void {
+    const raw = this.#raw!;
     try {
       // The callback swallows write errors: a socket dying mid-send reports itself through its close event.
-      this.#raw!.send(data, () => {});
+      raw.send(data, () => {});
     } catch {
       // ws throws synchronously for a connection that is no longer open; same as above
     }
+    if (raw.bufferedAmount > (this.#owner?.maxBufferedBytes ?? MAX_BUFFERED_BYTES)) raw.terminate();
   }
 
   #onMessage(msg: string | ArrayBuffer): void {
@@ -341,7 +349,11 @@ export class NodeDurableObjectState {
   #autoResponse: { request: string; response: string } | null = null;
   #pendingWork = new Set<Promise<unknown>>();
 
-  constructor(readonly id: NodeDurableObjectId) {
+  constructor(
+    readonly id: NodeDurableObjectId,
+    /** @internal See MAX_BUFFERED_BYTES. */
+    readonly maxBufferedBytes: number = MAX_BUFFERED_BYTES,
+  ) {
     this.storage = new NodeAlarmStorage(() => this.dispatch('alarm', [{ retryCount: 0, isRetry: false }]));
   }
 
@@ -451,6 +463,7 @@ export class DurableObjectNamespaceShim<T extends object> {
   constructor(
     private readonly cls: ObjectClass<T>,
     private readonly getEnv: () => unknown,
+    private readonly opts: { maxBufferedBytes?: number } = {},
   ) {}
 
   idFromName(name: string): NodeDurableObjectId {
@@ -499,7 +512,7 @@ export class DurableObjectNamespaceShim<T extends object> {
   #object(name: string): { instance: T; state: NodeDurableObjectState } {
     let o = this.#objects.get(name);
     if (!o) {
-      const state = new NodeDurableObjectState(new NodeDurableObjectId(name));
+      const state = new NodeDurableObjectState(new NodeDurableObjectId(name), this.opts.maxBufferedBytes);
       const instance = new this.cls(state as unknown as DurableObjectState, this.getEnv() as never);
       state.bind(instance);
       o = { instance, state };
