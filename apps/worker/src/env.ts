@@ -15,4 +15,7 @@ export interface Env {
   OWNER_EMAIL: string;
   APP_ORIGIN: string;
   EMAIL_FROM: string;
+  /** Optional overrides of the protocol constants (set by the Node server; unset on Workers). See lib/quota.ts. */
+  FILES_QUOTA_BYTES?: number | string;
+  FILE_MAX_BYTES?: number | string;
 }

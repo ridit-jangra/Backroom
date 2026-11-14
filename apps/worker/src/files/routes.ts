@@ -1,11 +1,11 @@
 import { type Context, Hono } from 'hono';
-import { type FileInfo, FILE_MAX_BYTES, FILES_QUOTA_BYTES, THUMB_MAX_BYTES, THUMB_MAX_SIDE, isRasterImage, sanitizeFileName } from '@backroom/protocol';
+import { type FileInfo, THUMB_MAX_BYTES, THUMB_MAX_SIDE, isRasterImage, sanitizeFileName } from '@backroom/protocol';
 import type { AppEnv } from '../app';
 import { type BlobStore, deleteOrLog, getBlobStore } from '../lib/blobs';
 import { readCappedBody } from '../lib/body';
 import { newId } from '../lib/ids';
 import { ApiError } from '../lib/errors';
-import { blobBytesUsed, blobBytesUsedSql } from '../lib/quota';
+import { blobBytesUsed, blobBytesUsedSql, fileMaxBytes, filesQuotaBytes, megabytes } from '../lib/quota';
 import { requireSession } from '../middleware/session';
 import { MEDIA_SECURITY_HEADERS, blobPendingResponse } from '../lib/media';
 import { requireMember } from '../workspace/access';
@@ -51,7 +51,8 @@ fileRoutes.post('/w/:slug/files', requireSession, async (c) => {
     throw new ApiError(411, 'length_required', 'Uploads need a Content-Length.');
   }
   const length = Number(lengthHeader);
-  if (length > FILE_MAX_BYTES) throw new ApiError(413, 'too_large', 'Files must be 25 MB or smaller.');
+  const maxBytes = fileMaxBytes(c.env);
+  if (length > maxBytes) throw new ApiError(413, 'too_large', `Files must be ${megabytes(maxBytes)} or smaller.`);
 
   const raw = c.req.raw.body;
   if (length > 0 && raw === null) throw new ApiError(400, 'invalid_request', 'The upload has no body.');
@@ -66,7 +67,8 @@ fileRoutes.post('/w/:slug/files', requireSession, async (c) => {
   const name = sanitizeFileName(c.req.query('name') ?? '');
 
   // Fail fast before streaming; the conditional insert re-checks atomically.
-  if ((await blobBytesUsed(db, workspaceId)) + length > FILES_QUOTA_BYTES) throw quotaExceeded();
+  const quota = filesQuotaBytes(c.env);
+  if ((await blobBytesUsed(db, workspaceId)) + length > quota) throw quotaExceeded(quota);
 
   const file = await surviveDisconnect(
     c,
@@ -125,7 +127,8 @@ fileRoutes.post('/files/:id/thumb', requireSession, async (c) => {
     throw invalidThumbnail();
   }
   // Thumbnails count toward the quota too. Fail fast before the KV write; the UPDATE re-checks atomically.
-  if ((await blobBytesUsed(db, row.workspaceId)) + bytes.byteLength > FILES_QUOTA_BYTES) throw quotaExceeded();
+  const quota = filesQuotaBytes(c.env);
+  if ((await blobBytesUsed(db, row.workspaceId)) + bytes.byteLength > quota) throw quotaExceeded(quota);
 
   const file = await surviveDisconnect(c, storeThumbnail(c.env, { workspaceId: row.workspaceId, id, bytes, now: c.var.deps.now() }));
   return c.json({ file });
@@ -152,7 +155,7 @@ async function storeThumbnail(
          WHERE id = ?2 AND thumb_key IS NULL AND NOT EXISTS (SELECT 1 FROM message_files WHERE file_id = ?2)
            AND ${blobBytesUsedSql('?4')} + ?3 <= ?5`,
       )
-      .bind(key, input.id, input.bytes.byteLength, input.workspaceId, FILES_QUOTA_BYTES)
+      .bind(key, input.id, input.bytes.byteLength, input.workspaceId, filesQuotaBytes(env))
       .run();
     changes = r.meta.changes;
   } catch (e) {
@@ -168,7 +171,7 @@ async function storeThumbnail(
     if (!now) throw notFound();
     if (now.thumbKey !== null) throw alreadyHasThumbnail();
     if (now.attached) throw alreadyAttached();
-    throw quotaExceeded();
+    throw quotaExceeded(filesQuotaBytes(env));
   }
   const file = await db.prepare(`SELECT ${FILE_INFO_COLUMNS} FROM files WHERE id = ?`).bind(input.id).first<FileInfoRow>();
   if (!file) throw notFound();

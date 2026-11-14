@@ -1,9 +1,9 @@
-import { FILES_QUOTA_BYTES, type FileInfo } from '@backroom/protocol';
+import type { FileInfo } from '@backroom/protocol';
 import type { Env } from '../env';
 import { type BlobStore, deleteOrLog, getBlobStore } from '../lib/blobs';
 import { ApiError } from '../lib/errors';
 import { newId } from '../lib/ids';
-import { blobBytesUsedSql, quotaExceeded } from '../lib/quota';
+import { blobBytesUsedSql, filesQuotaBytes, quotaExceeded } from '../lib/quota';
 import { SNIFF_BYTES, sniffFile } from './sniff';
 
 /** Blob key of an original upload. Both parts are server values (DB workspace id, server ULID), never user input. */
@@ -127,7 +127,7 @@ export async function storeUpload(
        SELECT ?1, ?2, ?3, ?4, NULL, ?5, ?6, ?7, ?8, ?9, ?10
        WHERE ${blobBytesUsedSql('?2')} + ?7 <= ?11`,
     )
-      .bind(id, input.workspaceId, input.userId, key, input.name, sniffed.mime, input.length, sniffed.width, sniffed.height, input.now, FILES_QUOTA_BYTES)
+      .bind(id, input.workspaceId, input.userId, key, input.name, sniffed.mime, input.length, sniffed.width, sniffed.height, input.now, filesQuotaBytes(env))
       .run();
     changes = r.meta.changes;
   } catch (e) {
@@ -136,7 +136,7 @@ export async function storeUpload(
   }
   if (changes === 0) {
     await cleanup(store, key);
-    throw quotaExceeded();
+    throw quotaExceeded(filesQuotaBytes(env));
   }
   return { id, name: input.name, mime: sniffed.mime, size: input.length, width: sniffed.width, height: sniffed.height, hasThumb: false };
 }

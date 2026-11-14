@@ -1,8 +1,8 @@
-import { CUSTOM_EMOJI_LIMIT, FILES_QUOTA_BYTES, type CustomEmoji, type WorkspaceSettings } from '@backroom/protocol';
+import { CUSTOM_EMOJI_LIMIT, type CustomEmoji, type WorkspaceSettings } from '@backroom/protocol';
 import type { Env } from '../env';
 import { deleteOrLog, getBlobStore } from '../lib/blobs';
 import { ApiError } from '../lib/errors';
-import { blobBytesUsedSql, quotaExceeded } from '../lib/quota';
+import { blobBytesUsedSql, filesQuotaBytes, quotaExceeded } from '../lib/quota';
 import { newId } from '../lib/ids';
 import { lookupEmoji } from '@backroom/emoji';
 import type { Role } from '@backroom/protocol';
@@ -110,7 +110,7 @@ export async function createCustomEmoji(
          SELECT ?1, ?2, ?3, ?4, NULL, ?5, ?6, ?8
          WHERE (SELECT COUNT(*) FROM custom_emoji WHERE workspace_id = ?2) < ?7
            AND ${blobBytesUsedSql('?2')} + ?8 <= ?9`,
-      ).bind(id, input.workspaceId, input.name, key, input.userId, input.now, CUSTOM_EMOJI_LIMIT, input.bytes.byteLength, FILES_QUOTA_BYTES),
+      ).bind(id, input.workspaceId, input.name, key, input.userId, input.now, CUSTOM_EMOJI_LIMIT, input.bytes.byteLength, filesQuotaBytes(env)),
       bumpEmojiRev(env.DB, input.workspaceId, id),
     ]);
     inserted = r!.meta.changes === 1;
@@ -123,7 +123,7 @@ export async function createCustomEmoji(
   if (!inserted) {
     await cleanupObject(env, key);
     const n = await env.DB.prepare('SELECT COUNT(*) AS n FROM custom_emoji WHERE workspace_id = ?').bind(input.workspaceId).first<{ n: number }>();
-    throw (n?.n ?? 0) >= CUSTOM_EMOJI_LIMIT ? limitReached() : quotaExceeded();
+    throw (n?.n ?? 0) >= CUSTOM_EMOJI_LIMIT ? limitReached() : quotaExceeded(filesQuotaBytes(env));
   }
   return rowToCustomEmoji({
     id,

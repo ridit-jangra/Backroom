@@ -1,4 +1,4 @@
-import { type Dirent, mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { type Dirent, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import type { Server } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative } from 'node:path';
@@ -74,3 +74,26 @@ export async function listenLocal(s: Server): Promise<number> {
   }
   throw new Error('no free port in 8790-8889');
 }
+
+/** The web app's real _headers file. */
+export const WEB_HEADERS = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '../../web/public/_headers'), 'utf8');
+
+/** A tiny stand-in for apps/web/dist (the real build is never written by tests). */
+export function fixtureDist(root: string = tempDir('backroom-web-')): string {
+  mkdirSync(root, { recursive: true });
+  const put = (p: string, body: string | Uint8Array) => {
+    mkdirSync(dirname(join(root, p)), { recursive: true });
+    writeFileSync(join(root, p), body);
+  };
+  put('index.html', '<!doctype html><title>Backroom</title><div id="root"></div>');
+  put('assets/index-AbC123xy.js', 'console.log("app")');
+  put('assets/index-AbC123xy.css', 'body{}');
+  put('assets/font-Zz9.woff2', new Uint8Array([1, 2, 3]));
+  put('twemoji/1f600.svg', '<svg xmlns="http://www.w3.org/2000/svg"/>');
+  put('favicon.ico', new Uint8Array([0, 0, 1, 0]));
+  put('robots.txt', 'User-agent: *');
+  put('_headers', WEB_HEADERS);
+  put('.hidden', 'secret');
+  return root;
+}
+
