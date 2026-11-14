@@ -13,13 +13,15 @@
  *    deleted in between. Files the server later deletes stay in the mirror.
  * 3. Pruning: only after a verified snapshot, the newest `keep` snapshots are kept.
  *
- * It never takes `server.lock`, never sweeps, never migrates and never writes inside DATA_DIR. Logs carry counts,
+ * It never takes `server.lock`, never sweeps and never migrates. It writes nothing of its own inside DATA_DIR, but
+ * SQLite may create `backroom.sqlite-wal`/`-shm` there when the server is stopped, so the backup user needs write
+ * access (checked up front). A backup directory equal to, inside, or containing DATA_DIR is refused. Logs carry counts,
  * sizes and the snapshot path only: never blob file names (they hold keys) or any database content.
  */
 import { randomBytes } from 'node:crypto';
 import { constants, existsSync, linkSync } from 'node:fs';
-import { chmod, copyFile, lstat, mkdir, readFile, readdir, rename, rm, stat, unlink } from 'node:fs/promises';
-import { join } from 'node:path';
+import { access, chmod, copyFile, lstat, mkdir, readFile, readdir, realpath, rename, rm, stat, unlink } from 'node:fs/promises';
+import { basename, dirname, join, sep } from 'node:path';
 import { DatabaseSync, backup as sqliteBackup } from 'node:sqlite';
 import type { Log } from './log';
 
@@ -113,6 +115,8 @@ export async function mirrorBlobs(src: string, dest: string, opts: { link?: Link
 
   const walk = async (from: string, to: string, top: boolean): Promise<void> => {
     await mkdir(to, { recursive: true, mode: 0o700 });
+    // Temp files left by an interrupted run: never let them reach a restore.
+    for (const n of await readdir(to)) if (n.endsWith('.partial')) await rm(join(to, n), { force: true });
     let names: string[];
     try {
       names = await readdir(from);
@@ -196,13 +200,69 @@ export interface BackupResult {
   pruned: number;
 }
 
+const errCodeOf = (e: unknown): string => (e as { code?: unknown } | null)?.code as string;
+const isPermission = (e: unknown): boolean => ['EACCES', 'EPERM', 'EROFS'].includes(errCodeOf(e));
+
+/** The real path of `p`, resolving symlinks in the part that exists (the rest may not exist yet). */
+async function realpathLoose(p: string): Promise<string> {
+  try {
+    return await realpath(p);
+  } catch (e) {
+    if (errCodeOf(e) !== 'ENOENT') throw e;
+    const parent = dirname(p);
+    if (parent === p) return p;
+    return join(await realpathLoose(parent), basename(p));
+  }
+}
+
+const within = (child: string, parent: string): boolean => child === parent || child.startsWith(parent.endsWith(sep) ? parent : parent + sep);
+
+/** A snapshot temp file from a crashed run (older than this) is removed; a younger one may belong to a running backup. */
+const STALE_PARTIAL_MS = 3_600_000;
+
 export async function runBackup(opts: BackupOptions): Promise<BackupResult> {
   const t0 = Date.now();
   const dbPath = join(opts.dataDir, 'backroom.sqlite');
   if (!existsSync(dbPath)) throw new BackupError(`no database at ${dbPath}: nothing to back up`);
 
-  await mkdir(opts.outDir, { recursive: true, mode: 0o700 });
-  await chmod(opts.outDir, 0o700);
+  // Checked before anything is created: a backup inside the data folder would mirror blobs/ into itself.
+  const realData = await realpath(opts.dataDir);
+  const realOut = await realpathLoose(opts.outDir);
+  if (realOut === realData) throw new BackupError(`the backup directory ${opts.outDir} is the data directory; use a directory outside DATA_DIR`);
+  if (within(realOut, realData)) throw new BackupError(`the backup directory ${opts.outDir} is inside the data directory ${opts.dataDir}; use a directory outside DATA_DIR`);
+  if (within(realData, realOut)) throw new BackupError(`the backup directory ${opts.outDir} contains the data directory ${opts.dataDir}; use a directory outside DATA_DIR`);
+
+  // SQLite creates -wal/-shm next to the database when the server is not running, even for a read-only open.
+  try {
+    await access(opts.dataDir, constants.W_OK);
+  } catch {
+    throw new BackupError(`cannot write to the data directory ${opts.dataDir} (SQLite needs to create its -wal/-shm files there): run the backup as the user that runs the server`);
+  }
+
+  try {
+    // Only a directory this run created is made private; an existing one is never chmodded.
+    const created = await mkdir(opts.outDir, { recursive: true, mode: 0o700 });
+    if (created !== undefined) await chmod(opts.outDir, 0o700);
+    const st = await stat(opts.outDir);
+    if (!st.isDirectory()) throw new BackupError(`${opts.outDir} is not a directory`);
+    if (created === undefined) {
+      if (st.mode & 0o002) {
+        throw new BackupError(`the backup directory ${opts.outDir} is world-writable (like /tmp); use a dedicated directory, for example ${join(opts.outDir, 'backroom-backups')}`);
+      }
+      if (st.mode & 0o077) opts.log('warn', 'backup_dir_not_private', { dir: opts.outDir, mode: (st.mode & 0o777).toString(8) });
+    }
+    for (const n of await readdir(opts.outDir)) {
+      if (!/^backroom-\d{8}T\d{6}Z\.sqlite\.partial/.test(n)) continue;
+      const f = join(opts.outDir, n);
+      const age = Date.now() - (await stat(f).catch(() => ({ mtimeMs: Date.now() }))).mtimeMs;
+      if (age > STALE_PARTIAL_MS) await rm(f, { force: true });
+    }
+  } catch (e) {
+    if (e instanceof BackupError) throw e;
+    if (isPermission(e)) throw new BackupError(`cannot create or use the backup directory ${opts.outDir}: permission denied`, { cause: e });
+    throw e;
+  }
+
   const name = snapshotName((opts.now ?? (() => new Date()))());
   const final = join(opts.outDir, name);
   if (existsSync(final)) throw new BackupError(`${final} already exists`);
@@ -218,13 +278,20 @@ export async function runBackup(opts: BackupOptions): Promise<BackupResult> {
     await rm(partial, { force: true });
     for (const suffix of ['-wal', '-shm', '-journal']) await rm(`${partial}${suffix}`, { force: true });
     if (e instanceof BackupError) throw e;
-    throw new BackupError(`the database snapshot failed (${(e as { code?: string } | null)?.code ?? (e as Error)?.name ?? 'error'})`, { cause: e });
+    throw new BackupError(`the database snapshot failed (${errCodeOf(e) ?? (e as Error)?.name ?? 'error'})`, { cause: e });
   }
   const bytes = (await stat(final)).size;
   opts.log('info', 'backup_snapshot', { snapshot: final, bytes, integrity: 'ok' });
 
-  const blobs = await mirrorBlobs(join(opts.dataDir, 'blobs'), join(opts.outDir, 'blobs'), { link: opts.link });
-  const pruned = (await pruneSnapshots(opts.outDir, opts.keep)).length;
+  let blobs: MirrorCounts;
+  let pruned: number;
+  try {
+    blobs = await mirrorBlobs(join(opts.dataDir, 'blobs'), join(opts.outDir, 'blobs'), { link: opts.link });
+    pruned = (await pruneSnapshots(opts.outDir, opts.keep)).length;
+  } catch (e) {
+    if (isPermission(e)) throw new BackupError(`permission denied while copying files into ${opts.outDir} (the snapshot ${final} was kept)`, { cause: e });
+    throw e;
+  }
   opts.log('info', 'backup_done', { snapshot: final, bytes, blobs, pruned, keep: opts.keep, ms: Date.now() - t0 });
   return { snapshot: final, bytes, integrity: 'ok', blobs, pruned };
 }

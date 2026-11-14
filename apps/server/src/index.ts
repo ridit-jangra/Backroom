@@ -79,7 +79,8 @@ async function backupAndExit(config: ServerConfig, outDir: string): Promise<neve
   } catch (e) {
     log('error', 'backup_failed', errorFields(e));
     // BackupError messages hold only paths and SQLite error codes.
-    fail(`backup failed: ${e instanceof BackupError ? e.message : 'unexpected error'}`);
+    const f = errorFields(e);
+    fail(`backup failed: ${e instanceof BackupError ? e.message : `unexpected error (${f.errno ?? f.error})`}`);
   }
   process.exit(0);
 }

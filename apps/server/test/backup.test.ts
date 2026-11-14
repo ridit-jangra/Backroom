@@ -4,7 +4,7 @@
  * pruning to the newest `--keep` snapshots.
  */
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { describe, expect, it } from 'vitest';
@@ -230,5 +230,98 @@ describe('pruneSnapshots', () => {
     expect(left).toHaveLength(7);
     expect(left.at(-1)).toBe('backroom-20261114T040000Z.sqlite');
     expect(left[0]).toBe('backroom-20261104T040000Z.sqlite');
+  });
+});
+
+const isRoot = process.getuid?.() === 0;
+
+describe('runBackup: the backup directory', () => {
+  it('chmods only a directory this run created; an existing private-enough one keeps its mode (with a warning)', async () => {
+    const data = makeDataDir();
+    const parent = tempDir('backroom-backup-parent-');
+    chmodSync(parent, 0o755);
+    const created = join(parent, 'a', 'b');
+    await runBackup({ dataDir: data, outDir: created, keep: 7, log: captureLog().log });
+    expect(statSync(created).mode & 0o777).toBe(0o700);
+    expect(statSync(parent).mode & 0o777).toBe(0o755);
+    const existing = tempDir('backroom-backup-existing-');
+    chmodSync(existing, 0o750);
+    const { log, text } = captureLog();
+    await runBackup({ dataDir: data, outDir: existing, keep: 7, log, now: () => new Date('2026-11-14T05:00:00Z') });
+    expect(statSync(existing).mode & 0o777).toBe(0o750);
+    expect(text()).toContain('backup_dir_not_private');
+  });
+
+  it('refuses a world-writable directory (like /tmp) and leaves its mode alone', async () => {
+    const data = makeDataDir();
+    for (const mode of [0o777, 0o1777]) {
+      const dir = tempDir('backroom-backup-ww-');
+      chmodSync(dir, mode);
+      await expect(runBackup({ dataDir: data, outDir: dir, keep: 7, log: captureLog().log })).rejects.toThrow(/world-writable/);
+      expect(statSync(dir).mode & 0o7777).toBe(mode);
+      expect(readdirSync(dir)).toEqual([]);
+    }
+  });
+
+  it.skipIf(isRoot)('a directory it may not create is a clear BackupError (permission denied)', async () => {
+    const data = makeDataDir();
+    const parent = tempDir('backroom-backup-ro-');
+    chmodSync(parent, 0o500);
+    try {
+      const err = await runBackup({ dataDir: data, outDir: join(parent, 'x'), keep: 7, log: captureLog().log }).catch((e) => e);
+      expect(err).toBeInstanceOf(BackupError);
+      expect(err.message).toMatch(/permission denied/);
+    } finally {
+      chmodSync(parent, 0o700);
+    }
+  });
+
+  it('refuses a backup directory equal to, inside, or containing DATA_DIR, and creates nothing', async () => {
+    const data = makeDataDir();
+    const before = storedFiles(data);
+    for (const out of [data, join(data, 'blobs'), join(data, 'blobs', 'bk'), join(data, 'x', 'y')]) {
+      await expect(runBackup({ dataDir: data, outDir: out, keep: 7, log: captureLog().log })).rejects.toThrow(/inside the data directory|is the data directory/);
+    }
+    expect(storedFiles(data)).toEqual(before);
+    expect(existsSync(join(data, 'blobs', 'bk'))).toBe(false);
+    expect(existsSync(join(data, 'x'))).toBe(false);
+    // DATA_DIR inside the backup directory: the mirror source would sit inside its own destination.
+    const outer = tempDir('backroom-backup-outer-');
+    const inner = join(outer, 'data');
+    renameSync(data, inner);
+    await expect(runBackup({ dataDir: inner, outDir: outer, keep: 7, log: captureLog().log })).rejects.toThrow(/contains the data directory/);
+    expect(readdirSync(outer)).toEqual(['data']);
+    // Through a symlinked path too.
+    const { symlinkSync } = await import('node:fs');
+    const link = join(tempDir('backroom-backup-link-'), 'd');
+    symlinkSync(inner, link);
+    await expect(runBackup({ dataDir: link, outDir: join(inner, 'bk'), keep: 7, log: captureLog().log })).rejects.toThrow(/inside the data directory/);
+    expect(existsSync(join(inner, 'bk'))).toBe(false);
+  });
+
+  it.skipIf(isRoot)('an unwritable DATA_DIR is a clear error (SQLite needs to create -wal/-shm there)', async () => {
+    const data = makeDataDir();
+    chmodSync(data, 0o500);
+    try {
+      const out = tempDir('backroom-backup-out-');
+      const err = await runBackup({ dataDir: data, outDir: out, keep: 7, log: captureLog().log }).catch((e) => e);
+      expect(err).toBeInstanceOf(BackupError);
+      expect(err.message).toMatch(/cannot write to the data directory/);
+    } finally {
+      chmodSync(data, 0o700);
+    }
+  });
+
+  it('removes stale *.partial leftovers in the destination before mirroring', async () => {
+    const data = makeDataDir();
+    const out = tempDir('backroom-backup-out-');
+    mkdirSync(join(out, 'blobs', 'ab'), { recursive: true });
+    writeFileSync(join(out, 'blobs', 'ab', 'x.0123.partial'), 'junk');
+    const old = join(out, 'backroom-20261101T040000Z.sqlite.partial');
+    writeFileSync(old, 'junk');
+    utimesSync(old, new Date('2026-11-01T04:00:00Z'), new Date('2026-11-01T04:00:00Z'));
+    await runBackup({ dataDir: data, outDir: out, keep: 7, log: captureLog().log });
+    expect(existsSync(join(out, 'blobs', 'ab', 'x.0123.partial'))).toBe(false);
+    expect(existsSync(old)).toBe(false);
   });
 });
