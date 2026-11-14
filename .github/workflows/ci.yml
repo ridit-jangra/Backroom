@@ -25,7 +25,7 @@ jobs:
           node-version-file: .nvmrc
           cache: npm
 
-      # Runs the root postinstall (emoji asset generation) that the web and worker tests need.
+      # Runs the root postinstall (emoji asset generation) that the web, worker and server tests need.
       - run: npm ci
 
       - name: Install Tauri Linux dependencies
@@ -45,7 +45,7 @@ jobs:
         with:
           workspaces: apps/desktop/src-tauri
 
-      - name: Unit tests (all workspaces, including cargo test)
+      - name: Unit tests (all workspaces, including apps/server and cargo test)
         run: npm test
 
       - name: Type-check web
@@ -53,6 +53,9 @@ jobs:
 
       - name: Type-check worker
         run: npx tsc -p apps/worker
+
+      - name: Type-check server
+        run: npx tsc -p apps/server
 
       - name: Clippy (desktop)
         working-directory: apps/desktop/src-tauri
@@ -77,8 +80,9 @@ jobs:
       - name: Install Playwright chromium
         run: npx playwright install --with-deps chromium
 
-      # CI=true (set by GitHub Actions) selects the bundled chromium. No secrets are used:
-      # the suite starts wrangler dev with --var RESEND_API_KEY:dev (console mailer).
+      # CI=true (set by GitHub Actions) selects the bundled chromium. No secrets are used: global setup
+      # builds the web app and the server bundle into e2e/.tmp, then starts the Node server
+      # (node e2e/.tmp/server/server.mjs) on 127.0.0.1:8788 with RESEND_API_KEY=dev (console mailer).
       - name: Playwright suite
         run: npm run e2e
 
@@ -89,6 +93,6 @@ jobs:
           name: e2e-failure
           path: |
             e2e/.tmp/test-results
-            e2e/.tmp/wrangler.log
+            e2e/.tmp/server.log
           if-no-files-found: ignore
           retention-days: 7
