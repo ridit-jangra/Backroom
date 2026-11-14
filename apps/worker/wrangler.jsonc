@@ -7,7 +7,7 @@
     {
       "binding": "DB",
       "database_name": "backroom",
-      "database_id": "<set at deploy>",
+      "database_id": "9af7495f-721b-4482-8ead-8768dbf2d33d",
       "migrations_dir": "migrations"
     }
   ],
