@@ -87,7 +87,7 @@ Build and deploy notes:
 
 - `npm install` generates the emoji table from `emoji-datasource` into `packages/emoji/src/generated/` (git-ignored); `pretest`, `predev` and `prebuild` hooks regenerate it.
 - `npm run build` copies 3,526 Twemoji SVGs into `apps/web/dist/twemoji/`.
-- Before the first deploy, create the R2 bucket that stores custom emoji: `npx wrangler r2 bucket create backroom`. The `r2_buckets` binding `BUCKET` in `apps/worker/wrangler.jsonc` already points at it.
+- Custom emoji, files and thumbnails live in a Workers KV namespace (free, no payment card; R2 would need one). Before the first deploy, create it with `npx wrangler kv namespace create BLOBS` and put the printed id into the `kv_namespaces` entry for the `BLOBS` binding in `apps/worker/wrangler.jsonc` (it says `<set at deploy>` until then; local `wrangler dev` and the tests use a local KV and need no id). There is deliberately no `r2_buckets` entry: an R2 binding makes `wrangler deploy` fail while R2 is not enabled. The worker still has an R2 adapter (`apps/worker/src/lib/blobs.ts`): it is used only when `BLOBS` is not bound and an R2 `BUCKET` is.
 - `assets.run_worker_first` must now be `["/auth/*", "/me", "/w/*", "/invites/*", "/health", "/channels/*", "/messages/*", "/emoji/*", "/ws"]`. Twemoji live under `/twemoji/`, which is served from static assets and deliberately does not collide with `/emoji/*`.
 
 Check it locally without a browser (replace `<cookie>` with the `backroom_session` value; use a PNG of at least 32x32):
@@ -115,7 +115,7 @@ Limits:
 | Limit | Value |
 |---|---|
 | File size | 26,214,400 bytes (25 MB) |
-| Workspace storage | 2,147,483,648 bytes (2 GB, sum of file sizes) |
+| Workspace storage | 943,718,400 bytes (900 MB, sum of file sizes; KV holds 1 GB in total and custom emoji share it) |
 | Thumbnail | at most 524,288 bytes and 720 px on the long side |
 | Files per message | 10 |
 | File name | 255 code points |
@@ -123,13 +123,15 @@ Limits:
 | Search query | 256 characters, 16 terms |
 | Search page | 20 results; at most offset 480 |
 
-R2 key layout (bucket `BUCKET`):
+Blob key layout (KV namespace `BLOBS`, or R2 bucket `BUCKET` if that is the bound backend):
 
 - original: `ws/<workspaceId>/<fileId>`
 - thumbnail: `ws/<workspaceId>/<fileId>-thumb-<ULID>`
 - custom emoji (Phase 3): `ws/<workspaceId>/emoji/<id>`
 
-Code that deletes file objects first checks the key against `/^ws\/[0-9A-Z]{26}\/[0-9A-Z]{26}(-thumb-[0-9A-Z]{26})?$/`, which can never match an `emoji/` key, so cleanup and quota never touch emoji. Nothing lists R2 to compute quota or find orphans; both come from D1.
+Code that deletes file objects first checks the key against `/^ws\/[0-9A-Z]{26}\/[0-9A-Z]{26}(-thumb-[0-9A-Z]{26})?$/`, which can never match an `emoji/` key, so cleanup and quota never touch emoji. Nothing lists blob storage to compute quota or find orphans; both come from D1.
+
+Workers KV free tier: 1 GB stored, 25 MiB per value, 100,000 reads, 1,000 writes and 1,000 deletes a day. Each upload, thumbnail or custom emoji is one write. KV has no range or conditional reads, so the KV adapter keeps `{contentType, size, etag}` in each value's metadata (the etag is a random id per write), serves `Range` by streaming from the start and slicing, and answers `If-None-Match` from the stored etag. When a daily limit is hit, uploads answer `503 storage_busy` ("Storage is at its daily write limit. Try again tomorrow.") until the limit resets.
 
 Cleanup cron: `triggers.crons` is `["0 4 * * *"]` (daily, 04:00 UTC). To run it locally:
 
@@ -138,7 +140,7 @@ cd apps/worker && npx wrangler dev --test-scheduled
 curl "http://localhost:8787/cdn-cgi/handler/scheduled?cron=0+4+*+*+*"   # use the port wrangler prints; answers "ok"
 ```
 
-The log shows `orphans_cleaned` with a count. (The older `/__scheduled` path is not in `run_worker_first`, so the static-asset layer answers it with the SPA page; use the `/cdn-cgi/handler/scheduled` path.) Each run is bounded to 10 batches of 100 files.
+The log shows `orphans_cleaned` with a count. (The older `/__scheduled` path is not in `run_worker_first`, so the static-asset layer answers it with the SPA page; use the `/cdn-cgi/handler/scheduled` path.) Each run deletes at most 200 blobs (an original and its thumbnail count as two), because KV allows 1,000 deletes a day and deletes keys one by one; the remaining orphans wait for the next run. If KV's daily delete limit is hit mid-run, the run stops (log `orphan_delete_limited`) and keeps those rows for the next run.
 
 Search syntax: free text; `"quoted phrases"`; `in:#channel`; `from:@name`; `has:file`; `before:YYYY-MM-DD`; `after:YYYY-MM-DD`. Filters are case-insensitive and a repeated filter keeps the last one. Dates are UTC days. Every term is matched literally, so `OR`, `NEAR(`, `*` and quotes typed by a user are just words, and terms with no letter or digit are ignored. Punctuation inside a term splits it into an adjacent-word phrase, so `x.html` matches a file named `x.html` but not one whose tokens are not adjacent (such as `<b>x</b>.html`). Results come only from messages you can see: public channels and channels or DMs you are in; deleted messages never appear.
 

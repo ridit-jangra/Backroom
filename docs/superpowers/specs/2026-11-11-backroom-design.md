@@ -61,7 +61,7 @@ Storage, Cookies) were not opened.
 ```
  Browser / Tauri ────HTTPS──▶ Worker (Hono router) ──▶ D1 (SQLite + FTS5)
         │                         │      │
-        └──WebSocket──────────────┘      ├──▶ R2 (files, custom emoji, thumbnails)
+        └──WebSocket──────────────┘      ├──▶ Workers KV (files, custom emoji, thumbnails)
                                   ▼      └──▶ Resend (magic-link email)
                       Durable Object: WorkspaceHub
                       (one per workspace: sockets, ordering, fan-out)
@@ -70,7 +70,7 @@ Storage, Cookies) were not opened.
 | Unit | Responsibility | Depends on |
 |---|---|---|
 | `apps/web` | React + Vite SPA: sidebar, channel view, threads, composer, emoji picker, search, uploads, admin | REST API, WebSocket protocol |
-| `apps/worker` | Hono API: auth, invites, history, search, files, custom emoji, admin; serves SPA static assets; routes WS upgrades | D1, R2, Resend, WorkspaceHub |
+| `apps/worker` | Hono API: auth, invites, history, search, files, custom emoji, admin; serves SPA static assets; routes WS upgrades | D1, Workers KV (blob store), Resend, WorkspaceHub |
 | `WorkspaceHub` (Durable Object, SQLite-backed) | Holds hibernatable sockets for one workspace; assigns per-channel `seq`; validates and persists writes to D1; fans out events; presence and typing | D1 |
 | `packages/protocol` | Shared TypeScript types + zod schemas for REST and WS messages | — |
 | `packages/emoji` | Shortcode table (from `emoji-datasource`), shortcode parse/render, skin tones | — |
@@ -240,8 +240,18 @@ state-changing requests require a matching `Origin`.
 
 ## 8. Files
 
-- Upload streams the request body to R2 at `ws/<workspaceId>/<fileId>`.
-  Limits: 25 MB per file, 2 GB per workspace (tracked by summing `files.size`).
+- Upload streams the request body to blob storage at `ws/<workspaceId>/<fileId>`.
+  Blob storage is Workers KV (free without a payment card), behind a small
+  `BlobStore` interface that also has an R2 adapter, used only if `BLOBS` is
+  not bound and an R2 `BUCKET` is.
+  Limits: 25 MB per file (the KV value limit is 25 MiB), 900 MB per workspace
+  (tracked by summing `files.size`; KV holds 1 GB in total and custom emoji
+  share it).
+- KV has no range or conditional reads. The KV adapter stores
+  `{contentType, size, etag}` as value metadata (a random etag per write, never
+  a hash of the bytes), serves `Range` by streaming from the start and slicing,
+  and answers `If-None-Match` by comparing the stored etag. When KV's daily
+  write/delete limit is reached, uploads fail with `503 storage_busy`.
 - Image dimensions read from headers on upload. Thumbnails (max 720 px, WebP)
   are generated in the browser and uploaded alongside the original.
 - Download checks the user can see a message referencing the file (or is the
@@ -250,7 +260,8 @@ state-changing requests require a matching `Origin`.
   SVG, is forced to `attachment`. Always `X-Content-Type-Options: nosniff` and a
   restrictive `Content-Security-Policy: sandbox` on file responses.
 - Orphaned uploads (never attached to a message) are deleted after 24 h by a
-  daily Cron Trigger.
+  daily Cron Trigger, at most 200 blob deletes per run (KV allows 1,000
+  deletes a day); the rest wait for the next run.
 
 ## 9. Emoji
 
@@ -352,7 +363,7 @@ state-changing requests require a matching `Origin`.
 | D1 rows written | 100k/day | ~5–10 rows per message incl. FTS → ~10k messages/day headroom |
 | D1 rows read | 5M/day | ample |
 | D1 / DO storage | 5 GB total | text is small |
-| R2 | 10 GB storage free | capped at 2 GB/workspace |
+| Workers KV | 1 GB storage, 25 MiB/value, 100k reads/day, 1k writes/day, 1k deletes/day | files capped at 900 MB/workspace, custom emoji share the rest; each upload, thumbnail or emoji is 1 write; cron cleanup ≤ 200 deletes/day; over the daily limit uploads get `503 storage_busy` |
 | Static assets | 20,000 files, 25 MiB/file | ~3,700 emoji SVGs + app bundle |
 | Resend | free tier (~100 emails/day) | magic links only |
 
@@ -364,7 +375,7 @@ with no code changes.
 - **Unit (Vitest):** shortcode parse/render, mention extraction, search query
   parser/escaping, permission helpers, seq/dedupe logic.
 - **Integration (`@cloudflare/vitest-pool-workers`, local Worker + DO + D1 +
-  R2):** magic-link flow and rate limits; invite-only eligibility; session
+  KV + R2; the file and emoji suites run once per blob backend):** magic-link flow and rate limits; invite-only eligibility; session
   expiry; seq ordering under concurrent sends; clientId dedupe; reconnect
   catch-up and `stale`; private channel and DM isolation (messages, search,
   files); file disposition headers; custom emoji validation.
@@ -379,7 +390,8 @@ with no code changes.
 ## 15. Deployment
 
 - `wrangler.toml` defines the Worker, `WorkspaceHub` DO (SQLite class),
-  D1 binding, R2 bucket, static assets, Cron Trigger.
+  D1 binding, Workers KV namespace `BLOBS` (no R2 bucket: R2 needs a payment
+  card on file), static assets, Cron Trigger.
 - Secrets: `RESEND_API_KEY`, `OWNER_EMAIL`, `APP_ORIGIN`, `EMAIL_FROM`.
 - `wrangler d1 migrations apply` for schema; seed migration creates `clubhack`.
 - Default URL `https://backroom.<account>.workers.dev`; custom domain optional.
