@@ -5,6 +5,7 @@
 import { type IncomingMessage, STATUS_CODES, type Server, type ServerResponse, createServer } from 'node:http';
 import type { Duplex } from 'node:stream';
 import { getRequestListener } from '@hono/node-server';
+import { megabytes } from '../../worker/src/lib/quota';
 import { applyClientIp } from './client-ip';
 import { type Log, errorFields } from './log';
 import type { UpgradeBridge } from './platform/ws-bridge';
@@ -60,7 +61,12 @@ export function createRequestHandler(deps: HandlerDeps): (req: Request) => Promi
     if (req.body !== null) {
       const declared = req.headers.get('content-length');
       if (declared !== null) {
-        if (Number(declared) > deps.maxBodyBytes) return json(413, 'too_large', 'The request body is too large.');
+        if (Number(declared) > deps.maxBodyBytes) {
+          // The upload route's own wording; the connection is closed rather than reading a body we refuse.
+          const res = json(413, 'too_large', `Files must be ${megabytes(deps.maxBodyBytes)} or smaller.`);
+          res.headers.set('connection', 'close');
+          return res;
+        }
       } else {
         req = new Request(req.url, {
           method: req.method,
@@ -218,6 +224,13 @@ export function createHttpServer(deps: HttpServerDeps): HttpServer {
     };
     res.once('close', finish);
     res.once('finish', finish);
+    res.once('finish', () => {
+      // A refusal (e.g. the 413 above) that leaves the body unread: stop reading it and drop the connection.
+      if (!req.complete && String(res.getHeader('connection')).toLowerCase() === 'close') {
+        req.socket.end();
+        setTimeout(() => req.socket.destroy(), 1_000).unref();
+      }
+    });
     res.on('error', () => {});
     try {
       if (!METHODS.has(req.method ?? '')) {

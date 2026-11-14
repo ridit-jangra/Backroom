@@ -27,7 +27,7 @@ const work = createWorkTracker(() => {});
 
 installFixedLengthStream();
 
-async function setup(extraEnv: Partial<Env> = {}, app?: AppLike, maxBodyBytes = FILE_MAX_BYTES) {
+async function setup(extraEnv: Partial<Env> = {}, app?: AppLike, maxBodyBytes?: number) {
   const dir = tempDir();
   db = createD1(join(dir, 'db.sqlite'));
   await applyMigrations(db, MIGRATIONS_DIR);
@@ -46,7 +46,8 @@ async function setup(extraEnv: Partial<Env> = {}, app?: AppLike, maxBodyBytes = 
     ctx: work.ctx,
     site: await createStaticSite(fixtureDist()),
     checkDb: () => void db.sqlite.prepare('SELECT 1').get(),
-    maxBodyBytes,
+    // The production limit: the upload limit the worker itself enforces (env override or the protocol constant).
+    maxBodyBytes: maxBodyBytes ?? fileMaxBytes(env),
     log: () => {},
   });
   await db.batch([
@@ -175,16 +176,43 @@ describe('HEAD and aborted bodies', () => {
 describe('request body limit', () => {
   it('a declared Content-Length over the limit is refused before the app runs', async () => {
     const app = { fetch: vi.fn(() => new Response('x')) };
-    await setup({}, app, 100);
+    await setup({}, app, 1_048_576);
     const r = await handler(
-      new Request(`${ORIGIN}/w/clubhack/files`, { method: 'POST', headers: { 'Content-Length': '101', Origin: ORIGIN }, body: 'x'.repeat(101) }),
+      new Request(`${ORIGIN}/w/clubhack/files`, { method: 'POST', headers: { 'Content-Length': '1048577', Origin: ORIGIN }, body: 'x' }),
     );
     expect(r.status).toBe(413);
-    expect(await r.json()).toEqual({ error: { code: 'too_large', message: 'The request body is too large.' } });
+    // The Workers wording for an over-limit upload, from the same helper.
+    expect(await r.json()).toEqual({ error: { code: 'too_large', message: 'Files must be 1 MB or smaller.' } });
+    expect(r.headers.get('connection')).toBe('close');
     expect(app.fetch).not.toHaveBeenCalled();
   });
 
-  it('a body without a length is cut off past the limit', async () => {
+  it('the server-layer 413 for the default limit reads exactly like the Workers route', async () => {
+    await setup();
+    const r = await handler(
+      new Request(`${ORIGIN}/w/clubhack/files`, { method: 'POST', headers: { 'Content-Length': String(FILE_MAX_BYTES + 1), Origin: ORIGIN }, body: 'x' }),
+    );
+    expect(r.status).toBe(413);
+    expect(await r.json()).toEqual({ error: { code: 'too_large', message: 'Files must be 25 MB or smaller.' } });
+  });
+
+  it('a body without a length is cut off past the limit: the client gets the route\'s 400 invalid_request', async () => {
+    await setup({}, undefined, 100);
+    const body = new ReadableStream({
+      start(c) {
+        c.enqueue(new TextEncoder().encode(`{"email":"${'a'.repeat(60)}`));
+        c.enqueue(new TextEncoder().encode(`${'b'.repeat(60)}@test.local"}`));
+        c.close();
+      },
+    });
+    const r = await handler(
+      new Request(`${ORIGIN}/auth/start`, { method: 'POST', headers: { Origin: ORIGIN, 'Content-Type': 'application/json' }, body, duplex: 'half' } as RequestInit),
+    );
+    expect(r.status).toBe(400);
+    expect(await r.json()).toEqual({ error: { code: 'invalid_request', message: 'Invalid request body.' } });
+  });
+
+  it('a body without a length is cut off past the limit (the app sees a stream error)', async () => {
     let failure: unknown = null;
     const app: AppLike = {
       fetch: async (req: Request) => {

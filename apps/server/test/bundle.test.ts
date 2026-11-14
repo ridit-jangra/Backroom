@@ -341,6 +341,18 @@ describe('the built server (dist/server.mjs)', () => {
     expect(after[0]!.count).toBe(before[0]!.count + 1);
   });
 
+  it('an upload declaring more than FILE_MAX_BYTES gets the Workers 413 at once and the connection is closed', async () => {
+    const t0 = Date.now();
+    const reply = await raw(
+      `POST /w/clubhack/files?name=x.bin HTTP/1.1\r\nHost: x\r\nOrigin: ${origin}\r\nCookie: ${cookie}\r\nContent-Type: application/octet-stream\r\nContent-Length: 104857600\r\n\r\n0123456789`,
+      5_000,
+    );
+    expect(reply).toMatch(/^HTTP\/1\.1 413 /);
+    expect(reply).toContain('{"error":{"code":"too_large","message":"Files must be 25 MB or smaller."}}');
+    // Closed by the server, not by the 5 s test timeout, and without waiting for 100 MB.
+    expect(Date.now() - t0).toBeLessThan(3_000);
+  });
+
   it.each([
     ['TRACE upgrade on /ws', 'TRACE /ws HTTP/1.1\r\nHost: x\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n'],
     ['TRACK upgrade on /ws', 'TRACK /ws HTTP/1.1\r\nHost: x\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n'],
