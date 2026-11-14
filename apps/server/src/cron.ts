@@ -3,7 +3,7 @@
  * time by an in-process timer, or once with `--maintenance`. A lock file in the data directory keeps two runs
  * (this process, a second server, or a `--maintenance` run) from overlapping.
  */
-import { open, readFile, stat, unlink } from 'node:fs/promises';
+import { acquireLock } from './lockfile';
 import { type Log, errorFields } from './log';
 
 export const MAINTENANCE_HOUR = 4;
@@ -77,61 +77,23 @@ export function startDailySchedule(opts: { run: () => Promise<unknown>; hour?: n
   };
 }
 
-function pidAlive(pid: unknown): boolean {
-  if (typeof pid !== 'number' || !Number.isInteger(pid) || pid <= 0) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (e) {
-    return (e as { code?: string }).code === 'EPERM';
-  }
-}
-
-async function lockIsStale(path: string): Promise<boolean> {
-  try {
-    const [text, st] = await Promise.all([readFile(path, 'utf8'), stat(path)]);
-    let info: { pid?: unknown; at?: unknown } = {};
-    try {
-      info = JSON.parse(text) as typeof info;
-    } catch {
-      // unreadable: judged by age alone
-    }
-    const at = typeof info.at === 'number' ? Math.min(info.at, st.mtimeMs) : st.mtimeMs;
-    return Date.now() - at > LOCK_STALE_MS || !pidAlive(info.pid);
-  } catch {
-    return false; // vanished meanwhile: the retry will create it
-  }
-}
-
 /** Runs `job` holding an exclusive lock file; returns 'locked' (without running it) when another run holds it. */
 export async function withMaintenanceLock(path: string, job: () => Promise<unknown>, log: Log = noop): Promise<'ran' | 'locked'> {
-  for (let attempt = 0; attempt < 2; attempt++) {
-    let handle;
-    try {
-      handle = await open(path, 'wx', 0o600);
-    } catch (e) {
-      if ((e as { code?: string }).code !== 'EEXIST') throw e;
-      if (attempt === 0 && (await lockIsStale(path))) {
-        log('warn', 'maintenance_lock_stale');
-        await unlink(path).catch(() => {});
-        continue;
-      }
-      log('info', 'maintenance_skipped', { reason: 'locked' });
-      return 'locked';
-    }
-    try {
-      await handle.writeFile(JSON.stringify({ pid: process.pid, at: Date.now() }));
-    } finally {
-      await handle.close();
-    }
-    try {
-      await job();
-    } finally {
-      await unlink(path).catch(() => {});
-    }
-    return 'ran';
+  const lock = await acquireLock(path, { staleMs: LOCK_STALE_MS });
+  if (!lock) {
+    log('info', 'maintenance_skipped', { reason: 'locked' });
+    return 'locked';
   }
-  return 'locked';
+  // Released even if the process exits mid-run (forced shutdown).
+  const onExit = () => lock.releaseSync();
+  process.once('exit', onExit);
+  try {
+    await job();
+  } finally {
+    process.off('exit', onExit);
+    await lock.release();
+  }
+  return 'ran';
 }
 
 type Scheduled = (controller: ScheduledController, env: never, ctx: ExecutionContext) => unknown;
