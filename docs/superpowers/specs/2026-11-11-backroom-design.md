@@ -98,7 +98,10 @@ sockets, D1 stored the data and Workers KV (with an optional R2 adapter) stored
 blobs. That path is kept in `apps/worker` for testing and is unmaintained as a
 deployment target (`docs/DEPLOY.md`).
 
-## 4. Data model (D1)
+## 4. Data model (SQLite)
+
+*Phase 7: one SQLite file on the server (`node:sqlite` behind a D1-compatible adapter; the schema and migrations
+are the ones written for D1 in Phases 1–6, unchanged).*
 
 IDs are ULIDs (TEXT). Timestamps are INTEGER epoch milliseconds. Token columns
 store SHA-256 hashes only.
@@ -383,11 +386,16 @@ the server it only appears if a blob file has gone missing. The 25 MB file limit
   limit.
 - Email: Resend errors or daily cap → "couldn't send email, try later" for the
   user and a banner in the admin view.
-- Free-tier exhaustion (Workers/DO/D1 daily limits) → requests fail until
-  00:00 UTC reset; the client shows "Backroom is over its daily limit" when it
-  sees Cloudflare error 1027 / quota failures.
-- Logs: structured JSON via Workers Logs; never log message bodies, emails in
-  full, or tokens.
+- Capacity: there are no platform daily limits on the Node server; overload
+  shows up as slow responses, and `MAX_CONNECTIONS` drops new connections past
+  the cap. (Historical: on Cloudflare's free tier, requests failed until the
+  00:00 UTC reset and the client showed "Backroom is over its daily limit" on
+  error 1027.)
+- Logs: structured JSON lines on stdout (`time, level, code, …fields`), one per
+  event, collected by systemd's journal or the supervisor's log file; error
+  details are the error class and errno code only. No access log (sign-in URLs
+  carry tokens). Never log message bodies, emails, tokens or blob keys; the
+  console mailer's development-only sign-in line is the one exception.
 
 ## 13. Capacity
 
