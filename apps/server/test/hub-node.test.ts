@@ -13,7 +13,7 @@ import { DurableObjectNamespaceShim } from '../src/platform/do-runtime';
 import { createFsBlobStore } from '../src/platform/fs-blobs';
 import { applyMigrations } from '../src/platform/migrate';
 import { type UpgradeBridge, createUpgradeBridge } from '../src/platform/ws-bridge';
-import { MIGRATIONS_DIR, tempDir } from './helpers';
+import { MIGRATIONS_DIR, listenLocal, tempDir } from './helpers';
 
 const WS_ID = '01JCLUBHACK0000000000000WS';
 const GENERAL = '01JCLUBHACK0000000000000GN';
@@ -102,22 +102,6 @@ function toRequest(req: IncomingMessage): Request {
   return new Request(new URL(req.url ?? '/', origin), { method: req.method, headers });
 }
 
-/** Binds a free localhost port at 8790 or above (never 8787/8788). */
-async function listen(s: Server): Promise<number> {
-  for (let p = 8790; p < 8890; p++) {
-    const ok = await new Promise<boolean>((resolve) => {
-      const onError = () => resolve(false);
-      s.once('error', onError);
-      s.listen(p, '127.0.0.1', () => {
-        s.off('error', onError);
-        resolve(true);
-      });
-    });
-    if (ok) return p;
-  }
-  throw new Error('no free port in 8790-8889');
-}
-
 async function addUser(id: string, name: string, sessionAt = Date.now()): Promise<void> {
   await db.batch([
     db.prepare('INSERT INTO users (id, email, display_name, created_at) VALUES (?, ?, ?, 0)').bind(id, `${name}@test.dev`, name),
@@ -164,7 +148,7 @@ beforeEach(async () => {
       return wrapResponse ? wrapResponse(res) : res;
     });
   });
-  port = await listen(server);
+  port = await listenLocal(server);
   origin = `http://127.0.0.1:${port}`;
   env = {
     DB: db,

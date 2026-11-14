@@ -1,4 +1,5 @@
 import { type Dirent, mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import type { Server } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -56,4 +57,20 @@ export function storedFiles(dir: string): string[] {
     .filter((e) => e.isFile())
     .map((e) => relative(dir, join(e.parentPath, e.name)))
     .sort();
+}
+
+/** Binds a free localhost port at 8790 or above (never 8787/8788, which belong to the user's dev servers). */
+export async function listenLocal(s: Server): Promise<number> {
+  for (let p = 8790; p < 8890; p++) {
+    const ok = await new Promise<boolean>((resolve) => {
+      const onError = () => resolve(false);
+      s.once('error', onError);
+      s.listen(p, '127.0.0.1', () => {
+        s.off('error', onError);
+        resolve(true);
+      });
+    });
+    if (ok) return p;
+  }
+  throw new Error('no free port in 8790-8889');
 }

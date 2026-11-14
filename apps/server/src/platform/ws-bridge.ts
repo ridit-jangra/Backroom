@@ -26,6 +26,10 @@ import { type NodeWebSocket, NodeWebSocketClientEnd, abandonSocket, attachRawSoc
 export const UPGRADE_MARKER_HEADER = 'x-backroom-ws-upgrade';
 /** Largest incoming message, the same as workerd's 1 MiB (the hub itself refuses frames over 256 KiB chars). */
 export const DEFAULT_MAX_PAYLOAD = 1024 * 1024;
+/** How long the app may take to answer an upgrade before the client gets a 503 (no server timeout covers it). */
+export const DEFAULT_UPGRADE_DEADLINE_MS = 10_000;
+/** How long a refused upgrade's socket may linger (a client not reading its reply) before it is destroyed. */
+export const DEFAULT_REJECT_LINGER_MS = 5_000;
 
 type UpgradeContext = { token: string; servers: NodeWebSocket[]; chosen: NodeWebSocket | null };
 
@@ -92,7 +96,12 @@ function appHeaderLines(res: Response, upgrading: boolean): string[] {
   return lines;
 }
 
-async function writeHttpResponse(socket: Duplex, res: Response): Promise<void> {
+/**
+ * Writes a plain HTTP response and gets rid of the socket. After the `upgrade` event Node applies no timeout and
+ * its sockets allow half-open, so `end()` alone would leave the connection (and its fd) to the client. Like ws's
+ * own abortHandshake, the socket is destroyed once the reply is flushed, or after `lingerMs` if it never is.
+ */
+async function writeHttpResponse(socket: Duplex, res: Response, lingerMs: number): Promise<void> {
   let body: Buffer;
   try {
     body = Buffer.from(await res.arrayBuffer());
@@ -106,10 +115,18 @@ async function writeHttpResponse(socket: Duplex, res: Response): Promise<void> {
     `content-length: ${body.byteLength}`,
     'connection: close',
   ];
+  const timer = setTimeout(() => socket.destroy(), lingerMs);
+  timer.unref();
+  socket.once('close', () => clearTimeout(timer));
+  socket.once('finish', () => socket.destroy());
   socket.end(Buffer.concat([Buffer.from(`${head.join('\r\n')}\r\n\r\n`, 'latin1'), body]));
 }
 
-export function createUpgradeBridge(opts: { maxPayload?: number } = {}): UpgradeBridge {
+export function createUpgradeBridge(
+  opts: { maxPayload?: number; upgradeDeadlineMs?: number; rejectLingerMs?: number } = {},
+): UpgradeBridge {
+  const deadlineMs = opts.upgradeDeadlineMs ?? DEFAULT_UPGRADE_DEADLINE_MS;
+  const lingerMs = opts.rejectLingerMs ?? DEFAULT_REJECT_LINGER_MS;
   const wss = new WebSocketServer({ noServer: true, maxPayload: opts.maxPayload ?? DEFAULT_MAX_PAYLOAD });
   const extraHeaders = new WeakMap<IncomingMessage, string[]>();
   wss.on('headers', (headers: string[], req: IncomingMessage) => {
@@ -125,21 +142,43 @@ export function createUpgradeBridge(opts: { maxPayload?: number } = {}): Upgrade
       // A reset before ws takes over must not become an unhandled 'error' event.
       socket.on('error', () => {});
       if (!validHandshake(req)) {
-        await writeHttpResponse(socket, new Response('Bad WebSocket handshake.', { status: 400 }));
+        await writeHttpResponse(socket, new Response('Bad WebSocket handshake.', { status: 400 }), lingerMs);
         return;
       }
       const ctx: UpgradeContext = { token: randomUUID(), servers: [], chosen: null };
+      const abandonAll = () => {
+        for (const s of ctx.servers) abandonSocket(s as unknown as WebSocket);
+      };
+      const run = Promise.resolve().then(() => upgrades.run(ctx, () => fetchHandler(request)));
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const late = new Promise<'late'>((resolve) => {
+        timer = setTimeout(() => resolve('late'), deadlineMs);
+      });
       let res: Response;
       try {
-        res = await upgrades.run(ctx, () => fetchHandler(request));
+        const outcome = await Promise.race([run, late]);
+        if (outcome === 'late') {
+          console.error(JSON.stringify({ level: 'error', code: 'ws_upgrade_timeout' }));
+          // Whatever the handler still creates is never connected.
+          void run.then(abandonAll, abandonAll);
+          await writeHttpResponse(
+            socket,
+            Response.json({ error: { code: 'unavailable', message: 'Service unavailable.' } }, { status: 503 }),
+            lingerMs,
+          );
+          return;
+        }
+        res = outcome;
       } catch {
         console.error(JSON.stringify({ level: 'error', code: 'ws_upgrade_failed' }));
         res = Response.json({ error: { code: 'internal', message: 'Internal error.' } }, { status: 500 });
+      } finally {
+        clearTimeout(timer);
       }
       const chosen = ctx.chosen !== null && res.headers.get(UPGRADE_MARKER_HEADER) === ctx.token ? ctx.chosen : null;
       for (const s of ctx.servers) if (s !== chosen) abandonSocket(s as unknown as WebSocket);
       if (!chosen) {
-        await writeHttpResponse(socket, res);
+        await writeHttpResponse(socket, res, lingerMs);
         return;
       }
       const server = chosen as unknown as WebSocket;
