@@ -10,7 +10,7 @@ function alive(pgid: number): boolean {
   }
 }
 
-/** Stops the wrangler process group started by global setup, and nothing else. */
+/** Stops the server process group started by global setup, and nothing else (SIGTERM, then SIGKILL). */
 export async function stopServer(): Promise<void> {
   let pgid: number;
   try {
@@ -25,7 +25,8 @@ export async function stopServer(): Promise<void> {
   } catch {
     return;
   }
-  const deadline = Date.now() + 5000;
+  // The server's graceful shutdown is capped at about 11 s (1 s WebSocket grace + 10 s drain).
+  const deadline = Date.now() + 15_000;
   while (alive(pgid) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 100));
   if (alive(pgid)) {
     try {
