@@ -76,7 +76,7 @@ This writes `apps/web/dist`, which a running local dev server also serves. Stop 
 scripts/deploy-preflight.sh          # add --quick to skip the test suites
 ```
 
-Read-only. It checks: no `<set at deploy>` left in `wrangler.jsonc`, `EMAIL_FROM` set, the deploy script flags, the web build exists, `npm run deploy:dry-run -w apps/worker` (bundles without uploading), `wrangler whoami`, secret names present, and `npm test`. It prints a checklist and exits non-zero on any failure.
+Read-only. It checks: no `<set at deploy>` left in `wrangler.jsonc`, `EMAIL_FROM` set, the deploy script flags, the web build exists (and warns, without failing, when `apps/web/dist/index.html` is older than the newest file under `apps/web/src`; rebuild with step 7), `npm run deploy:dry-run -w apps/worker` (bundles without uploading), `wrangler whoami`, secret names present, and `npm test`. It prints a checklist and exits non-zero on any failure.
 
 ## 9. Deploy (every deploy)
 
@@ -91,6 +91,8 @@ The first deploy creates the `WorkspaceHub` Durable Object class from migration 
 1. Open https://chat.ridit.space/health.
 2. Sign in as the owner (the Gmail in `OWNER_EMAIL`); the magic link arrives by email.
 3. In Admin, create an invite for the next member.
+
+If the first owner email does not arrive, the admin "emails failed" banner cannot help (nobody can sign in yet). Run `npx wrangler tail` in `apps/worker` in a second terminal, request the link again, and look for an `email_failed` line; then check the Resend dashboard logs (the send, the `ridit.space` domain still verified, the API key valid) and the spam folder. No `email_failed` line and no Resend log entry usually means `OWNER_EMAIL` does not match the address typed, or the request was rate limited (5 per hour per address).
 
 ## 11. Desktop app (when the address changes or for a new build)
 
