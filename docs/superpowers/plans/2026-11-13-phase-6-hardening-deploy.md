@@ -166,3 +166,25 @@
 
   It prints a checklist and exits non-zero on any failure. It never runs remote mutations.
 - [ ] Commit `docs: deploy guide and preflight script`.
+
+### Task 7: Card-free blob storage (Workers KV backend) — added 2026-11-14
+
+Why: enabling R2 requires a payment card on file, and the user declined ("i don't wanna put my card"). Spec constraint is free tier only. Workers KV is free without a card (1 GB storage, 25 MiB per value, 100k reads/day, 1k writes/day, 1k deletes/day).
+
+**Files:** `apps/worker/src/lib/blobs.ts` (new), `src/files/{store,routes,cleanup}.ts`, `src/emoji/{custom,routes}.ts`, `src/env.ts`, `wrangler.jsonc`, `vitest.config.ts`, tests, spec §8/§9/§13/§15, README, `docs/DEPLOY.md` (Task 6 consumes this).
+
+- [ ] Add `BlobStore` in `lib/blobs.ts` and `getBlobStore(env)` returning the KV adapter when `env.BLOBS` is bound, else the R2 adapter over `env.BUCKET`:
+  - `put(key, body, {contentType, size})`
+  - `get(key, {range?, ifNoneMatch?})` → `{body, size, etag, contentType, range?, notModified}` or `null`
+  - `delete(keys)` (the KV adapter loops, since KV has no batch delete)
+  - `peek(key, length)` for the sniff bytes
+- [ ] KV adapter details:
+  - Store the value with metadata `{contentType, size, etag}`. Generate the etag as a random id at put time (never hash the bytes: a 25 MB hash would break the 10 ms CPU limit).
+  - `put` needs a known length: use the request's Content-Length, and keep the existing 25 MB limit and early 413 behaviour.
+  - Emulate `range` by slicing the stream (offset/length) and emulate `If-None-Match` by comparing against the stored etag.
+  - Map a KV daily-limit error (HTTP 429 / "limit exceeded") to the existing error shape with `503 storage_busy` "Storage is at its daily write limit. Try again tomorrow." and a test with a fake namespace.
+- [ ] Replace every direct `env.BUCKET` use (13 references, listed via `grep -rn BUCKET apps/worker/src`) with the BlobStore. Behaviour, headers, nosniff and CSP sandbox, Range/206 and 304 handling must be unchanged for existing tests.
+- [ ] Config: add a `kv_namespaces` binding `BLOBS` to `wrangler.jsonc` (id placeholder `<set at deploy>`) and REMOVE the `r2_buckets` entry, because an R2 binding makes deploy fail while R2 is disabled. Keep the `BUCKET` binding only in the vitest miniflare bindings so the R2 adapter keeps its tests, and run the whole suite once with each backend (parametrised).
+- [ ] Workspace quota: lower the per-workspace file quota from 2 GB to 900 MB (KV total is 1 GB and emoji share it). Update the quota constant, its tests, spec §8 and §13 (R2 row replaced by a KV row with the limits above), §15 (KV namespace instead of an R2 bucket) and the README.
+- [ ] Cron cleanup deletes orphan keys one by one and stops after 200 deletes per run (KV has 1k deletes/day), leaving the rest for the next run. Test the cap.
+- [ ] Re-run the E2E suite (Task 4) green twice. Commit `feat(worker): Workers KV blob store backend (no card required)`.
