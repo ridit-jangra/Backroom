@@ -1,5 +1,5 @@
 import fs from 'node:fs';
-import { PID_FILE } from './paths';
+import { PID_FILE, SERVER_BUNDLE } from './paths';
 
 function alive(pgid: number): boolean {
   try {
@@ -10,16 +10,46 @@ function alive(pgid: number): boolean {
   }
 }
 
-/** Stops the server process group started by global setup, and nothing else (SIGTERM, then SIGKILL). */
-export async function stopServer(): Promise<void> {
+/** True when `pid` is still our server (guards against a recycled pid after a crash or reboot). */
+function isOurServer(pid: number): boolean {
+  try {
+    return fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').includes(SERVER_BUNDLE);
+  } catch {
+    // No /proc (not Linux): trust the pid file.
+    return !fs.existsSync('/proc');
+  }
+}
+
+function readPid(): number | null {
   let pgid: number;
   try {
     pgid = Number(fs.readFileSync(PID_FILE, 'utf8'));
   } catch {
-    return;
+    return null;
+  }
+  return Number.isInteger(pgid) && pgid > 1 ? pgid : null;
+}
+
+/**
+ * Synchronous last resort for a runner that exits without running global teardown: SIGKILL the server's process
+ * group if the pid file still names it.
+ */
+export function killServerSync(): void {
+  const pgid = readPid();
+  if (pgid === null || !alive(pgid) || !isOurServer(pgid)) return;
+  try {
+    process.kill(-pgid, 'SIGKILL');
+  } catch {
+    /* already gone */
   }
   fs.rmSync(PID_FILE, { force: true });
-  if (!Number.isInteger(pgid) || pgid <= 1 || !alive(pgid)) return;
+}
+
+/** Stops the server process group started by global setup, and nothing else (SIGTERM, then SIGKILL). */
+export async function stopServer(): Promise<void> {
+  const pgid = readPid();
+  fs.rmSync(PID_FILE, { force: true });
+  if (pgid === null || !alive(pgid) || !isOurServer(pgid)) return;
   try {
     process.kill(-pgid, 'SIGTERM');
   } catch {

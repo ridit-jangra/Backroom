@@ -14,7 +14,7 @@ import {
   TMP,
   WEB_DIR,
 } from './paths';
-import { stopServer } from './server';
+import { killServerSync, stopServer } from './server';
 
 /**
  * The environment of the Node server under test. RESEND_API_KEY=dev selects the console mailer, so no email ever
@@ -77,7 +77,24 @@ function startupMailer(): string | null {
   return null;
 }
 
+/** Pids whose command line mentions `needle` (Linux /proc; empty elsewhere). */
+function processesRunning(needle: string): number[] {
+  if (!fs.existsSync('/proc')) return [];
+  const out: number[] = [];
+  for (const d of fs.readdirSync('/proc')) {
+    if (!/^\d+$/.test(d) || Number(d) === process.pid) continue;
+    try {
+      if (fs.readFileSync(`/proc/${d}/cmdline`, 'utf8').includes(needle)) out.push(Number(d));
+    } catch {
+      /* exited meanwhile */
+    }
+  }
+  return out;
+}
+
 export default async function globalSetup() {
+  // A server left by an earlier run that died without teardown (its pid file still names it): stop it first.
+  await stopServer();
   // Something already answers on 8788 (a leftover run or a smoke test): refuse instead of
   // killing a process this run did not start.
   if (await healthy()) throw new Error(`e2e setup: port ${PORT} is already serving; stop that server first.`);
@@ -107,6 +124,8 @@ export default async function globalSetup() {
   if (child.pid === undefined) throw new Error('e2e setup: could not start the server');
   fs.writeFileSync(PID_FILE, String(child.pid));
   child.unref();
+  // The server is detached (its own process group), so it would outlive a runner that exits without teardown.
+  process.once('exit', killServerSync);
 
   let exited = false;
   child.on('exit', () => (exited = true));
@@ -126,5 +145,8 @@ export default async function globalSetup() {
 
   return async () => {
     await stopServer();
+    const left = processesRunning(SERVER_BUNDLE);
+    for (const pid of left) process.kill(pid, 'SIGKILL');
+    if (left.length > 0) throw new Error(`e2e teardown: server processes were still running after stop (killed: ${left.join(', ')})`);
   };
 }

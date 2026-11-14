@@ -4,7 +4,7 @@
  */
 import { type ChildProcess, execFileSync, spawn } from 'node:child_process';
 import { get as httpGet, request as httpRequest } from 'node:http';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { connect as netConnect, createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -36,6 +36,42 @@ const lines: string[] = [];
 let exitCode: Promise<number | null>;
 let web: string;
 
+/**
+ * Every server process this file starts. afterAll kills whatever is still running (a failed assertion must not leave
+ * a server behind), and a process 'exit' hook does the same if vitest exits without running afterAll.
+ */
+const children = new Set<ChildProcess>();
+function track<T extends ChildProcess>(p: T): T {
+  children.add(p);
+  p.once('exit', () => children.delete(p));
+  return p;
+}
+function killAll(): void {
+  for (const p of children) {
+    try {
+      p.kill('SIGKILL');
+    } catch {
+      /* already gone */
+    }
+  }
+}
+process.once('exit', killAll);
+
+/** Pids of live processes whose command line mentions `needle` (Linux /proc; empty elsewhere). */
+function processesMentioning(needle: string): number[] {
+  if (!existsSync('/proc')) return [];
+  const out: number[] = [];
+  for (const d of readdirSync('/proc')) {
+    if (!/^\d+$/.test(d) || Number(d) === process.pid) continue;
+    try {
+      if (readFileSync(`/proc/${d}/cmdline`, 'utf8').includes(needle)) out.push(Number(d));
+    } catch {
+      /* exited meanwhile */
+    }
+  }
+  return out;
+}
+
 /** The environment of the server under test (overrides for the extra processes some tests start). */
 function serverEnv(over: Record<string, string> = {}): Record<string, string | undefined> {
   return {
@@ -55,7 +91,7 @@ function serverEnv(over: Record<string, string> = {}): Record<string, string | u
 /** Runs the built server with extra arguments/env to completion (or kills it after `timeoutMs`). */
 function runServer(args: string[], env: Record<string, string | undefined>, timeoutMs = 15_000, until?: RegExp) {
   return new Promise<{ code: number | null; out: string }>((resolve) => {
-    const p = spawn(process.execPath, [join(outDir, 'server.mjs'), ...args], { cwd: scratch, env, stdio: ['ignore', 'pipe', 'pipe'] });
+    const p = track(spawn(process.execPath, [join(outDir, 'server.mjs'), ...args], { cwd: scratch, env, stdio: ['ignore', 'pipe', 'pipe'] }));
     let out = '';
     const onData = (d: Buffer) => {
       out += d.toString();
@@ -192,11 +228,13 @@ beforeAll(async () => {
     origin = `http://localhost:${port}`;
     dataDir = join(scratch, `state-${attempt}`, 'data');
     lines.length = 0;
-    proc = spawn(process.execPath, ['--expose-gc', '--import', pathToFileURL(gcHook).href, join(outDir, 'server.mjs')], {
-      cwd: scratch,
-      env: serverEnv(),
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
+    proc = track(
+      spawn(process.execPath, ['--expose-gc', '--import', pathToFileURL(gcHook).href, join(outDir, 'server.mjs')], {
+        cwd: scratch,
+        env: serverEnv(),
+        stdio: ['ignore', 'pipe', 'pipe'],
+      }),
+    );
     const p = proc;
     exitCode = new Promise((r) => p.on('exit', (code) => r(code)));
     let buf = '';
@@ -216,11 +254,17 @@ beforeAll(async () => {
   }
 }, 180_000);
 
-afterAll(() => {
+afterAll(async () => {
   for (const s of sockets) s.ws.terminate();
-  if (proc && proc.exitCode === null) proc.kill('SIGKILL');
+  const live = [...children];
+  killAll();
+  await Promise.all(live.map((p) => (p.exitCode !== null || p.signalCode !== null ? null : new Promise((r) => p.once('exit', r)))));
+  // Nothing started from this scratch directory may outlive the suite.
+  const leftovers = scratch ? processesMentioning(scratch) : [];
+  for (const pid of leftovers) process.kill(pid, 'SIGKILL');
   if (scratch) rmSync(scratch, { recursive: true, force: true });
-});
+  expect(leftovers, 'server processes left running by the bundle tests').toEqual([]);
+}, 30_000);
 
 describe('the built server (dist/server.mjs)', () => {
   it('bundles migrations next to the server and prints a startup summary without secrets', () => {
@@ -455,11 +499,13 @@ describe('the built server (dist/server.mjs)', () => {
     const dir = join(scratch, 'secret', 'data');
     const p2 = await freePort(port + 1);
     const o2 = `http://localhost:${p2}`;
-    const child = spawn(process.execPath, [join(outDir, 'server.mjs')], {
-      cwd: scratch,
-      env: serverEnv({ DATA_DIR: dir, PORT: String(p2), APP_ORIGIN: o2, TRUSTED_PROXY_HEADER: 'cf-connecting-ip', TRUSTED_PROXY_SECRET: SECRET }),
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
+    const child = track(
+      spawn(process.execPath, [join(outDir, 'server.mjs')], {
+        cwd: scratch,
+        env: serverEnv({ DATA_DIR: dir, PORT: String(p2), APP_ORIGIN: o2, TRUSTED_PROXY_HEADER: 'cf-connecting-ip', TRUSTED_PROXY_SECRET: SECRET }),
+        stdio: ['ignore', 'pipe', 'pipe'],
+      }),
+    );
     let out = '';
     child.stdout.on('data', (d) => (out += d));
     child.stderr.on('data', (d) => (out += d));
