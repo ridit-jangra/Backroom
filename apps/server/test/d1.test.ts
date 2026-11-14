@@ -44,6 +44,9 @@ describe('statement results', () => {
     expect(await db.prepare('SELECT 1 AS a, 2 AS b').first('b')).toBe(2);
     expect(await db.prepare('SELECT 1 AS a WHERE 0').first('a')).toBeNull();
     await expect(db.prepare('SELECT 1 AS a').first('zz')).rejects.toThrow('D1_COLUMN_NOTFOUND: Column not found (zz)');
+    for (const proto of ['toString', 'constructor', '__proto__', 'hasOwnProperty']) {
+      await expect(db.prepare('SELECT 1 AS a').first(proto), proto).rejects.toThrow(`D1_COLUMN_NOTFOUND: Column not found (${proto})`);
+    }
   });
 
   it('raw() returns arrays, with the column names first when asked (also without rows)', async () => {
@@ -202,6 +205,28 @@ describe('batch', () => {
     expect(await db.prepare('SELECT COUNT(*) AS n FROM t').first('n')).toBe(0);
     await db.batch([db.prepare("INSERT INTO t (body) VALUES ('z')")]);
     expect(await db.prepare('SELECT COUNT(*) AS n FROM t').first('n')).toBe(1);
+  });
+
+  it('if ROLLBACK itself fails, the original error is the one thrown', async () => {
+    await setupTable();
+    const sqlite = db.sqlite;
+    const realExec = sqlite.exec.bind(sqlite);
+    sqlite.exec = (sql: string) => {
+      if (sql === 'ROLLBACK') throw new Error('rollback failed');
+      return realExec(sql);
+    };
+    try {
+      await expect(db.batch([db.prepare("INSERT INTO t (body) VALUES ('a')"), db.prepare('INSERT INTO nosuch VALUES (1)')])).rejects.toThrow(
+        'D1_ERROR: no such table: nosuch: SQLITE_ERROR',
+      );
+    } finally {
+      delete (sqlite as { exec?: unknown }).exec;
+    }
+    if (sqlite.isTransaction) sqlite.exec('ROLLBACK');
+  });
+
+  it('values beyond 2^53 are refused rather than returned lossily (documented difference)', async () => {
+    await expect(db.prepare('SELECT 9007199254740993 AS x').first()).rejects.toThrow(/too large/);
   });
 
   it('concurrent batches never interleave', async () => {

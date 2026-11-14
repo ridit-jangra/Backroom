@@ -20,6 +20,17 @@ import type { D1Database, D1ExecResult, D1Meta, D1PreparedStatement, D1Result } 
  *
  * node:sqlite is synchronous: every call runs to completion inside one microtask, so statements and batches from
  * concurrent requests never interleave.
+ *
+ * Deliberate differences from real D1 (all checked against the app's call sites):
+ * - `meta.changes` counts the statement's own rows only; D1 also counts the rows FTS triggers write (files and
+ *   messages). Every app check is `=== 0`, `> 0` or `=== 1` on tables without triggers, so results are identical.
+ * - INTEGERs beyond 2^53 make the read throw (node:sqlite ERR_OUT_OF_RANGE) instead of returning a lossy number.
+ *   The app cannot write such values (zod caps integers; ids are text).
+ * - Booleans bind as the numbers 1/0 (D1 accepts them too, also as REAL).
+ * - Commits are synchronous and fsynced (synchronous=FULL), so a write blocks the event loop for its duration: one
+ *   writer, no parallelism. Fine for one team's chat; heavy batch jobs would stall requests.
+ * - Not runnable with Node's built-in type stripping (it uses TypeScript parameter properties and imports worker
+ *   sources by relative path); the server is bundled with esbuild.
  */
 
 export const D1_MAX_BOUND_PARAMETERS = 100;
@@ -168,7 +179,7 @@ class NodeD1PreparedStatement {
     const row = this.owner.firstRow(this);
     if (row === null) return null;
     if (colName === undefined) return row as T;
-    if (!(colName in row)) throw new D1Error(`D1_COLUMN_NOTFOUND: Column not found (${colName})`);
+    if (!Object.hasOwn(row, colName)) throw new D1Error(`D1_COLUMN_NOTFOUND: Column not found (${colName})`);
     return row[colName] as T;
   }
 
@@ -298,7 +309,13 @@ class NodeD1 {
       for (const s of statements) out.push(this.executeRaw(s));
       this.sqlite.exec('COMMIT');
     } catch (e) {
-      if (began && this.sqlite.isTransaction) this.sqlite.exec('ROLLBACK');
+      if (began && this.sqlite.isTransaction) {
+        try {
+          this.sqlite.exec('ROLLBACK');
+        } catch {
+          // The original error is what the caller needs; a failed rollback must not replace it.
+        }
+      }
       throw d1Error(e);
     }
     return out;

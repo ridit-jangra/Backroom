@@ -1,8 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { createReadStream } from 'node:fs';
-import { type FileHandle, mkdir, open, readFile, rename, unlink } from 'node:fs/promises';
+import * as fs from 'node:fs';
+import { type FileHandle, mkdir, open, readFile, readdir, rename, rm, stat, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
-import { Readable } from 'node:stream';
+import { promisify } from 'node:util';
 import { FILE_KEY_RE } from '../../../worker/src/files/store';
 import { type BlobRange, type BlobStore, type KvBlobMeta, etagMatches } from '../../../worker/src/lib/blobs';
 
@@ -21,8 +21,14 @@ import { type BlobRange, type BlobStore, type KvBlobMeta, etagMatches } from '..
  * overwrite that fails keeps the previous blob). After the commit the previous data file is removed. A crash
  * between the two renames leaves only an unreferenced data file, never a broken blob.
  *
- * Reads open the data file before returning, so a blob that is overwritten or deleted while being streamed keeps
- * serving the bytes the reader started with. Ranges are native (positioned reads of `offset`..`offset+length-1`).
+ * Reads are lazy: `get()` only reads the sidecar and stats the data file. The returned body opens the data file on
+ * its first pull and closes it at the end, on error and on cancel, so a body that is never read (Hono's HEAD
+ * handling drops it) holds nothing open. That matters: on Node 26 an open FileHandle that gets garbage collected is
+ * an uncaught ERR_INVALID_STATE that kills the process. Data files are immutable and named by etag, so a reader
+ * that has started keeps its bytes across an overwrite or delete (positioned reads on its own handle after the
+ * unlink); a blob replaced before the first read errors the stream instead. Ranges are native positioned reads.
+ *
+ * `sweepBlobDir` removes crash leftovers at startup.
  */
 
 /** A custom emoji image key (`emojiKey` in emoji/custom.ts). File keys use FILE_KEY_RE from files/store.ts. */
@@ -106,27 +112,25 @@ export function createFsBlobStore(dir: string): BlobStore {
     return meta;
   }
 
-  /** The sidecar and an open handle on its data file, or null when the blob does not exist (or is inconsistent). */
-  async function openBlob(key: string): Promise<{ meta: KvBlobMeta; fh: FileHandle } | null> {
+  /** The sidecar of an existing, consistent blob (data file present with the recorded size), or null. */
+  async function statBlob(key: string): Promise<KvBlobMeta | null> {
     const p = paths(key);
-    // A put or delete can replace the files between reading the sidecar and opening the data file; retry then.
+    // Retry: a put or delete can replace the files between reading the sidecar and looking at the data file.
     for (let attempt = 0; attempt < 3; attempt++) {
       const meta = await readMeta(p.sidecar);
       if (meta === null) return null;
-      let fh: FileHandle;
+      let size: number;
       try {
-        fh = await open(p.data(meta.etag), 'r');
+        size = (await stat(p.data(meta.etag))).size;
       } catch (e) {
         if (isMissing(e)) continue;
         throw e;
       }
-      const { size } = await fh.stat();
       if (size !== meta.size) {
-        await fh.close();
         console.error(JSON.stringify({ level: 'error', code: 'blob_size_mismatch' }));
         return null;
       }
-      return { meta, fh };
+      return meta;
     }
     return null;
   }
@@ -177,13 +181,6 @@ export function createFsBlobStore(dir: string): BlobStore {
     }
   }
 
-  async function fsyncDir(path: string): Promise<void> {
-    const fh = await open(path, 'r').catch(() => null);
-    if (!fh) return;
-    await fh.sync().catch(() => {});
-    await fh.close();
-  }
-
   async function removeBlob(key: string): Promise<void> {
     const p = paths(key);
     const meta = await readMeta(p.sidecar);
@@ -227,7 +224,14 @@ export function createFsBlobStore(dir: string): BlobStore {
             throw e;
           }
           tmpMeta = null;
-          await fsyncDir(p.shardDir);
+          try {
+            await fsyncDir(p.shardDir);
+          } catch (e) {
+            // Not durable: undo the commit so a failed put still leaves nothing (sweepBlobDir collects the rest).
+            await unlink(p.sidecar).catch(() => {});
+            await unlink(p.data(etag)).catch(() => {});
+            throw e;
+          }
           if (previous && previous.etag !== etag) await unlink(p.data(previous.etag)).catch(() => {});
         } finally {
           await unlink(tmpData).catch(() => {}); // no-op once renamed
@@ -240,21 +244,14 @@ export function createFsBlobStore(dir: string): BlobStore {
       assertKey(key);
       const { range, ifNoneMatch } = opts;
       if (range) checkRange(range);
-      const blob = await openBlob(key);
-      if (!blob) return null;
-      const { meta, fh } = blob;
+      const meta = await statBlob(key);
+      if (!meta) return null;
       const base = { size: meta.size, etag: `"${meta.etag}"`, contentType: meta.contentType };
-      if (ifNoneMatch !== undefined && etagMatches(ifNoneMatch, meta.etag)) {
-        await fh.close();
-        return { ...base, body: null, notModified: true };
-      }
-      if (range && range.offset + range.length > meta.size) {
-        await fh.close();
-        throw new RangeError('range outside the blob');
-      }
+      if (ifNoneMatch !== undefined && etagMatches(ifNoneMatch, meta.etag)) return { ...base, body: null, notModified: true };
+      if (range && range.offset + range.length > meta.size) throw new RangeError('range outside the blob');
       const start = range?.offset ?? 0;
       const length = range?.length ?? meta.size;
-      const body = fileStream(fh, start, length);
+      const body = lazyFileStream(paths(key).data(meta.etag), meta.size, start, length);
       return { ...base, body, notModified: false, ...(range ? { range } : {}) };
     },
 
@@ -274,9 +271,15 @@ export function createFsBlobStore(dir: string): BlobStore {
 
     async peek(key, length) {
       assertKey(key);
-      const blob = await openBlob(key);
-      if (!blob) return null;
-      const { meta, fh } = blob;
+      const meta = await statBlob(key);
+      if (!meta) return null;
+      let fh: FileHandle;
+      try {
+        fh = await open(paths(key).data(meta.etag), 'r');
+      } catch (e) {
+        if (isMissing(e)) return null; // replaced or deleted since the stat
+        throw e;
+      }
       try {
         const want = Math.max(0, Math.min(length, meta.size));
         const out = new Uint8Array(want);
@@ -300,12 +303,160 @@ function checkRange(r: BlobRange): void {
   }
 }
 
-/** Exactly `length` bytes from `start` as a web stream; closes the handle when done or cancelled. */
-function fileStream(fh: FileHandle, start: number, length: number): ReadableStream<Uint8Array> {
-  if (length === 0) {
-    void fh.close();
-    return new ReadableStream({ start: (c) => c.close() });
+const READ_CHUNK = 64 * 1024;
+
+/** fs errors carry the file path, which contains the key: replace them with a path-free message. */
+function streamError(e: unknown): Error {
+  const code = (e as NodeJS.ErrnoException | null)?.code;
+  if (code === 'ENOENT') return new Error('blob no longer exists');
+  if (code !== undefined) return new Error(`blob read failed (${code})`);
+  return e instanceof Error ? e : new Error('blob read failed');
+}
+
+const openFd = promisify(fs.open);
+const readFd = promisify(fs.read);
+const fstatFd = promisify(fs.fstat);
+
+/**
+ * Closes the fd of a body stream that was dropped while open (read part way, never cancelled). A raw fd, not a
+ * FileHandle: a collected FileHandle is a fatal ERR_INVALID_STATE on Node 26, a collected number is just closed here.
+ */
+const abandoned = new FinalizationRegistry<number>((fd) => fs.close(fd, () => {}));
+
+/**
+ * Exactly `length` bytes of the file at `path` from `start`, as a web stream that opens the file on its first pull
+ * (highWaterMark 0: nothing is read ahead) and closes it on end, error and cancel, or when the stream is garbage
+ * collected while open. A file that is gone, or whose size is no longer `size`, errors the stream; so does a file
+ * that ends early.
+ */
+function lazyFileStream(path: string, size: number, start: number, length: number): ReadableStream<Uint8Array> {
+  let fd: number | null = null;
+  let pos = start;
+  let left = length;
+  let cancelled = false;
+  const token = {};
+  const close = () => {
+    const f = fd;
+    fd = null;
+    if (f !== null) {
+      abandoned.unregister(token);
+      fs.close(f, () => {});
+    }
+  };
+  const stream = new ReadableStream<Uint8Array>(
+    {
+      async pull(ctrl) {
+        try {
+          if (left === 0) {
+            close();
+            ctrl.close();
+            return;
+          }
+          if (fd === null) {
+            const f = await openFd(path, 'r');
+            if (cancelled) {
+              fs.close(f, () => {});
+              return;
+            }
+            fd = f;
+            abandoned.register(stream, f, token);
+            if ((await fstatFd(f)).size !== size) throw new Error('blob changed before it was read');
+          }
+          const buf = new Uint8Array(Math.min(left, READ_CHUNK));
+          const { bytesRead } = await readFd(fd, buf, 0, buf.byteLength, pos);
+          if (cancelled) {
+            close();
+            return;
+          }
+          if (bytesRead === 0) throw new Error('blob ended before the requested range');
+          pos += bytesRead;
+          left -= bytesRead;
+          ctrl.enqueue(buf.subarray(0, bytesRead));
+          if (left === 0) {
+            close();
+            ctrl.close();
+          }
+        } catch (e) {
+          close();
+          ctrl.error(streamError(e));
+        }
+      },
+      cancel() {
+        cancelled = true;
+        close();
+      },
+    },
+    { highWaterMark: 0 },
+  );
+  return stream;
+}
+
+/** errno codes meaning "this filesystem cannot fsync a directory": skipped. Every other failure is real. */
+const DIR_SYNC_UNSUPPORTED = new Set(['EINVAL', 'EISDIR', 'ENOTSUP', 'EOPNOTSUPP']);
+
+/** fsyncs a directory so the renames in it are durable; `openFn` is injectable for tests. */
+export async function fsyncDir(path: string, openFn: (p: string, flags: string) => Promise<FileHandle> = open): Promise<void> {
+  const fh = await openFn(path, 'r');
+  try {
+    await fh.sync();
+  } catch (e) {
+    if (!DIR_SYNC_UNSUPPORTED.has((e as NodeJS.ErrnoException).code ?? '')) throw e;
+  } finally {
+    await fh.close();
   }
-  const node = createReadStream('', { fd: fh, start, end: start + length - 1, autoClose: true });
-  return Readable.toWeb(node) as unknown as ReadableStream<Uint8Array>;
+}
+
+const SHARD_RE = /^[0-9a-f]{2}$/;
+const DATA_RE = /^(.+)\.([0-9a-f]{32})$/;
+const SIDECAR_RE = /^(.+)\.json$/;
+
+/**
+ * Startup cleanup (call before serving, with no puts running): removes `.tmp` leftovers, data files that no sidecar
+ * names (a put that crashed between its renames, or an overwrite that died before removing the old file), and
+ * sidecars whose data file is missing or which are unreadable. Returns the counts; never logs names (they hold keys).
+ */
+export async function sweepBlobDir(dir: string): Promise<{ tempFiles: number; orphanData: number; danglingSidecars: number }> {
+  const out = { tempFiles: 0, orphanData: 0, danglingSidecars: 0 };
+  let top: string[];
+  try {
+    top = await readdir(dir);
+  } catch (e) {
+    if (isMissing(e)) return out;
+    throw e;
+  }
+  if (top.includes('.tmp')) {
+    for (const f of await readdir(join(dir, '.tmp'))) {
+      await rm(join(dir, '.tmp', f), { recursive: true, force: true });
+      out.tempFiles++;
+    }
+  }
+  for (const shard of top) {
+    if (!SHARD_RE.test(shard)) continue;
+    const shardDir = join(dir, shard);
+    const names = await readdir(shardDir);
+    const present = new Set(names);
+    const live = new Set<string>();
+    for (const n of names) {
+      const m = SIDECAR_RE.exec(n);
+      if (!m) continue;
+      let meta: unknown = null;
+      try {
+        meta = JSON.parse(await readFile(join(shardDir, n), 'utf8'));
+      } catch {
+        meta = null;
+      }
+      const dataName = isMeta(meta) ? `${m[1]}.${meta.etag}` : null;
+      if (dataName && present.has(dataName)) live.add(dataName);
+      else {
+        await unlink(join(shardDir, n)).catch(() => {});
+        out.danglingSidecars++;
+      }
+    }
+    for (const n of names) {
+      if (SIDECAR_RE.test(n) || !DATA_RE.test(n) || live.has(n)) continue;
+      await unlink(join(shardDir, n)).catch(() => {});
+      out.orphanData++;
+    }
+  }
+  return out;
 }

@@ -2,6 +2,7 @@ import { CUSTOM_EMOJI_LIMIT, FILES_QUOTA_BYTES, ORPHAN_TTL_MS, parseSearchQuery,
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 // Real application code from the worker, run unchanged on the Node adapters.
 import { memberSummariesFor } from '../../worker/src/channels/channels';
+import { acceptLogin } from '../../worker/src/workspace/membership';
 import { createCustomEmoji, emojiKey } from '../../worker/src/emoji/custom';
 import type { Env } from '../../worker/src/env';
 import { cleanupOrphans } from '../../worker/src/files/cleanup';
@@ -178,6 +179,31 @@ describe('conditional writes with RETURNING', () => {
     expect(await store.get(fileKey(WS, ids[1]!))).toBeNull();
     expect(await store.peek(fileKey(WS, ids[2]!), 3)).toEqual(bytes(3));
     expect(await db.prepare('SELECT id FROM files').raw()).toEqual([[ids[2]]]);
+  });
+});
+
+describe('invite use counting through changes() inside a batch (workspace/membership.ts)', () => {
+  const INVITE = '01JINVITE00000000000000000';
+  beforeEach(async () => {
+    await db
+      .prepare('INSERT INTO invites (id, workspace_id, token_hash, created_by, expires_at, max_uses, uses) VALUES (?, ?, ?, ?, ?, 5, 0)')
+      .bind(INVITE, WS, 'th', ALICE, NOW + 86_400_000)
+      .run();
+  });
+  const uses = () => db.prepare('SELECT uses FROM invites WHERE id = ?').bind(INVITE).first('uses');
+
+  it('a new member (INSERT … ON CONFLICT DO NOTHING inserted a row) consumes one use', async () => {
+    await acceptLogin(db, 'new@test.dev', INVITE, undefined, NOW);
+    expect(await uses()).toBe(1);
+    // An existing member logging in again with the invite does not consume another.
+    await acceptLogin(db, 'new@test.dev', INVITE, undefined, NOW + 1);
+    expect(await uses()).toBe(1);
+  });
+
+  it('two racing logins for one email: the conflicting insert (changes() = 0) does not bump uses', async () => {
+    await Promise.all([acceptLogin(db, 'race@test.dev', INVITE, undefined, NOW), acceptLogin(db, 'race@test.dev', INVITE, undefined, NOW)]);
+    expect(await uses()).toBe(1);
+    expect(await db.prepare("SELECT COUNT(*) AS n FROM workspace_members wm JOIN users u ON u.id = wm.user_id WHERE u.email = 'race@test.dev'").first('n')).toBe(1);
   });
 });
 

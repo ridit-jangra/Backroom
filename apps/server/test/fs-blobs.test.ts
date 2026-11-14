@@ -1,11 +1,11 @@
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { emojiKey } from '../../worker/src/emoji/custom';
 import { FILE_KEY_RE, fileKey, thumbKeyOf } from '../../worker/src/files/store';
 import { type BlobStore, getBlobStore } from '../../worker/src/lib/blobs';
 import { parseRange } from '../../worker/src/files/http';
-import { EMOJI_KEY_RE, createFsBlobStore } from '../src/platform/fs-blobs';
+import { EMOJI_KEY_RE, createFsBlobStore, fsyncDir, sweepBlobDir } from '../src/platform/fs-blobs';
 import { bytes, chunked, failingAfter, read, storedFiles, tempDir } from './helpers';
 
 const WS = '01JCLUBHACK0000000000000WS';
@@ -162,13 +162,7 @@ describe('fs blob store: atomic writes', () => {
     expect(await read(after.body)).toEqual(bytes(20));
   });
 
-  it('a reader that already opened a blob keeps reading it while it is overwritten or deleted', async () => {
-    await store.put(KEY, bytes(4000), { size: 4000 });
-    const got = (await store.get(KEY))!;
-    await store.put(KEY, bytes(10), { size: 10 });
-    await store.delete(KEY);
-    expect(await read(got.body)).toEqual(bytes(4000));
-  });
+  // The reader-across-overwrite guarantee (with positioned reads after the unlink) is in fs-blobs-fd.test.ts.
 
   it('overwriting removes the previous data file; only one data file and one sidecar exist per key', async () => {
     for (let i = 0; i < 3; i++) await store.put(KEY, bytes(10 + i), { size: 10 + i });
@@ -267,5 +261,69 @@ describe('getBlobStore', () => {
     expect(getBlobStore({ BLOB_STORE: injected, BLOBS: fake, BUCKET: fake })).toBe(injected);
     expect(getBlobStore({ BLOB_STORE: injected } as never)).toBe(injected);
     expect(() => getBlobStore({} as never)).toThrow('no blob storage binding');
+  });
+});
+
+describe('fsyncDir', () => {
+  const fakeOpen = (syncError: NodeJS.ErrnoException | null, closed: string[]) =>
+    (async () => ({
+      sync: async () => {
+        if (syncError) throw syncError;
+      },
+      close: async () => {
+        closed.push('closed');
+      },
+    })) as unknown as Parameters<typeof fsyncDir>[1];
+  const errno = (code: string) => Object.assign(new Error(code), { code });
+
+  it('propagates a real sync failure (EIO) and still closes the directory', async () => {
+    const closed: string[] = [];
+    await expect(fsyncDir('/x', fakeOpen(errno('EIO'), closed))).rejects.toThrow('EIO');
+    expect(closed).toEqual(['closed']);
+  });
+
+  it('ignores only "directory fsync unsupported" errors (EINVAL, EISDIR, ENOTSUP, EOPNOTSUPP)', async () => {
+    for (const code of ['EINVAL', 'EISDIR', 'ENOTSUP', 'EOPNOTSUPP']) {
+      const closed: string[] = [];
+      await fsyncDir('/x', fakeOpen(errno(code), closed));
+      expect(closed, code).toEqual(['closed']);
+    }
+  });
+
+  it('works on a real directory', async () => {
+    await fsyncDir(dir);
+  });
+});
+
+describe('sweepBlobDir (startup cleanup)', () => {
+  it('removes temp leftovers, data files no sidecar names, and sidecars whose data file is missing; keeps live blobs', async () => {
+    const live = key(1);
+    const lost = key(2);
+    await store.put(live, bytes(5), { size: 5 });
+    await store.put(lost, bytes(6), { size: 6 });
+    // Crash-style leftovers:
+    mkdirSync(join(dir, '.tmp'), { recursive: true });
+    writeFileSync(join(dir, '.tmp', 'abc.tmp'), 'half an upload');
+    writeFileSync(join(dir, '.tmp', 'def.tmp'), '');
+    const files = storedFiles(dir);
+    const liveSidecar = files.find((f) => f.endsWith('.json') && f.includes(live.slice(-26)))!;
+    const liveData = files.find((f) => !f.endsWith('.json') && f.includes(live.slice(-26)))!;
+    // 1. a data file from a put that crashed between its two renames (no sidecar names it)
+    writeFileSync(join(dir, `${liveData.slice(0, -32)}${'f'.repeat(32)}`), bytes(9));
+    // 2. a sidecar whose data file is gone
+    const lostData = files.find((f) => !f.endsWith('.json') && f.includes(lost.slice(-26)))!;
+    const { unlinkSync } = await import('node:fs');
+    unlinkSync(join(dir, lostData));
+
+    expect(await sweepBlobDir(dir)).toEqual({ tempFiles: 2, orphanData: 1, danglingSidecars: 1 });
+    expect(storedFiles(dir)).toEqual([liveSidecar, liveData].sort());
+    expect(await store.peek(live, 5)).toEqual(bytes(5));
+    expect(await store.get(lost)).toBeNull();
+    // Idempotent.
+    expect(await sweepBlobDir(dir)).toEqual({ tempFiles: 0, orphanData: 0, danglingSidecars: 0 });
+  });
+
+  it('a missing directory sweeps nothing', async () => {
+    expect(await sweepBlobDir(join(dir, 'nope'))).toEqual({ tempFiles: 0, orphanData: 0, danglingSidecars: 0 });
   });
 });
