@@ -3,9 +3,13 @@
  * aliases.ts). The pair and its upgrade response belong to the upgrade the bridge is serving (ws-bridge.ts).
  */
 import type * as WorkerPlatform from '../../../worker/src/hub/platform';
-import { pairForCurrentUpgrade, responseForCurrentUpgrade } from './ws-bridge';
+import { ApiError } from '../../../worker/src/lib/errors';
+import { pairForCurrentUpgrade, responseForCurrentUpgrade, servingUpgrade } from './ws-bridge';
 
 export function newWebSocketPair(): { 0: WebSocket; 1: WebSocket } {
+  // A plain HTTP request that merely carries `Upgrade: websocket` (no handshake, so it never reached the
+  // bridge) gets the route's own clean 426 instead of an internal error.
+  if (!servingUpgrade()) throw new ApiError(426, 'upgrade_required', 'WebSocket upgrade required.');
   return pairForCurrentUpgrade();
 }
 

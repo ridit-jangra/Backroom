@@ -35,6 +35,11 @@ type UpgradeContext = { token: string; servers: NodeWebSocket[]; chosen: NodeWeb
 
 const upgrades = new AsyncLocalStorage<UpgradeContext>();
 
+/** True while the bridge is serving an upgrade request (in its async context). */
+export function servingUpgrade(): boolean {
+  return upgrades.getStore() !== undefined;
+}
+
 /** `new WebSocketPair()` on Node: only valid while the bridge is serving an upgrade request. */
 export function pairForCurrentUpgrade(): { 0: WebSocket; 1: WebSocket } {
   const ctx = upgrades.getStore();

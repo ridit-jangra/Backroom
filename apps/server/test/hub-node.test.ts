@@ -89,6 +89,7 @@ let origin: string;
 let port: number;
 const clients: Client[] = [];
 /** Test hook: replaces the app's response before the bridge sees it. */
+let app: ReturnType<typeof createApp>;
 let wrapResponse: ((r: Response) => Response) | null = null;
 const tokens = new Map<string, string>();
 
@@ -139,7 +140,7 @@ beforeEach(async () => {
   await applyMigrations(db, MIGRATIONS_DIR);
   hubs = new DurableObjectNamespaceShim(WorkspaceHub, () => env);
   bridge = createUpgradeBridge();
-  const app = createApp({ mailer: { sendMagicLink: async () => {} }, now: Date.now });
+  app = createApp({ mailer: { sendMagicLink: async () => {} }, now: Date.now });
   const ctx = { waitUntil() {}, passThroughOnException() {}, props: {} } as unknown as ExecutionContext;
   server = createServer((_req, res) => res.writeHead(404).end());
   server.on('upgrade', (req, socket, head) => {
@@ -307,6 +308,21 @@ describe('WorkspaceHub on the Node shim over real WebSockets', () => {
     for await (const chunk of res) body += chunk;
     expect(JSON.parse(body)).toEqual({ error: { code: 'unauthenticated', message: 'Sign in required.' } });
     expect(hubs.has(WS_ID)).toBe(false);
+  });
+
+  it('a plain request to /ws with an Upgrade header but no real upgrade gets a clean 426, not a 500', async () => {
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const ctx = { waitUntil() {}, passThroughOnException() {}, props: {} } as unknown as ExecutionContext;
+    const res = await app.fetch(
+      new Request(`${origin}/ws?workspace=clubhack`, {
+        headers: { Upgrade: 'websocket', Cookie: `backroom_session=${tokens.get(ALICE)}`, Origin: origin },
+      }),
+      env,
+      ctx,
+    );
+    expect(res.status).toBe(426);
+    expect(await res.json()).toEqual({ error: { code: 'upgrade_required', message: 'WebSocket upgrade required.' } });
+    expect(logged).not.toHaveBeenCalled();
   });
 
   it('a malformed handshake is refused with 400 before the app runs', async () => {
