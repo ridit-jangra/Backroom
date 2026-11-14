@@ -409,6 +409,28 @@ describe('the built server (dist/server.mjs)', () => {
     expect(existsSync(join(empty, 'backroom.sqlite'))).toBe(false);
   });
 
+  it('--backup while the server runs: a verified snapshot and the blobs, no lock taken, nothing secret printed', { timeout: 30_000 }, async () => {
+    const dest = join(scratch, 'backups');
+    // Only DATA_DIR: a backup needs neither APP_ORIGIN nor OWNER_EMAIL. RESEND_API_KEY must never be printed.
+    const b = await runServer(['--backup', dest, '--keep', '2'], { PATH: process.env.PATH, TZ: 'UTC', DATA_DIR: dataDir, RESEND_API_KEY: 're_never_print_me' });
+    expect(b.code, b.out).toBe(0);
+    expect(b.out).toContain('"code":"backup_done"');
+    const snaps = readdirSync(dest).filter((n) => /^backroom-\d{8}T\d{6}Z\.sqlite$/.test(n));
+    expect(snaps).toHaveLength(1);
+    const db = new DatabaseSync(join(dest, snaps[0]!), { readOnly: true });
+    try {
+      expect(db.prepare('PRAGMA integrity_check').get()).toEqual({ integrity_check: 'ok' });
+      expect((db.prepare('SELECT COUNT(*) AS n FROM messages').get() as { n: number }).n).toBeGreaterThanOrEqual(1);
+    } finally {
+      db.close();
+    }
+    expect(readdirSync(join(dest, 'blobs')).length).toBeGreaterThan(0);
+    expect(existsSync(join(dest, 'blobs', '.tmp'))).toBe(false);
+    expect(existsSync(join(dataDir, 'server.lock'))).toBe(true);
+    expect((await req('/health')).status).toBe(200);
+    for (const s of [BODY, OWNER, 're_never_print_me', cookie.split('=')[1]!, 'ws~']) expect(b.out).not.toContain(s);
+  });
+
   it('a second server on the same DATA_DIR refuses to start, and the first keeps serving', { timeout: 30_000 }, async () => {
     const second = await runServer([], serverEnv({ PORT: String(await freePort(port + 1)) }));
     expect(second.code).toBe(1);

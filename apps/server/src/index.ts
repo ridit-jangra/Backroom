@@ -4,6 +4,8 @@
  *
  * Startup: config → data dir → sweep blob leftovers → open DB → migrations → FixedLengthStream polyfill → blob
  * store, hub namespace, env → listen → one-line summary. `--maintenance` runs the daily maintenance once and exits.
+ * `--backup <dir> [--keep n]` snapshots the database and mirrors the blobs (src/backup.ts) and exits; like
+ * `--maintenance` it is safe next to a running server (no server.lock, no sweep, no migrations).
  */
 import { chmodSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -13,6 +15,7 @@ import { pickMailer } from '../../worker/src/auth/mailer';
 import type { Env } from '../../worker/src/env';
 import worker, { WorkspaceHub } from '../../worker/src/index';
 import { fileMaxBytes } from '../../worker/src/lib/quota';
+import { BackupError, runBackup } from './backup';
 import { ConfigError, type ServerConfig, loadConfig } from './config';
 import { runMaintenance, startDailySchedule, withMaintenanceLock } from './cron';
 import { createHttpServer, createRequestHandler } from './http';
@@ -70,8 +73,20 @@ function checkpointAndClose(db: NodeD1Database): void {
   db.close();
 }
 
+async function backupAndExit(config: ServerConfig, outDir: string): Promise<never> {
+  try {
+    await runBackup({ dataDir: config.dataDir, outDir, keep: config.keep, log });
+  } catch (e) {
+    log('error', 'backup_failed', errorFields(e));
+    // BackupError messages hold only paths and SQLite error codes.
+    fail(`backup failed: ${e instanceof BackupError ? e.message : 'unexpected error'}`);
+  }
+  process.exit(0);
+}
+
 async function main(): Promise<void> {
   const config = readConfig();
+  if (config.backupDir !== null) await backupAndExit(config, config.backupDir);
 
   const blobDir = join(config.dataDir, 'blobs');
   const dbPath = join(config.dataDir, 'backroom.sqlite');

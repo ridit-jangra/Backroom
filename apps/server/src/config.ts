@@ -10,6 +10,7 @@ export const DEFAULT_EMAIL_FROM = 'Backroom <noreply@localhost>';
 export const DEFAULT_DATA_DIR = './data';
 export const DEFAULT_KEEP_ALIVE_TIMEOUT_MS = 190_000;
 export const DEFAULT_MAX_CONNECTIONS = 2048;
+export const DEFAULT_BACKUP_KEEP = 7;
 
 export interface ServerConfig {
   appOrigin: string;
@@ -35,6 +36,10 @@ export interface ServerConfig {
   maxConnections: number;
   /** `--maintenance`: run the daily maintenance once and exit. */
   maintenance: boolean;
+  /** `--backup <dir>`: snapshot the database and mirror the blobs into this directory, then exit. */
+  backupDir: string | null;
+  /** `--keep <n>`: snapshots kept by `--backup` (default 7). */
+  keep: number;
 }
 
 export class ConfigError extends Error {
@@ -87,32 +92,62 @@ export function loadConfig(
 
   let maintenance = false;
   let webDistFlag: string | null = null;
+  let backupFlag: string | null = null;
+  let keepFlag: string | null = null;
+  /** `--name value` or `--name=value`; returns the index of the last argument consumed, or -1 if `a` is not `name`. */
+  const valueFlag = (i: number, name: string, what: string, set: (v: string) => void): number => {
+    const a = argv[i]!;
+    if (a === name) {
+      const v = argv[i + 1];
+      if (v === undefined || v.startsWith('--')) problems.push(`${name} needs ${what}`);
+      else set(v);
+      return i + 1;
+    }
+    if (a.startsWith(`${name}=`)) {
+      const v = a.slice(name.length + 1);
+      if (!v) problems.push(`${name} needs ${what}`);
+      else set(v);
+      return i;
+    }
+    return -1;
+  };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;
-    if (a === '--maintenance') maintenance = true;
-    else if (a === '--web-dist') {
-      const v = argv[i + 1];
-      if (v === undefined || v.startsWith('--')) problems.push('--web-dist needs a path');
-      else webDistFlag = v;
-      i++;
-    } else if (a.startsWith('--web-dist=')) {
-      const v = a.slice('--web-dist='.length);
-      if (!v) problems.push('--web-dist needs a path');
-      else webDistFlag = v;
-    } else problems.push(`unknown argument: ${a}`);
+    if (a === '--maintenance') {
+      maintenance = true;
+      continue;
+    }
+    let j = valueFlag(i, '--web-dist', 'a path', (v) => (webDistFlag = v));
+    if (j < 0) j = valueFlag(i, '--backup', 'a directory', (v) => (backupFlag = v));
+    if (j < 0) j = valueFlag(i, '--keep', 'a number', (v) => (keepFlag = v));
+    if (j < 0) problems.push(`unknown argument: ${a}`);
+    else i = j;
+  }
+  const backup = backupFlag !== null || argv.some((a) => a === '--backup' || a.startsWith('--backup='));
+  if (backup && maintenance) problems.push('--backup and --maintenance cannot be combined');
+  if (keepFlag !== null && !backup) problems.push('--keep only applies to --backup');
+  let keep = DEFAULT_BACKUP_KEEP;
+  if (keepFlag !== null) {
+    const n = /^\d+$/.test(keepFlag) ? Number(keepFlag) : NaN;
+    if (!Number.isInteger(n) || n < 1 || n > 10_000) problems.push(`--keep must be a whole number from 1 to 10000 (got "${keepFlag}")`);
+    else keep = n;
   }
 
   let appOrigin = '';
   const rawOrigin = env.APP_ORIGIN ?? '';
-  if (!rawOrigin) problems.push('APP_ORIGIN is required: the public URL people open, e.g. https://chat.example.com');
-  else {
+  // A backup only reads DATA_DIR: the public URL and the owner are not needed (but are still checked when given).
+  if (!rawOrigin) {
+    if (!backup) problems.push('APP_ORIGIN is required: the public URL people open, e.g. https://chat.example.com');
+  } else {
     const o = originOf(rawOrigin);
     if (!o) problems.push(`APP_ORIGIN must be an http or https URL with no path, query or fragment, e.g. https://chat.example.com (got "${rawOrigin}")`);
     else appOrigin = o;
   }
 
   const ownerEmail = (env.OWNER_EMAIL ?? '').trim();
-  if (!ownerEmail) problems.push('OWNER_EMAIL is required: the email address of the workspace owner');
+  if (!ownerEmail) {
+    if (!backup) problems.push('OWNER_EMAIL is required: the email address of the workspace owner');
+  }
   else if (!EMAIL_RE.test(ownerEmail)) problems.push('OWNER_EMAIL must be an email address');
 
   const key = env.RESEND_API_KEY ?? '';
@@ -179,6 +214,8 @@ export function loadConfig(
       keepAliveTimeoutMs,
       maxConnections,
       maintenance,
+      backupDir: backupFlag !== null ? resolve(opts.cwd, backupFlag) : null,
+      keep,
     },
     warnings,
   };

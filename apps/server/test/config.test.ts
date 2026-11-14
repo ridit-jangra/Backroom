@@ -35,6 +35,8 @@ describe('loadConfig', () => {
       maxConnections: 2048,
       trustedProxySecret: null,
       maintenance: false,
+      backupDir: null,
+      keep: 7,
     });
     expect(DEFAULT_EMAIL_FROM).toBe('Backroom <noreply@localhost>');
     expect(warnings).toEqual([]);
@@ -156,6 +158,23 @@ describe('loadConfig', () => {
     expect(msg).toMatch(/APP_ORIGIN is required/);
     expect(msg).toMatch(/OWNER_EMAIL is required/);
     expect(msg).toMatch(/PORT must be/);
+  });
+
+  it('--backup <dir> and --keep <n>: a backup needs only DATA_DIR (no APP_ORIGIN or OWNER_EMAIL)', () => {
+    const { config } = load({ DATA_DIR: '/var/lib/backroom' }, ['--backup', 'backups']);
+    expect(config.backupDir).toBe('/srv/backroom/backups');
+    expect(config.keep).toBe(7);
+    expect(config.dataDir).toBe('/var/lib/backroom');
+    expect(load({}, ['--backup=/b', '--keep', '3']).config).toMatchObject({ backupDir: '/b', keep: 3 });
+    expect(load({}, ['--backup', '/b', '--keep=30']).config.keep).toBe(30);
+    expect(load(base, ['--backup', '/b']).config.appOrigin).toBe('https://chat.example.com');
+    expect(errorOf({}, ['--backup'])).toMatch(/--backup needs a directory/);
+    expect(errorOf({}, ['--backup', '/b', '--keep', '0'])).toMatch(/--keep must be a whole number from 1 to 10000/);
+    expect(errorOf({}, ['--backup', '/b', '--keep', 'x'])).toMatch(/--keep must be/);
+    expect(errorOf(base, ['--keep', '3'])).toMatch(/--keep only applies to --backup/);
+    expect(errorOf(base, ['--backup', '/b', '--maintenance'])).toMatch(/--backup and --maintenance cannot be combined/);
+    // Without --backup the server still requires both.
+    expect(errorOf({})).toMatch(/APP_ORIGIN is required/);
   });
 
   it('flags: --maintenance, --web-dist (wins over WEB_DIST), unknown flags refused', () => {
