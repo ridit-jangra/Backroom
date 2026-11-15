@@ -372,6 +372,8 @@ export function reduce(state: ChatState, e: ChatEvent, now: number): ChatState {
       for (const c of e.added) customEmoji[c.name] = c;
       return { ...state, customEmoji };
     }
+    // Task 2 applies these counters; until then the frame is ignored.
+    case 'thread.counts':
     case 'notify':
     case 'pong':
       return state;

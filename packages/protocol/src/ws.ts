@@ -82,6 +82,15 @@ export const HubFrame = z.union([
   z.object({ t: z.literal('message.new'), message: MessageSchema }),
   z.object({ t: z.literal('message.edit'), message: MessageSchema }),
   z.object({ t: z.literal('message.delete'), message: MessageSchema }),
+  // Counters of a thread starter after one of its replies was deleted. A new frame type, not extra fields on
+  // `message.delete`: a client that predates it fails the HubFrame union and drops the frame (see parseHubFrame).
+  z.object({
+    t: z.literal('thread.counts'),
+    channelId: z.string(),
+    parentId: z.string(),
+    replyCount: z.number().int().min(0),
+    lastReplyAt: z.number().int().nullable(),
+  }),
   z.object({ t: z.literal('read'), channelId: z.string(), seq: z.number().int() }),
   z.object({ t: z.literal('channel.update'), channel: ChannelInfoSchema }),
   z.object({ t: z.literal('membership'), action: z.literal('added'), channel: ChannelSummarySchema }),

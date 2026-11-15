@@ -194,6 +194,7 @@ async function findDuplicate(
 type Target = {
   id: string;
   userId: string;
+  parentId: string | null;
   deletedAt: number | null;
   channelId: string;
   kind: ChannelKind;
@@ -206,7 +207,7 @@ type Target = {
 async function loadTarget(db: D1Database, messageId: string, userId: string): Promise<Target | null> {
   const row = await db
     .prepare(
-      `SELECT m.id AS id, m.user_id AS userId, m.deleted_at AS deletedAt, m.channel_id AS channelId, c.kind AS kind,
+      `SELECT m.id AS id, m.user_id AS userId, m.parent_id AS parentId, m.deleted_at AS deletedAt, m.channel_id AS channelId, c.kind AS kind,
               c.archived_at AS archivedAt,
               (SELECT 1 FROM channel_members cm WHERE cm.channel_id = c.id AND cm.user_id = ?2) AS isMember,
               (SELECT wm.role FROM workspace_members wm
@@ -238,20 +239,87 @@ export async function editMessage(
   return message ? { ok: true, message } : { ok: false, code: 'failed' };
 }
 
+/** A cascade broadcasts at most this many reply tombstones; the rest are deleted too (see `deleteMessage`). */
+export const MAX_CASCADE_FRAMES = 500;
+
+export type ParentCounts = { id: string; channelId: string; replyCount: number; lastReplyAt: number | null };
+
+export type DeleteResult = {
+  ok: true;
+  message: Message;
+  /** Starter deletion: tombstones of the replies deleted by THIS call (seq order, first MAX_CASCADE_FRAMES). */
+  replies: Message[];
+  /** Starter deletion: how many replies this call deleted (can exceed `replies.length`). */
+  repliesTotal: number;
+  /** Reply deletion: the parent's counters after the delete; null for a starter. */
+  parent: ParentCounts | null;
+};
+
+/**
+ * Deletes a message. A thread starter takes all its live replies with it (set-based, so a reply that landed
+ * after the permission check is swept too); a reply recomputes its parent's counters from the live replies.
+ * Everything is one batch, so counters cannot drift from the rows.
+ */
 export async function deleteMessage(
   db: D1Database,
   input: { messageId: string; userId: string; now: number },
-): Promise<{ ok: true; message: Message } | Fail> {
+): Promise<DeleteResult | Fail> {
   const t = await loadTarget(db, input.messageId, input.userId);
   if (!t) return { ok: false, code: 'not_found' };
   if (t.userId !== input.userId && t.role !== 'owner' && t.role !== 'admin') return { ok: false, code: 'forbidden' };
   if (t.archivedAt !== null) return { ok: false, code: 'archived' };
-  await db.batch([
+  const own: D1PreparedStatement[] = [
     db.prepare("UPDATE messages SET deleted_at = ?, body = '' WHERE id = ? AND deleted_at IS NULL").bind(input.now, input.messageId),
     db.prepare('DELETE FROM mentions WHERE message_id = ?').bind(input.messageId),
     db.prepare('DELETE FROM reactions WHERE message_id = ?').bind(input.messageId),
     db.prepare('DELETE FROM message_files WHERE message_id = ?').bind(input.messageId),
+  ];
+  if (t.parentId !== null) {
+    // Recompute, never decrement: a retried or racing delete cannot push the count off.
+    await db.batch([
+      ...own,
+      db
+        .prepare(
+          `UPDATE messages SET
+             reply_count = (SELECT COUNT(*) FROM messages WHERE parent_id = ?1 AND deleted_at IS NULL),
+             last_reply_at = (SELECT MAX(created_at) FROM messages WHERE parent_id = ?1 AND deleted_at IS NULL)
+           WHERE id = ?1`,
+        )
+        .bind(t.parentId),
+    ]);
+    const [message, parent] = await Promise.all([
+      loadMessage(db, input.messageId),
+      db
+        .prepare('SELECT id, channel_id AS channelId, reply_count AS replyCount, last_reply_at AS lastReplyAt FROM messages WHERE id = ?')
+        .bind(t.parentId)
+        .first<ParentCounts>(),
+    ]);
+    return message ? { ok: true, message, replies: [], repliesTotal: 0, parent } : { ok: false, code: 'failed' };
+  }
+  const inThread = '(SELECT id FROM messages WHERE parent_id = ?)';
+  const results = await db.batch([
+    ...own,
+    // RETURNING, not meta.changes: messages has FTS triggers, whose rows D1 counts and the Node adapter does not.
+    db
+      .prepare("UPDATE messages SET deleted_at = ?, body = '' WHERE parent_id = ? AND deleted_at IS NULL RETURNING id")
+      .bind(input.now, input.messageId),
+    db.prepare(`DELETE FROM mentions WHERE message_id IN ${inThread}`).bind(input.messageId),
+    db.prepare(`DELETE FROM reactions WHERE message_id IN ${inThread}`).bind(input.messageId),
+    db.prepare(`DELETE FROM message_files WHERE message_id IN ${inThread}`).bind(input.messageId),
+    db.prepare('UPDATE messages SET reply_count = 0, last_reply_at = NULL WHERE id = ?').bind(input.messageId),
   ]);
+  const swept = (results[own.length]!.results as { id: string }[]).map((r) => r.id);
   const message = await loadMessage(db, input.messageId);
-  return message ? { ok: true, message } : { ok: false, code: 'failed' };
+  if (!message) return { ok: false, code: 'failed' };
+  let replies: Message[] = [];
+  if (swept.length > 0) {
+    const { results: rows } = await db
+      .prepare(
+        `SELECT ${MESSAGE_COLUMNS} FROM messages WHERE id IN (SELECT value FROM json_each(?)) ORDER BY seq ASC LIMIT ${MAX_CASCADE_FRAMES}`,
+      )
+      .bind(JSON.stringify(swept))
+      .all<Record<string, unknown>>();
+    replies = rows.map(rowToMessage);
+  }
+  return { ok: true, message, replies, repliesTotal: swept.length, parent: null };
 }

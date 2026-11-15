@@ -18,7 +18,7 @@ import type { Env } from '../env';
 import { catchUp } from '../messaging/read';
 import { notifyTargets } from '../messaging/notify';
 import { MESSAGE_COLUMNS, rowToMessage } from '../messaging/rows';
-import { deleteMessage, editMessage, sendMessage, type Audience } from '../messaging/store';
+import { deleteMessage, editMessage, sendMessage, type Audience, type DeleteResult } from '../messaging/store';
 import { toggleReaction } from '../emoji/reactions';
 import { withFiles } from '../files/attach';
 import { addChannel, channelsOf, getAtt, removeChannel, setAtt } from './attachment';
@@ -83,6 +83,26 @@ type SendOutcome = { messageId: string } | { code: NackCode };
 type ReadState = { lastWriteAt: number; lastSeq: number; pending?: number; timer?: number };
 
 type SendFrame = Extract<ClientFrame, { t: 'send' }>;
+/**
+ * Frames for a delete: the tombstone, one more per reply a starter's deletion swept (so open tabs drop them and
+ * `seq` stays continuous; capped at MAX_CASCADE_FRAMES, clients also drop a deleted starter's replies), and for a
+ * deleted reply the starter's recomputed counters.
+ */
+function deleteFrames(d: DeleteResult): HubFrame[] {
+  const frames: HubFrame[] = [{ t: 'message.delete', message: d.message }];
+  for (const m of d.replies) frames.push({ t: 'message.delete', message: m });
+  if (d.parent) {
+    frames.push({
+      t: 'thread.counts',
+      channelId: d.parent.channelId,
+      parentId: d.parent.id,
+      replyCount: d.parent.replyCount,
+      lastReplyAt: d.parent.lastReplyAt,
+    });
+  }
+  return frames;
+}
+
 type EditFrame = Extract<ClientFrame, { t: 'edit' }>;
 type DeleteFrame = Extract<ClientFrame, { t: 'delete' }>;
 type ReactFrame = Extract<ClientFrame, { t: 'react' }>;
@@ -454,7 +474,7 @@ export class WorkspaceHub extends DurableObject<Env> {
     if (!row) return nack('not_found');
     const channelId = row.channelId;
     await this.enqueue(channelId, async () => {
-      let r: Awaited<ReturnType<typeof editMessage>>;
+      let r: Awaited<ReturnType<typeof editMessage>> | Awaited<ReturnType<typeof deleteMessage>>;
       try {
         r =
           f.t === 'edit'
@@ -465,12 +485,14 @@ export class WorkspaceHub extends DurableObject<Env> {
         return nack('failed');
       }
       if (!r.ok) return nack(r.code);
-      const frame: HubFrame =
-        f.t === 'edit' ? { t: 'message.edit', message: r.message } : { t: 'message.delete', message: r.message };
+      const frames: HubFrame[] =
+        f.t === 'edit'
+          ? [{ t: 'message.edit', message: r.message }]
+          : deleteFrames(r as DeleteResult);
       const targets = this.socketsForChannel(channelId);
       // A public channel's author may edit after leaving it; they still see their own change.
       if (!targets.includes(ws)) targets.push(ws);
-      for (const s of targets) this.sendFrame(s, frame);
+      for (const frame of frames) for (const s of targets) this.sendFrame(s, frame);
     });
   }
 

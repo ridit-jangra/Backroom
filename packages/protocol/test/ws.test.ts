@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { parseClientFrame, parseHubFrame } from '../src';
+import { z } from 'zod';
+import { HubFrame, parseClientFrame, parseHubFrame } from '../src';
 
 const GN = '01JCLUBHACK0000000000000GN';
 
@@ -83,5 +84,25 @@ describe('files on the wire', () => {
     const r = parseHubFrame(JSON.stringify({ t: 'message.new', message: { ...old, files: [f] } }));
     expect(r && r.t === 'message.new' && r.message.files).toEqual([f]);
     expect(parseHubFrame(JSON.stringify({ t: 'message.new', message: old }))).not.toBeNull();
+  });
+});
+
+describe('thread.counts frame', () => {
+  const counts = { t: 'thread.counts', channelId: GN, parentId: GN, replyCount: 2, lastReplyAt: 5 };
+  it('parses with a null or numeric lastReplyAt and rejects bad shapes', () => {
+    expect(parseHubFrame(JSON.stringify(counts))).toEqual(counts);
+    expect(parseHubFrame(JSON.stringify({ ...counts, lastReplyAt: null }))).toEqual({ ...counts, lastReplyAt: null });
+    expect(parseHubFrame(JSON.stringify({ ...counts, replyCount: -1 }))).toBeNull();
+    expect(parseHubFrame(JSON.stringify({ ...counts, replyCount: 1.5 }))).toBeNull();
+    expect(parseHubFrame(JSON.stringify({ ...counts, parentId: undefined }))).toBeNull();
+  });
+  it('an old client (the union without it) ignores the frame without throwing, as it does any unknown type', () => {
+    const oldUnion = z.union(HubFrame.options.filter((o) => (o.shape.t as { value: string }).value !== 'thread.counts') as never);
+    expect(oldUnion.safeParse(counts).success).toBe(false);
+    expect(parseHubFrame(JSON.stringify({ t: 'some.future.frame', x: 1 }))).toBeNull();
+    // Unknown extra fields on an existing frame are stripped, not rejected.
+    const msg = { id: GN, channelId: GN, seq: 1, userId: GN, parentId: null, body: '', alsoInChannel: false,
+      createdAt: 1, editedAt: null, deletedAt: 2, replyCount: 0, lastReplyAt: null };
+    expect(parseHubFrame(JSON.stringify({ t: 'message.delete', message: msg, extra: 1 }))).toEqual({ t: 'message.delete', message: msg });
   });
 });
