@@ -62,6 +62,8 @@ export function ThreadPanel({
   const [also, setAlso] = useState(false);
   const alsoId = useId();
   const replies = liveMessages(page?.replies ?? []);
+  // Live-only is safe: the server's unread math ignores deleted replies and thread read pointers
+  // only move forward (`last_read_reply_seq < ?`), so a lower seq than a deleted reply's is harmless.
   const lastSeq = replies.reduce((a, m) => Math.max(a, m.seq), 0);
   const marked = useRef(0);
   const parentId = page?.parent.id;
@@ -77,7 +79,7 @@ export function ThreadPanel({
 
   const lastReply = replies[replies.length - 1];
   return (
-    <aside className="thread" aria-label="Thread">
+    <aside className="thread" aria-label="Thread" tabIndex={-1}>
       <div className="thread-head">
         <strong>Thread</strong>
         <button type="button" onClick={onClose}>

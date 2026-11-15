@@ -189,3 +189,62 @@ describe('reconnect', () => {
     expect(s.lastSeen).toEqual(before.lastSeen);
   });
 });
+
+describe('fix round 1: stale REST pages versus live counters', () => {
+  const live = (s: ChatState) => s.windows.c1!.messages.find((m) => m.id === 'm1')!;
+
+  it('a page fetched BEFORE a thread.counts frame does not overwrite the fresher counters (lower)', () => {
+    let s = withThread();
+    const start = s.countClock; // fetch starts here
+    s = run(s, { t: 'thread.counts', channelId: 'c1', parentId: 'm1', replyCount: 1, lastReplyAt: 1002 });
+    s = run(s, { t: 'local.history', channelId: 'c1', page: { messages: [{ ...starter, body: 'fresh body' }, r1], hasMore: false }, mode: 'replace', startMark: start });
+    expect(live(s).replyCount).toBe(1);
+    expect(live(s).lastReplyAt).toBe(1002);
+    expect(live(s).body).toBe('fresh body'); // every other field still comes from the page
+    s = run(s, { t: 'local.thread', page: { parent: starter, replies: [r1, r2, r3] }, startMark: start });
+    expect(s.threads.m1!.parent.replyCount).toBe(1);
+    expect(s.windows.c1!.messages.find((m) => m.id === 'm1')!.replyCount).toBe(1);
+  });
+
+  it('a page fetched before a live reply bump does not lower the bumped count (higher)', () => {
+    let s = withThread();
+    const start = s.countClock;
+    s = run(s, { t: 'message.new', message: msg(9, { parentId: 'm1', createdAt: 5000 }) });
+    expect(live(s).replyCount).toBe(4);
+    s = run(s, { t: 'local.history', channelId: 'c1', page: { messages: [starter], hasMore: false }, mode: 'replace', startMark: start });
+    expect(live(s).replyCount).toBe(4);
+    expect(live(s).lastReplyAt).toBe(5000);
+  });
+
+  it('a page fetched AFTER the frame is authoritative', () => {
+    let s = withThread();
+    s = run(s, { t: 'thread.counts', channelId: 'c1', parentId: 'm1', replyCount: 1, lastReplyAt: 1002 });
+    const start = s.countClock;
+    s = run(s, { t: 'local.history', channelId: 'c1', page: { messages: [{ ...starter, replyCount: 5 }], hasMore: false }, mode: 'replace', startMark: start });
+    expect(live(s).replyCount).toBe(5);
+  });
+
+  it('pages without a startMark behave as before', () => {
+    let s = withThread();
+    s = run(s, { t: 'thread.counts', channelId: 'c1', parentId: 'm1', replyCount: 1, lastReplyAt: 1002 });
+    s = run(s, { t: 'local.history', channelId: 'c1', page: { messages: [{ ...starter, replyCount: 5 }], hasMore: false }, mode: 'replace' });
+    expect(live(s).replyCount).toBe(5);
+  });
+});
+
+describe('fix round 1: deletedParents across a reconnect', () => {
+  it('is cleared on reconnect (except the open thread) and a still-deleted starter is dropped again by the refetch', () => {
+    let s = withThread();
+    s = run(s, { t: 'message.delete', message: tomb(msg(30, { id: 'other' })) });
+    s = run(s, { t: 'message.delete', message: tomb(starter) });
+    expect(Object.keys(s.deletedParents).sort()).toEqual(['m1', 'other']);
+    s = run(s, { t: 'local.openThread', parentId: 'm1' });
+    s = run(s, { t: 'local.reconnected' });
+    expect(Object.keys(s.deletedParents)).toEqual(['m1']);
+    s = run(s, { t: 'local.openThread', parentId: null });
+    s = run(s, { t: 'local.reconnected' });
+    expect(s.deletedParents).toEqual({});
+    s = run(s, { t: 'local.history', channelId: 'c1', page: { messages: [tomb(starter), msg(5, { parentId: 'm1', alsoInChannel: true })], hasMore: false }, mode: 'replace' });
+    expect(s.deletedParents.m1).toBe(true);
+  });
+});

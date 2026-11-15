@@ -13,6 +13,27 @@ import { MessageFiles } from '../files/MessageFiles';
 
 export const GROUP_WINDOW_MS = 300_000;
 const BOTTOM_SLACK_PX = 40;
+const FOCUSABLE = 'button:not(:disabled), a[href], textarea:not(:disabled), input:not(:disabled), [tabindex]:not([tabindex="-1"])';
+
+/**
+ * Where focus should go when the row `li` is about to disappear: the first control of the next row, else
+ * of the previous row, else (thread panel) its composer, else the log / panel itself. A deleted thread
+ * starter closes the panel, so its row falls back to the channel log.
+ */
+function focusTargetAfterRemoval(li: HTMLElement): HTMLElement | null {
+  const list = li.parentElement;
+  const channelLog = () => document.querySelector<HTMLElement>('[role="log"]');
+  if (list?.classList.contains('thread-parent')) return channelLog();
+  for (const dir of ['nextElementSibling', 'previousElementSibling'] as const) {
+    for (let sib = li[dir]; sib; sib = sib[dir]) {
+      const el = sib.querySelector<HTMLElement>(FOCUSABLE);
+      if (el) return el;
+    }
+  }
+  const panel = li.closest<HTMLElement>('aside.thread');
+  if (panel) return panel.querySelector<HTMLElement>('textarea') ?? panel;
+  return li.closest<HTMLElement>('[role="log"]') ?? channelLog();
+}
 
 function formatTime(ts: number): string {
   return new Date(ts).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
@@ -78,7 +99,27 @@ export function MessageRow({
   }, [connected]);
   const [sendError, setSendError] = useState(false);
   const offlineTitle = connected ? undefined : 'Reconnecting…';
-  const [confirming, setConfirming] = useState(false);
+  /** Reply count frozen when the confirmation opens; null while it is closed. */
+  const [confirming, setConfirming] = useState<number | null>(null);
+  const focusAfter = useRef<HTMLElement | null>(null);
+  const [focusTick, setFocusTick] = useState(0);
+  // After a confirmed delete the row is about to vanish: hand focus to a live neighbour. Runs after the
+  // Dialog's own cleanup (which refocuses its opener, the button that is about to disappear).
+  useEffect(() => {
+    const el = focusAfter.current;
+    if (el === null || confirming !== null) return;
+    focusAfter.current = null;
+    if (el.isConnected) el.focus();
+  }, [confirming, focusTick]);
+  function deleteConfirmed() {
+    const target = rowRef.current ? focusTargetAfterRemoval(rowRef.current) : null;
+    const ok = onDelete(message.id);
+    setSendError(!ok);
+    if (ok && target) {
+      focusAfter.current = target;
+      setFocusTick((n) => n + 1);
+    }
+  }
   const cancelRef = useRef<HTMLButtonElement>(null);
   const confirmId = useId();
   const own = message.userId === me;
@@ -200,8 +241,8 @@ export function MessageRow({
               title={offlineTitle}
               onClick={() => {
                 // A starter with live replies takes them along: say so in a real dialog first.
-                if (message.parentId === null && replies > 0) setConfirming(true);
-                else if (globalThis.confirm('Delete this message?')) setSendError(!onDelete(message.id));
+                if (message.parentId === null && replies > 0) setConfirming(replies);
+                else if (globalThis.confirm('Delete this message?')) deleteConfirmed();
               }}
             >
               Delete
@@ -209,21 +250,21 @@ export function MessageRow({
           )}
         </div>
       )}
-      {confirming && (
-        <Dialog title="Delete this message?" onClose={() => setConfirming(false)} describedBy={confirmId} initialFocus={cancelRef}>
+      {confirming !== null && (
+        <Dialog title="Delete this message?" onClose={() => setConfirming(null)} describedBy={confirmId} initialFocus={cancelRef}>
           <p id={confirmId}>
-            This also deletes {replies} {replies === 1 ? 'reply' : 'replies'}. This can't be undone.
+            This also deletes {confirming} {confirming === 1 ? 'reply' : 'replies'}. This can't be undone.
           </p>
           <div className="dialog-actions">
-            <button ref={cancelRef} type="button" onClick={() => setConfirming(false)}>
+            <button ref={cancelRef} type="button" onClick={() => setConfirming(null)}>
               Cancel
             </button>
             <button
               type="button"
               className="danger"
               onClick={() => {
-                setConfirming(false);
-                setSendError(!onDelete(message.id));
+                setConfirming(null);
+                deleteConfirmed();
               }}
             >
               Delete
@@ -338,6 +379,7 @@ export function MessageList({
       className="messages"
       role="log"
       aria-label="Messages"
+      tabIndex={-1}
       onScroll={(e) => {
         const el = e.currentTarget;
         atBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < BOTTOM_SLACK_PX;

@@ -2,6 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { Message } from '@backroom/protocol';
+import { render } from '@testing-library/react';
+import { App } from '../src/App';
 import { FakeWebSocket } from './fakeSocket';
 import { ANN, BOB, GEN, ME, RAND, boot, frames, id, msg, stubApi } from './harness';
 
@@ -251,7 +253,7 @@ describe('reconnect convergence', () => {
     live = false; // deleted while offline: catch-up (seq > lastSeen) will never carry these tombstones
     await waitFor(() => expect(FakeWebSocket.instances.length).toBe(2), { timeout: 3000 });
     act(() => FakeWebSocket.instances[1]!.open());
-    await waitFor(() => expect(within(log()).queryByText('will be deleted')).toBeNull());
+    await waitFor(() => expect(within(log()).queryByText('will be deleted')).toBeNull(), { timeout: 4000 });
     expect(within(log()).queryByText('starter text')).toBeNull();
     expect(within(log()).queryByText('also text')).toBeNull();
     expect(within(log()).getByText('survivor')).toBeTruthy();
@@ -259,7 +261,7 @@ describe('reconnect convergence', () => {
     expect(screen.queryByText(/was deleted/i)).toBeNull();
   });
 
-  it('the first connect does not refetch the open channel again; a reconnect does, once', async () => {
+  it('every connect refetches the open channel once, including the first', async () => {
     const counts = { n: 0 };
     stubApi({
       route: (url) => {
@@ -268,13 +270,33 @@ describe('reconnect convergence', () => {
       },
     });
     const ws = await boot();
-    await waitFor(() => expect(counts.n).toBeGreaterThanOrEqual(1));
+    // open() plus the first connect's refetch
+    await waitFor(() => expect(counts.n).toBe(2));
     await new Promise((r) => setTimeout(r, 50));
-    expect(counts.n).toBe(1);
+    expect(counts.n).toBe(2);
     act(() => ws.serverClose(1006));
     await waitFor(() => expect(FakeWebSocket.instances.length).toBe(2), { timeout: 3000 });
     act(() => FakeWebSocket.instances[1]!.open());
-    await waitFor(() => expect(counts.n).toBe(2));
+    // throttled to at most one per 2 s: the reconnect's refetch is a trailing call
+    await waitFor(() => expect(counts.n).toBe(3), { timeout: 4000 });
+  });
+
+  it('a first connect that is delayed still removes what was deleted meanwhile', async () => {
+    const gone = msg(1, { body: 'deleted meanwhile' });
+    const keep = msg(2, { body: 'kept' });
+    let live = true;
+    stubApi({
+      route: (url) =>
+        url.startsWith(`/channels/${GEN}/messages`) ? { messages: live ? [gone, keep] : [tomb(gone), keep], hasMore: false } : undefined,
+    });
+    history.replaceState(null, '', `/client/clubhack/${GEN}`);
+    render(<App />);
+    await waitFor(() => expect(FakeWebSocket.instances.length).toBe(1));
+    await within(log()).findByText('deleted meanwhile');
+    live = false; // the hub was unreachable; the socket opens only now
+    act(() => FakeWebSocket.instances[0]!.open());
+    await waitFor(() => expect(within(log()).queryByText('deleted meanwhile')).toBeNull());
+    expect(within(log()).getByText('kept')).toBeTruthy();
   });
 
   it('a non-open channel is not shown from its stale cache after a reconnect; it is refetched when opened', async () => {
@@ -304,5 +326,141 @@ describe('reconnect convergence', () => {
     await userEvent.click(screen.getByRole('button', { name: '#random' }));
     await waitFor(() => expect(randFetches).toBe(2));
     expect(screen.queryByText('stale in random')).toBeNull();
+  });
+});
+
+describe('fix round 1: focus, frozen count, jumps', () => {
+  const mine = (seq: number, body: string, o: Partial<Message> = {}) => msg(seq, { body, userId: ME, ...o });
+
+  it('after a confirmed native delete focus moves to the next row, else the previous row, else the log', async () => {
+    vi.spyOn(globalThis, 'confirm').mockReturnValue(true);
+    const a = mine(1, 'row a');
+    const b = mine(2, 'row b');
+    const c = mine(3, 'row c');
+    stubApi({ pages: { [GEN]: { messages: [a, b, c], hasMore: false } } });
+    const ws = await boot();
+    const rowOf = (t: string) => within(log()).getByText(t).closest('li')!;
+    await within(log()).findByText('row c');
+    await userEvent.click(within(rowOf('row b')).getByRole('button', { name: 'Delete' }));
+    expect(rowOf('row c').contains(document.activeElement)).toBe(true);
+    act(() => ws.receive({ t: 'message.delete', message: tomb(b) }));
+    await userEvent.click(within(rowOf('row c')).getByRole('button', { name: 'Delete' }));
+    expect(rowOf('row a').contains(document.activeElement)).toBe(true);
+    act(() => ws.receive({ t: 'message.delete', message: tomb(c) }));
+    await userEvent.click(within(rowOf('row a')).getByRole('button', { name: 'Delete' }));
+    expect(document.activeElement).toBe(log());
+    act(() => ws.receive({ t: 'message.delete', message: tomb(a) }));
+    expect(document.activeElement).toBe(log());
+  });
+
+  it('after a confirmed dialog delete focus lands on a neighbour, not the vanished button', async () => {
+    const starter = mine(2, 'starter', { replyCount: 1 });
+    stubApi({ pages: { [GEN]: { messages: [msg(1, { body: 'before' }), starter, msg(3, { body: 'after' })], hasMore: false } } });
+    const ws = await boot();
+    const row = (await within(log()).findByText('starter')).closest('li')!;
+    await userEvent.click(within(row).getByRole('button', { name: 'Delete' }));
+    await userEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Delete' }));
+    const after = within(log()).getByText('after').closest('li')!;
+    expect(after.contains(document.activeElement)).toBe(true);
+    act(() => ws.receive({ t: 'message.delete', message: tomb(starter) }));
+    expect(after.contains(document.activeElement)).toBe(true);
+  });
+
+  it('cancelling still returns focus to the opener', async () => {
+    const starter = mine(1, 'starter', { replyCount: 1 });
+    stubApi({ pages: { [GEN]: { messages: [starter, msg(2, { body: 'after' })], hasMore: false } } });
+    await boot();
+    const del = within((await within(log()).findByText('starter')).closest('li')!).getByRole('button', { name: 'Delete' });
+    await userEvent.click(del);
+    await userEvent.keyboard('{Escape}');
+    expect(document.activeElement).toBe(del);
+  });
+
+  it('in the thread panel focus stays inside the panel after a reply is deleted', async () => {
+    vi.spyOn(globalThis, 'confirm').mockReturnValue(true);
+    const starter = msg(1, { body: 'tp starter', replyCount: 2 });
+    const r1 = mine(2, 'tp one', { parentId: starter.id });
+    const r2 = mine(3, 'tp two', { parentId: starter.id });
+    stubApi({
+      pages: { [GEN]: { messages: [starter], hasMore: false } },
+      route: (url) => (url === `/messages/${starter.id}/thread` ? { parent: starter, replies: [r1, r2] } : undefined),
+    });
+    const ws = await boot();
+    await userEvent.click(await screen.findByRole('button', { name: '2 replies' }));
+    const panel = await screen.findByRole('complementary', { name: 'Thread' });
+    await within(panel).findByText('tp two');
+    const rowOf = (t: string) => within(panel).getByText(t).closest('li')!;
+    await userEvent.click(within(rowOf('tp one')).getByRole('button', { name: 'Delete' }));
+    expect(rowOf('tp two').contains(document.activeElement)).toBe(true);
+    act(() => ws.receive({ t: 'message.delete', message: tomb(r1) }));
+    await userEvent.click(within(rowOf('tp two')).getByRole('button', { name: 'Delete' }));
+    expect(panel.contains(document.activeElement)).toBe(true);
+    expect(document.activeElement).toBe(within(panel).getByPlaceholderText('Reply…'));
+  });
+
+  it('deleting the starter from the thread panel moves focus to the channel log', async () => {
+    const starter = mine(1, 'my starter', { replyCount: 1 });
+    const r1 = msg(2, { body: 'tp one', parentId: starter.id });
+    stubApi({
+      pages: { [GEN]: { messages: [starter], hasMore: false } },
+      route: (url) => (url === `/messages/${starter.id}/thread` ? { parent: starter, replies: [r1] } : undefined),
+    });
+    const ws = await boot();
+    await userEvent.click(await screen.findByRole('button', { name: '1 reply' }));
+    const panel = await screen.findByRole('complementary', { name: 'Thread' });
+    await within(panel).findByText('tp one');
+    const parentRow = within(panel).getByText('my starter').closest('li')!;
+    await userEvent.click(within(parentRow).getByRole('button', { name: 'Delete' }));
+    await userEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Delete' }));
+    act(() => ws.receive({ t: 'message.delete', message: tomb(starter) }));
+    await waitFor(() => expect(screen.queryByRole('complementary', { name: 'Thread' })).toBeNull());
+    expect(document.activeElement).toBe(log());
+  });
+
+  it('the dialog count is frozen when it opens', async () => {
+    const starter = mine(1, 'starter', { replyCount: 2 });
+    stubApi({ pages: { [GEN]: { messages: [starter], hasMore: false } } });
+    const ws = await boot();
+    await userEvent.click(within((await within(log()).findByText('starter')).closest('li')!).getByRole('button', { name: 'Delete' }));
+    const dlg = await screen.findByRole('dialog');
+    act(() => ws.receive({ t: 'thread.counts', channelId: GEN, parentId: starter.id, replyCount: 0, lastReplyAt: null }));
+    expect(dlg.textContent).toContain("This also deletes 2 replies.");
+    expect(dlg.textContent).not.toContain('0 replies');
+  });
+
+  async function searchJump(hitMsg: Message, route: (u: string) => unknown, pages: Message[]) {
+    stubApi({
+      pages: { [GEN]: { messages: pages, hasMore: false } },
+      route: (url) =>
+        url.startsWith('/w/clubhack/search')
+          ? { results: [{ message: hitMsg, channel: { id: GEN, name: 'general', kind: 'public', isMember: true }, snippet: [{ text: 'stale hit', hit: true }] }], nextCursor: null }
+          : (route(url) as undefined),
+    });
+    const ws = await boot();
+    await userEvent.type(screen.getByRole('searchbox', { name: 'Search messages' }), 'stale{Enter}');
+    await userEvent.click(await screen.findByText('stale hit'));
+    return ws;
+  }
+
+  it('jumping to a deleted thread reply says it was deleted', async () => {
+    const starter = msg(1, { body: 's', replyCount: 1 });
+    const dead = msg(2, { parentId: starter.id, deletedAt: 5, body: '' });
+    const live = msg(3, { parentId: starter.id, body: 'live reply' });
+    await searchJump(dead, (u) => (u === `/messages/${starter.id}/thread` ? { parent: starter, replies: [dead, live] } : undefined), [starter]);
+    expect((await screen.findByRole('alert')).textContent).toBe('That message was deleted.');
+  });
+
+  it('jumping to a thread reply that is gone from the page says it was deleted', async () => {
+    const starter = msg(1, { body: 's', replyCount: 1 });
+    const gone = msg(2, { parentId: starter.id, body: 'x' });
+    await searchJump(gone, (u) => (u === `/messages/${starter.id}/thread` ? { parent: starter, replies: [] } : undefined), [starter]);
+    expect((await screen.findByRole('alert')).textContent).toBe('That message was deleted.');
+  });
+
+  it('jumping to an also-in-channel reply dropped by a starter cascade says deleted, not "too far back"', async () => {
+    const starter = msg(1, { body: 's', deletedAt: 5 });
+    const reply = msg(2, { parentId: starter.id, alsoInChannel: true, body: 'x' });
+    await searchJump(reply, () => undefined, [starter, msg(3, { body: 'live' })]);
+    expect((await screen.findByRole('alert')).textContent).toBe('That message was deleted.');
   });
 });

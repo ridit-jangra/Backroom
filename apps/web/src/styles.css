@@ -67,6 +67,7 @@ html { scrollbar-color: var(--rule) transparent; }
 .icon-button:hover:not(:disabled) { color: var(--ink); }
 .icon-button svg { display: block; }
 .search-panel:focus, .search-panel:focus-visible { outline: none; }
+.messages:focus, .messages:focus-visible, aside.thread:focus, aside.thread:focus-visible { outline: none; }
 .main section { padding: 1rem; color: var(--ink-muted); }
 .muted { color: var(--ink-muted); }
 .banner { margin: 0; padding: 0.4rem 1rem; background: var(--wash); color: var(--ink); border-left: 3px solid var(--ink-muted); font-size: 0.875rem; }

@@ -42,13 +42,18 @@ export type ChatState = {
   highlightNonce: number;
   /** Thread starters known to be deleted: their replies are dropped and never shown again (HD-R7). */
   deletedParents: Record<string, true>;
+  /** Monotonic local clock, bumped whenever a starter's counters change from a live source. */
+  countClock: number;
+  /** Clock value at the last live counter change per starter id (thread.counts or a live reply bump). */
+  countMarks: Record<string, number>;
 };
 
 export type ChatEvent =
   | HubFrame
   | { t: 'local.bootstrap'; bootstrap: Bootstrap }
-  | { t: 'local.history'; channelId: string; page: HistoryPage; mode: 'replace' | 'prepend' }
-  | { t: 'local.thread'; page: ThreadPage }
+  /** `startMark`: `countClock` when the fetch started; a page never overwrites counters changed live since. */
+  | { t: 'local.history'; channelId: string; page: HistoryPage; mode: 'replace' | 'prepend'; startMark?: number }
+  | { t: 'local.thread'; page: ThreadPage; startMark?: number }
   | { t: 'local.open'; channelId: string }
   | { t: 'local.openThread'; parentId: string | null }
   | { t: 'local.highlight'; messageId: string | null }
@@ -81,6 +86,8 @@ export function initialChat(me: string): ChatState {
     highlightId: null,
     highlightNonce: 0,
     deletedParents: {},
+    countClock: 0,
+    countMarks: {},
   };
 }
 
@@ -133,6 +140,24 @@ function cascadeTombstones(s: ChatState, list: Message[]): ChatState {
   return next;
 }
 
+function markCounts(s: ChatState, pid: string): ChatState {
+  const countClock = s.countClock + 1;
+  return { ...s, countClock, countMarks: { ...s.countMarks, [pid]: countClock } };
+}
+
+/** Held version of a starter, from a window or a cached thread. */
+function heldStarter(s: ChatState, m: Message): Message | undefined {
+  return s.windows[m.channelId]?.messages.find((x) => x.id === m.id) ?? s.threads[m.id]?.parent;
+}
+
+/** Keep a starter's held counters when they changed live after the fetch of `m` started. */
+function guardCounts(s: ChatState, m: Message, startMark: number | undefined): Message {
+  if (startMark === undefined || m.parentId !== null || (s.countMarks[m.id] ?? 0) <= startMark) return m;
+  const held = heldStarter(s, m);
+  if (!held || (held.replyCount === m.replyCount && held.lastReplyAt === m.lastReplyAt)) return m;
+  return { ...m, replyCount: held.replyCount, lastReplyAt: held.lastReplyAt };
+}
+
 /** thread.counts: the server's exact live counters; the only path that may lower them. */
 function applyCounts(s: ChatState, f: Extract<HubFrame, { t: 'thread.counts' }>): ChatState {
   const set = (p: Message): Message =>
@@ -142,6 +167,7 @@ function applyCounts(s: ChatState, f: Extract<HubFrame, { t: 'thread.counts' }>)
   let next = s;
   const w = s.windows[f.channelId];
   const i = w ? w.messages.findIndex((x) => x.id === f.parentId) : -1;
+  const held = i !== -1 || f.parentId in s.threads;
   if (w && i !== -1) {
     const updated = set(w.messages[i]!);
     if (updated !== w.messages[i]) {
@@ -153,7 +179,7 @@ function applyCounts(s: ChatState, f: Extract<HubFrame, { t: 'thread.counts' }>)
     const parent = set(t.parent);
     if (parent !== t.parent) next = { ...next, threads: { ...next.threads, [f.parentId]: { ...t, parent } } };
   }
-  return next;
+  return held ? markCounts(next, f.parentId) : next;
 }
 
 /** Pick between a held message and an incoming copy; a replay never reverts newer edits or deletes. */
@@ -332,7 +358,7 @@ function bumpParent(s: ChatState, reply: Message): ChatState {
   }
   const t = next.threads[pid];
   if (t) next = { ...next, threads: { ...next.threads, [pid]: { ...t, parent: bump(t.parent) } } };
-  return next;
+  return markCounts(next, pid);
 }
 
 export function reduce(state: ChatState, e: ChatEvent, now: number): ChatState {
@@ -462,14 +488,15 @@ export function reduce(state: ChatState, e: ChatEvent, now: number): ChatState {
     }
     case 'local.history': {
       const old = state.windows[e.channelId];
-      const maxSeq = e.page.messages.reduce((a, m) => Math.max(a, m.seq), 0);
+      const pageMessages = e.page.messages.map((m) => guardCounts(state, m, e.startMark));
+      const maxSeq = pageMessages.reduce((a, m) => Math.max(a, m.seq), 0);
       const messages =
         e.mode === 'replace' || !old
           ? mergeMessages(
               [],
-              [...e.page.messages, ...(old && e.mode === 'replace' ? old.messages.filter((m) => m.seq > maxSeq) : [])],
+              [...pageMessages, ...(old && e.mode === 'replace' ? old.messages.filter((m) => m.seq > maxSeq) : [])],
             )
-          : mergeMessages(old.messages, e.page.messages);
+          : mergeMessages(old.messages, pageMessages);
       return cascadeTombstones(
         {
           ...state,
@@ -480,8 +507,9 @@ export function reduce(state: ChatState, e: ChatEvent, now: number): ChatState {
     }
     case 'local.thread': {
       if (e.page.parent.deletedAt !== null) return dropThread(replaceParentInWindow(state, e.page.parent), e.page.parent.id);
-      const s = { ...state, threads: { ...state.threads, [e.page.parent.id]: e.page } };
-      return replaceParentInWindow(s, e.page.parent);
+      const page = { ...e.page, parent: guardCounts(state, e.page.parent, e.startMark) };
+      const s = { ...state, threads: { ...state.threads, [page.parent.id]: page } };
+      return replaceParentInWindow(s, page.parent);
     }
     case 'local.threadGone':
       return dropThread(state, e.parentId);
@@ -490,7 +518,9 @@ export function reduce(state: ChatState, e: ChatEvent, now: number): ChatState {
       for (const [cid, w] of Object.entries(state.windows)) if (cid === state.openChannelId) windows[cid] = w;
       const threads: Record<string, ThreadPage> = {};
       for (const [pid, t] of Object.entries(state.threads)) if (pid === state.openThreadId) threads[pid] = t;
-      return { ...state, windows, threads };
+      const deletedParents: Record<string, true> = {};
+      if (state.openThreadId && state.deletedParents[state.openThreadId]) deletedParents[state.openThreadId] = true;
+      return { ...state, windows, threads, deletedParents };
     }
     case 'local.open': {
       const c = state.channels[e.channelId];

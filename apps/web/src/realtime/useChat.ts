@@ -173,18 +173,21 @@ function startSession(
     }
   };
 
-  const loadLatest = (channelId: string) =>
-    api<HistoryPage>(historyUrl(channelId)).then(
-      (page) => dispatch({ t: 'local.history', channelId, page, mode: 'replace' }),
+  const loadLatest = (channelId: string) => {
+    const startMark = state.countClock;
+    return api<HistoryPage>(historyUrl(channelId)).then(
+      (page) => dispatch({ t: 'local.history', channelId, page, mode: 'replace', startMark }),
       fail,
     );
+  };
 
-  const loadThread = (parentId: string) =>
-    api<ThreadPage>(`/messages/${encodeURIComponent(parentId)}/thread`).then(
+  const loadThread = (parentId: string) => {
+    const startMark = state.countClock;
+    return api<ThreadPage>(`/messages/${encodeURIComponent(parentId)}/thread`).then(
       (page) => {
         if (state.openThreadId !== parentId) return;
         if (alive) reportThreadError(null);
-        dispatch({ t: 'local.thread', page });
+        dispatch({ t: 'local.thread', page, startMark });
       },
       (err) => {
         fail(err);
@@ -197,6 +200,7 @@ function startSession(
         if (alive && !isUnauthorized(err) && state.openThreadId === parentId) reportThreadError(parentId);
       },
     );
+  };
 
   const outbox = new Outbox({
     send: (f) => sendFrame(f),
@@ -217,8 +221,9 @@ function startSession(
       if (!w?.hasOlder || oldest === undefined || olderLoading.has(channelId)) return Promise.resolve();
       const run = (async () => {
         try {
+          const startMark = state.countClock;
           const page = await api<HistoryPage>(historyUrl(channelId, oldest));
-          dispatch({ t: 'local.history', channelId, page, mode: 'prepend' });
+          dispatch({ t: 'local.history', channelId, page, mode: 'prepend', startMark });
         } catch (err) {
           fail(err);
         } finally {
@@ -243,7 +248,14 @@ function startSession(
       // P4-R9: open the channel here so the route effect's open() is a no-op and the highlight survives.
       if (state.openChannelId !== channelId) actions.open(channelId);
       if (parentId !== null && !alsoInChannel) {
-        actions.openThread(parentId);
+        reportThreadError(null);
+        dispatch({ t: 'local.openThread', parentId });
+        await loadThread(parentId);
+        if (!alive || state.openThreadId !== parentId) return false;
+        const page = state.threads[parentId];
+        if (!page) return state.deletedParents[parentId] ? 'deleted' : false;
+        const reply = page.replies.find((m) => m.id === messageId);
+        if (!reply || reply.deletedAt !== null) return 'deleted';
         dispatch({ t: 'local.highlight', messageId });
         return true;
       }
@@ -267,7 +279,7 @@ function startSession(
       // The user may have switched channels while pages loaded.
       if (!alive || state.openChannelId !== channelId) return false;
       if (held()?.deletedAt != null) return 'deleted';
-      if (!has()) return false;
+      if (!has()) return parentId !== null && state.deletedParents[parentId] ? 'deleted' : false;
       dispatch({ t: 'local.highlight', messageId });
       return true;
     },
@@ -301,10 +313,7 @@ function startSession(
     if (cid) latestLoads.set(cid, loadLatest(cid));
     if (state.openThreadId) void loadThread(state.openThreadId);
   };
-  const onReconnect = () => {
-    // Catch-up is `seq > lastSeen`: a deletion of something we already hold never arrives that way.
-    // Forget every other channel's cached window now (refetched when opened) and refetch what is on screen.
-    dispatch({ t: 'local.reconnected' });
+  const refetchOnConnect = () => {
     if (refetchTimer !== null) return;
     const wait = lastRefetchAt + RECONNECT_REFETCH_MS - Date.now();
     if (wait <= 0) refetchVisible();
@@ -320,9 +329,14 @@ function startSession(
     lastActivityAt = Date.now();
     outbox.flush();
     // Edits and deletes carry no seq, so refetch counts and whatever is on screen after every (re)connect.
-    // The very first connect follows a fresh bootstrap and the open() loads, so it needs no window refetch.
+    // The open window/thread are refetched on EVERY connect, the first included: open() may have loaded them
+    // long before the socket came up, and a deletion in between is never delivered by seq catch-up.
     void loadBootstrap();
-    if (connects++ > 0) onReconnect();
+    // Catch-up is `seq > lastSeen`: a deletion of something we already hold never arrives that way. On a
+    // reconnect, forget every other channel's cached window now (refetched when opened); the first connect
+    // follows a fresh bootstrap, so nothing else can be stale.
+    if (connects++ > 0) dispatch({ t: 'local.reconnected' });
+    refetchOnConnect();
   };
 
   /** P2-R28: a user unknown to bootstrap (e.g. joined since) triggers a throttled bootstrap refetch. */
