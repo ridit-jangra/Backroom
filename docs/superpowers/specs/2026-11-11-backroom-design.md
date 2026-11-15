@@ -147,9 +147,17 @@ Rules:
   message has one, including thread replies.
 - **Threads:** replies have `parent_id`. They do not increment channel unread
   counts unless `also_in_channel = 1`. Posting or replying auto-follows.
-- **Deletes:** soft delete sets `deleted_at` and clears `body`; the row stays as
-  a "message deleted" placeholder so threads stay intact. FTS triggers remove it
-  from search.
+- **Deletes:** a deleted message is never displayed (no placeholder). Soft
+  delete keeps a tombstone row (id, channel, `seq`, `parent_id`, timestamps,
+  `deleted_at`, empty `body`) because per-channel `seq`, unread math and catch-up
+  depend on it; its content is purged in the same batch: body, mentions,
+  reactions and `message_files` links (FTS triggers remove it from search).
+  Deleting a thread starter deletes all its replies, whoever wrote them, and the
+  client asks for confirmation first ("This also deletes n replies"); a reply can
+  be deleted by its author or a workspace admin/owner. `reply_count` and
+  `last_reply_at` of the starter are recomputed from the live replies in the
+  same batch, so they stay exact. Uploaded files of deleted messages are removed
+  by the daily orphan cleanup (04:00), not immediately.
 - **Unread:** count of top-level (or `also_in_channel`) messages with
   `seq > last_read_seq`. Mention badge: `mentions` rows for the user (or
   `channel`/`here`) on messages with `seq > last_read_seq`.
@@ -178,7 +186,13 @@ fileIds?, alsoInChannel?}`, `edit{messageId, body}`, `delete{messageId}`,
 seq}` (to the same user's other sockets), `channel.update`,
 `membership{added|removed}`, `emoji.update`, `presence{userId, state}`,
 `typing{channelId, userId, parentId?}`, `notify{...}`, `catchup{...}`,
-`stale{channelId}`, `pong{}`.
+`stale{channelId}`, `pong{}`, `thread.counts{channelId, parentId, replyCount,
+lastReplyAt}` (a starter's counters after one of its replies was deleted, sent
+right after that reply's `message.delete`; a starter delete sends a
+`message.delete` per tombstone, at most 500 replies, and no counts frame, and
+clients also drop every reply of a deleted starter locally). A client that
+predates `thread.counts` ignores unknown frame types and only keeps a stale
+reply count until its next refetch.
 
 **Send path:** validate membership, body ≤ 40,000 chars, file ownership →
 `seq = last_seq + 1` → parse mentions → one D1 `batch()` (insert message,
@@ -193,9 +207,12 @@ duplicates.
 (1 s → 30 s, jitter) and "Reconnecting…" banner; on reconnect send `hello`.
 The hub replays missed *messages* by `seq` (up to 200 per channel, read from
 D1); beyond that it sends `stale` and the client refetches via REST. Edits,
-deletes and reactions carry no `seq`, so after any reconnect the client also
-refetches the latest page of the open channel/thread, and other channels
-refresh when opened. Unread/mention counts are refreshed from `bootstrap`.
+deletes and reactions carry no `seq`, and catch-up only returns messages newer
+than the client's last `seq`, so a client that was offline during a delete would
+keep the message. Therefore on every connect (the first one included) the client
+refetches the latest page of the open channel/thread over REST (REST pages are
+exact; tombstones in them replace live copies), and after a reconnect the cached
+windows of other channels are dropped and refetched when opened. Unread/mention counts are refreshed from `bootstrap`.
 
 **Presence/typing:** in-memory only. Active if any socket had `activity`
 within 10 min. Typing throttled client-side to one per 3 s, expires after 5 s.

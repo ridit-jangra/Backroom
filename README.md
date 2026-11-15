@@ -5,7 +5,7 @@ Backroom is a Slack-style team chat for small groups (a club, a class, a small t
 What it does:
 
 - Public and private channels, direct messages and group DMs
-- Threads, edits, deletes, `@name`, `@channel` and `@here` mentions
+- Threads, edits, deletes (a deleted message disappears completely, and deleting a thread starter deletes its replies after a confirmation), `@name`, `@channel` and `@here` mentions
 - Reactions with every Unicode emoji (by `:shortcode:`, with skin tones) and custom emoji, added one by one or imported from a zip
 - File uploads (picker, drag and drop or paste) with image thumbnails, inline previews and ranged downloads
 - Full-text search with filters (`in:#channel`, `from:@name`, `has:file`, `before:`/`after:` dates, quoted phrases)
