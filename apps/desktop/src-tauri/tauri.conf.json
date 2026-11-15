@@ -21,19 +21,46 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["deb", "appimage"],
+    "targets": "all",
+    "publisher": "Backroom",
     "category": "Productivity",
     "shortDescription": "Backroom team chat",
+    "longDescription": "Desktop app for Backroom, a self-hosted team chat. Asks for your server's address on first launch.",
+    "license": "MIT",
+    "licenseFile": "../../../LICENSE",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
-      "icons/icon.png"
+      "icons/icon.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
     ],
     "linux": {
       "deb": {
         "desktopTemplate": "linux/backroom.desktop.hbs"
+      },
+      "rpm": {
+        "desktopTemplate": "linux/backroom.desktop.hbs"
       }
+    },
+    "windows": {
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper",
+        "silent": true
+      },
+      "nsis": {
+        "installMode": "currentUser",
+        "languages": ["English"],
+        "displayLanguageSelector": false
+      },
+      "wix": {
+        "language": "en-US",
+        "upgradeCode": "2c8bd498-713d-4f0c-ba49-3baaceebe45b"
+      }
+    },
+    "macOS": {
+      "hardenedRuntime": false
     }
   }
 }
