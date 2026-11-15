@@ -417,6 +417,8 @@ pub fn resolve_start(stored: &Stored, build_default: Option<&str>) -> Start {
 pub enum HealthError {
     Unreachable,
     Timeout,
+    Untrusted,
+    TlsFailed,
     Redirect,
     Status,
     NotBackroom,
@@ -429,6 +431,8 @@ impl fmt::Display for HealthError {
                 "Could not reach the server. Check the address and your connection."
             }
             HealthError::Timeout => "The server did not answer within 5 seconds.",
+            HealthError::Untrusted => "The server's certificate is not trusted by this computer.",
+            HealthError::TlsFailed => "Could not set up a secure connection to the server.",
             HealthError::Redirect => {
                 "The server sent the app to another address. Enter that final address instead."
             }
@@ -458,13 +462,25 @@ pub fn health_result(status: u16, body: &[u8]) -> Result<(), HealthError> {
 /// not move the origin silently), a body cap and the User-Agent
 /// `Backroom-Desktop/<version>`. Blocking: run it off the main thread.
 pub fn check_health(origin: &ServerOrigin, timeout: Duration) -> Result<(), HealthError> {
+    use ureq::tls::{RootCerts, TlsConfig, TlsProvider};
+    // Certificates are verified against the OS trust store (as the webview
+    // does), so a server signed by an internal CA installed on this computer
+    // passes; verification is never turned off.
+    let tls = TlsConfig::builder()
+        .provider(TlsProvider::Rustls)
+        .root_certs(RootCerts::PlatformVerifier)
+        .build();
     let mut config = ureq::Agent::config_builder()
+        .tls_config(tls)
         .timeout_global(Some(timeout))
         .max_redirects(0)
         .http_status_as_error(false)
         .user_agent(format!("Backroom-Desktop/{}", env!("CARGO_PKG_VERSION")));
-    // A proxy from the environment (HTTPS_PROXY, NO_PROXY) is honoured for
-    // public servers; local and private-network servers are always direct.
+    // Proxies: ureq reads ALL_PROXY / HTTPS_PROXY / HTTP_PROXY (and NO_PROXY)
+    // from the environment, while the webview follows the desktop's system
+    // proxy settings, so the two can differ. The environment proxy is used
+    // for public servers only; local and private-network servers are always
+    // reached directly.
     if origin.insecure() {
         config = config.proxy(None);
     }
@@ -477,10 +493,7 @@ pub fn check_health(origin: &ServerOrigin, timeout: Duration) -> Result<(), Heal
         .get(url.as_str())
         .header("Accept", "application/json")
         .call()
-        .map_err(|e| match e {
-            ureq::Error::Timeout(_) => HealthError::Timeout,
-            _ => HealthError::Unreachable,
-        })?;
+        .map_err(|e| classify_error(&e))?;
     let status = response.status().as_u16();
     if status != 200 {
         return health_result(status, &[]);
@@ -495,6 +508,30 @@ pub fn check_health(origin: &ServerOrigin, timeout: Duration) -> Result<(), Heal
             _ => HealthError::NotBackroom,
         })?;
     health_result(status, &body)
+}
+
+/// Maps a request error to what the user is told.
+pub fn classify_error(e: &ureq::Error) -> HealthError {
+    match e {
+        ureq::Error::Timeout(_) => HealthError::Timeout,
+        ureq::Error::Rustls(tls) => classify_tls(tls),
+        ureq::Error::Tls(_) => HealthError::TlsFailed,
+        ureq::Error::Io(io) => match io.get_ref().and_then(|i| i.downcast_ref::<rustls::Error>()) {
+            Some(tls) => classify_tls(tls),
+            None if io.kind() == io::ErrorKind::TimedOut => HealthError::Timeout,
+            None => HealthError::Unreachable,
+        },
+        _ => HealthError::Unreachable,
+    }
+}
+
+fn classify_tls(e: &rustls::Error) -> HealthError {
+    match e {
+        rustls::Error::InvalidCertificate(_) | rustls::Error::NoCertificatesPresented => {
+            HealthError::Untrusted
+        }
+        _ => HealthError::TlsFailed,
+    }
 }
 
 /// Managed state: the origin this process serves (fixed at startup, or set
@@ -963,6 +1000,8 @@ mod tests {
             HealthError::Redirect,
             HealthError::Status,
             HealthError::NotBackroom,
+            HealthError::Untrusted,
+            HealthError::TlsFailed,
         ]
         .map(|e| e.to_string());
         for m in config.iter().chain(health.iter()) {
@@ -1314,6 +1353,136 @@ mod tests {
             Err(HealthError::Timeout)
         );
         assert!(started.elapsed() < Duration::from_secs(2));
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn request_errors_map_to_distinct_messages() {
+        use rustls::{CertificateError, Error as TlsError};
+        let untrusted = || TlsError::InvalidCertificate(CertificateError::UnknownIssuer);
+        assert_eq!(
+            classify_error(&ureq::Error::Rustls(untrusted())),
+            HealthError::Untrusted
+        );
+        assert_eq!(
+            classify_error(&ureq::Error::Rustls(TlsError::InvalidCertificate(
+                CertificateError::Expired
+            ))),
+            HealthError::Untrusted
+        );
+        assert_eq!(
+            classify_error(&ureq::Error::Rustls(TlsError::NoCertificatesPresented)),
+            HealthError::Untrusted
+        );
+        // As it arrives from inside the TLS stream: an io::Error around it.
+        let wrapped = io::Error::new(io::ErrorKind::InvalidData, untrusted());
+        assert_eq!(
+            classify_error(&ureq::Error::Io(wrapped)),
+            HealthError::Untrusted
+        );
+        assert_eq!(
+            classify_error(&ureq::Error::Rustls(TlsError::HandshakeNotComplete)),
+            HealthError::TlsFailed
+        );
+        assert_eq!(
+            classify_error(&ureq::Error::Tls("no TLS")),
+            HealthError::TlsFailed
+        );
+        let refused = io::Error::from(io::ErrorKind::ConnectionRefused);
+        assert_eq!(
+            classify_error(&ureq::Error::Io(refused)),
+            HealthError::Unreachable
+        );
+        assert_eq!(
+            classify_error(&ureq::Error::Io(io::Error::from(io::ErrorKind::TimedOut))),
+            HealthError::Timeout
+        );
+        assert_eq!(
+            classify_error(&ureq::Error::HostNotFound),
+            HealthError::Unreachable
+        );
+    }
+
+    /// A TLS server on 127.0.0.1 with a fresh self-signed certificate (made
+    /// with the `openssl` CLI; skipped when it is missing). The check must
+    /// refuse it as untrusted: verification stays on.
+    #[test]
+    fn health_check_refuses_a_self_signed_certificate() {
+        use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+        let dir = scratch("tls");
+        fs::create_dir_all(&dir).unwrap();
+        let (key_pem, cert_der, key_der) = (
+            dir.join("key.pem"),
+            dir.join("cert.der"),
+            dir.join("key.der"),
+        );
+        let made = std::process::Command::new("openssl")
+            .args([
+                "req",
+                "-x509",
+                "-newkey",
+                "ec",
+                "-pkeyopt",
+                "ec_paramgen_curve:P-256",
+            ])
+            .args([
+                "-nodes",
+                "-days",
+                "2",
+                "-subj",
+                "/CN=localhost",
+                "-outform",
+                "DER",
+            ])
+            .args(["-addext", "subjectAltName=DNS:localhost,IP:127.0.0.1"])
+            .arg("-keyout")
+            .arg(&key_pem)
+            .arg("-out")
+            .arg(&cert_der)
+            .output()
+            .is_ok_and(|o| o.status.success())
+            && std::process::Command::new("openssl")
+                .args(["pkcs8", "-topk8", "-nocrypt", "-outform", "DER", "-in"])
+                .arg(&key_pem)
+                .arg("-out")
+                .arg(&key_der)
+                .output()
+                .is_ok_and(|o| o.status.success());
+        if !made {
+            eprintln!("openssl CLI unavailable; skipping the live TLS test");
+            cleanup(&dir);
+            return;
+        }
+        let cert = CertificateDer::from(fs::read(&cert_der).unwrap());
+        let key = PrivateKeyDer::try_from(fs::read(&key_der).unwrap()).unwrap();
+        cleanup(&dir);
+        let config = rustls::ServerConfig::builder_with_provider(std::sync::Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_no_client_auth()
+        .with_single_cert(vec![cert], key)
+        .unwrap();
+        let listener = (8930..=8989)
+            .find_map(|port| TcpListener::bind(("127.0.0.1", port)).ok())
+            .expect("a free port in 8930-8989");
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut tcp, _) = listener.accept().unwrap();
+            tcp.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let mut conn = rustls::ServerConnection::new(std::sync::Arc::new(config)).unwrap();
+            let mut stream = rustls::Stream::new(&mut conn, &mut tcp);
+            let mut buf = [0u8; 64];
+            // The client aborts the handshake; this read just ends.
+            let _ = stream.read(&mut buf);
+        });
+        // https on a loopback address is accepted by the rules.
+        let origin = ok(&format!("https://127.0.0.1:{port}"));
+        assert_eq!(
+            check_health(&origin, HEALTH_TIMEOUT),
+            Err(HealthError::Untrusted)
+        );
         server.join().unwrap();
     }
 

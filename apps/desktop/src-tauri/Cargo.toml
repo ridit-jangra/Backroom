@@ -24,8 +24,11 @@ tauri-plugin-notification = "=2.8.1"
 tauri-plugin-opener = "=2.7.3"
 tauri-plugin-single-instance = { version = "=2.5.5", features = ["deep-link"] }
 # Blocking HTTP client for the setup page's `/health` check only: rustls with
-# ring and the bundled webpki roots (no OpenSSL, no async runtime).
-ureq = { version = "=3.5.0", default-features = false, features = ["rustls"] }
+# ring, verifying against the OS trust store through rustls-platform-verifier
+# (like the webview; no OpenSSL, no async runtime).
+ureq = { version = "=3.5.0", default-features = false, features = ["rustls", "platform-verifier"] }
+# Same rustls ureq uses (no new crate): only to tell certificate errors apart.
+rustls = { version = "=0.23.46", default-features = false, features = ["std", "ring"] }
 url = "=2.5.8"
 
 # Same version and (default) features as the zbus the opener, notification and
