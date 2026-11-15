@@ -24,6 +24,7 @@ describe('applyMigrations', () => {
     expect(await db.prepare('SELECT applied_at FROM d1_migrations LIMIT 1').first('applied_at')).toMatch(/^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d$/);
     // The schema really is there: seeded workspace, FTS tables, and the last migration's columns.
     expect(await db.prepare('SELECT slug FROM workspaces').first('slug')).toBe('clubhack');
+    expect(await db.prepare('SELECT name FROM workspaces').first('name')).toBe('Backroom');
     expect(await db.prepare('SELECT thumb_size FROM files LIMIT 0').all()).toMatchObject({ success: true });
   });
 

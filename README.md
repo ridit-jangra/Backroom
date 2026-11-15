@@ -33,7 +33,7 @@ Backroom is a Node.js server, not a serverless app. Cloudflare Workers is not a 
 
 The full guide (install, configuration, reverse proxy examples, systemd, backups, upgrades) is in **[docs/SELF_HOSTING.md](docs/SELF_HOSTING.md)**.
 
-One server runs one workspace, named `clubhack` in this version.
+One server runs one workspace. It is shown as "Backroom"; its internal id in URLs is `clubhack`.
 
 ## Quick start (local development)
 

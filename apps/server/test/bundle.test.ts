@@ -268,7 +268,7 @@ afterAll(async () => {
 
 describe('the built server (dist/server.mjs)', () => {
   it('bundles migrations next to the server and prints a startup summary without secrets', () => {
-    expect(readdirSync(join(outDir, 'migrations')).filter((n) => n.endsWith('.sql'))).toHaveLength(8);
+    expect(readdirSync(join(outDir, 'migrations')).filter((n) => n.endsWith('.sql'))).toHaveLength(9);
     const started = jsonLines().find((l) => l.code === 'server_started')!;
     expect(started).toMatchObject({
       level: 'info',
@@ -276,7 +276,7 @@ describe('the built server (dist/server.mjs)', () => {
       host: '127.0.0.1',
       dataDir,
       firstRun: true,
-      migrationsApplied: 8,
+      migrationsApplied: 9,
       mailer: 'console',
       trustedProxyHeader: null,
       trustedProxySecret: false,
