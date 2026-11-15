@@ -24,7 +24,7 @@ The examples use `/opt/backroom` for the code, `/var/lib/backroom` for data and 
 sudo useradd --system --home-dir /var/lib/backroom --shell /usr/sbin/nologin backroom
 sudo install -d -o backroom -g backroom -m 700 /var/lib/backroom
 sudo install -d -o "$USER" -m 755 /opt/backroom
-git clone <this repository's URL> /opt/backroom
+git clone https://github.com/ridit-jangra/Backroom.git /opt/backroom
 
 cd /opt/backroom
 npm ci                         # installs dependencies and generates the emoji table
@@ -63,7 +63,7 @@ EMAIL_FROM="Backroom <backroom@example.com>"
 DATA_DIR=/var/lib/backroom
 PORT=8080
 HOST=127.0.0.1
-# TRUSTED_PROXY_HEADER=x-forwarded-for   # see "Client IP addresses" below
+# TRUSTED_PROXY_HEADER=x-forwarded-for   # see "Security" below
 ```
 
 ```sh
@@ -81,7 +81,7 @@ sudoedit /etc/backroom/backroom.env
 | `DATA_DIR` | `./data` | Folder for `backroom.sqlite` and `blobs/`. Relative to the working directory. Created with mode 700. |
 | `PORT` | `8080` | TCP port. |
 | `HOST` | `127.0.0.1` | Listen address. The default accepts connections from the same machine only, which is right behind a local reverse proxy. Use `0.0.0.0` in a container whose port is published to a proxy outside it. |
-| `TRUSTED_PROXY_HEADER` | unset | A header that holds the real client IP, set by your proxy: `x-forwarded-for` (the last address in it is used), `x-real-ip`, `cf-connecting-ip`, or another single-address header. Unset means the TCP peer address. Read [Client IP addresses](#client-ip-addresses) before setting it. |
+| `TRUSTED_PROXY_HEADER` | unset | A header that holds the real client IP, set by your proxy: `x-forwarded-for` (the last address in it is used), `x-real-ip`, `cf-connecting-ip`, or another single-address header. Unset means the TCP peer address. Read [Client IP addresses](#security) before setting it. |
 | `TRUSTED_PROXY_SECRET` | unset | Optional, needs `TRUSTED_PROXY_HEADER`. At least 24 visible characters (`openssl rand -hex 32`). The trusted header is then believed only on requests carrying `X-Backroom-Origin-Secret: <secret>`. See [Cloudflare](#cloudflare-in-front). |
 | `WEB_DIST` | `apps/web/dist` next to the bundle | The built web app. The `--web-dist <path>` flag overrides it. |
 | `FILES_QUOTA_BYTES` | `943718400` (900 MB) | Storage per workspace for files, thumbnails and custom emoji together. |
@@ -321,6 +321,8 @@ Stop it with `kill <pid of run-forever.sh>`; the server shuts down gracefully an
 
 Sign-in links expire after 15 minutes and work once.
 
+People can also use the [desktop app](../README.md#desktop-app). It is only a client: they enter your server's address (the `APP_ORIGIN`) on first launch and sign in with the same email link. The server needs no extra setup for it.
+
 ## Daily maintenance
 
 The server runs maintenance every day at **04:00 server local time** (set `TZ` to choose the zone; the startup line shows `nextMaintenance`). It removes uploads that were never attached to a message after 24 hours (at most 200 files per run; the rest wait for the next day), and expired sessions, used or expired sign-in tokens and desktop codes, and old rate-limit rows.
@@ -424,6 +426,7 @@ Read the release notes for changed settings. Migrations only move forward. To go
 - nginx: the `/ws` location needs `proxy_http_version 1.1` and the `Upgrade`/`Connection` headers shown above. To test the path, send an upgrade request without a cookie: `curl -si -H 'Connection: Upgrade' -H 'Upgrade: websocket' -H 'Sec-WebSocket-Version: 13' -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' https://chat.example.com/ws | head -1`. A `401` (sign-in required) means the upgrade headers reached Backroom. A `426` (upgrade required) means the proxy dropped them.
 - An idle timeout under 30 seconds somewhere on the path (proxy, load balancer) cuts connections between pings. Use 180 s.
 - Behind Cloudflare, check that WebSockets are enabled for the zone.
+- Many proxies close a connection after about 2 minutes (Cloudflare: about 100 seconds) with no traffic at all. That is normal. The web app and the desktop app send a ping every 30 seconds, which keeps the connection open, and they reconnect by themselves when it does drop. If connections drop more often, a proxy or load balancer on the path has an idle timeout under 30 seconds: raise it to 180 s.
 
 **Uploads fail with 413.**
 - An HTML 413 page comes from your proxy: raise `client_max_body_size` (nginx) or `request_body max_size` (Caddy) to at least 26 MB.
@@ -437,6 +440,17 @@ A server is already running on that data folder. Stop it first. A lock left behi
 
 **The server exits at startup with a configuration error.**
 The message lists every problem, for example `APP_ORIGIN must be an http or https URL with no path, query or fragment`. Fix the env file and start again. `the web build at … has no index.html` means the web app was not built: run `npm run build -w apps/web` or point `WEB_DIST`/`--web-dist` at a build.
+
+**The desktop app shows the setup screen again.**
+- It asks for the server address on first launch, and again after you choose **Change server…** in the tray menu (or the window menu on desktops without a tray). Enter the address once and it is remembered.
+- The address is kept in `server.json` in the app's config folder (on Linux `~/.config/app.backroom.desktop/server.json`). If the file is deleted, unreadable or edited into something the app does not accept, the app falls back to the setup screen. Enter the address again.
+
+**The desktop app says "That address does not look like a Backroom server."**
+- Before it saves an address, the app requests `<address>/health` and expects HTTP 200 with `{"ok":true}`. Test it yourself: `curl -si https://chat.example.com/health`. Anything else (an HTML page, a 404, a proxy error page) gives this message.
+- Use the address that serves Backroom itself, with no path: `https://chat.example.com`, not `https://chat.example.com/app`. Redirects are not followed, so enter the final `https://` address if your server redirects from `http://`.
+- `https://` is required, except for `localhost`, private network addresses and `.local` names.
+- "The server's certificate is not trusted by this computer" means the certificate chain is not trusted by the operating system's trust store. Fix the certificate (for example, serve the full chain), or install your internal CA on that computer.
+- If the browser opens your server but the desktop app does not, test `/health` first.
 
 **Sign-in works but you are logged out at once, or the API answers 403.**
 `APP_ORIGIN` must match the address in the browser exactly (scheme, host and port, no `www.` difference). Requests from another origin are refused by design.

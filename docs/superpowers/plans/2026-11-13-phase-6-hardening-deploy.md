@@ -23,7 +23,7 @@
 - The user's dev server occupies port 8787 and serves `apps/web/dist`. Never stop it, and never build into `apps/web/dist`.
 - `apps/worker/.dev.vars` holds the user's REAL Resend key. Every `wrangler dev` an agent starts must pass `--var RESEND_API_KEY:dev`. Smoke and E2E use port 8788.
 - No remote Cloudflare commands (`--remote`, `deploy`, `d1 create`, `r2 bucket create`, `secret put`). Task 6 only writes the procedure; the operator runs it with the controller afterwards.
-- Production values: `EMAIL_FROM` = `Backroom <backroom@ridit.space>` (already set). `APP_ORIGIN` comes from the deploy guide.
+- Production values: `EMAIL_FROM` = the maintainer's sender address (already set). `APP_ORIGIN` comes from the deploy guide.
 
 ## Review Focus
 
@@ -145,7 +145,7 @@
   1. `npx wrangler login` and `whoami`
   2. `npx wrangler d1 create backroom`, then paste the `database_id` into `apps/worker/wrangler.jsonc`
   3. `npx wrangler r2 bucket create backroom`
-  4. Choose the URL: `https://backroom.<subdomain>.workers.dev`, or a custom domain such as `chat.ridit.space`. Set `APP_ORIGIN` in `wrangler.jsonc` vars to that exact final origin.
+  4. Choose the URL: `https://backroom.<subdomain>.workers.dev`, or a custom domain such as `chat.example.com`. Set `APP_ORIGIN` in `wrangler.jsonc` vars to that exact final origin.
   5. Secrets: `npx wrangler secret put RESEND_API_KEY` and `npx wrangler secret put OWNER_EMAIL`
   6. Confirm `EMAIL_FROM` is on the verified Resend domain
   7. `npx wrangler d1 migrations apply DB --remote`

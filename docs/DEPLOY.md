@@ -4,7 +4,7 @@
 
 # Unmaintained: Cloudflare Workers
 
-Backroom used to deploy to Cloudflare Workers (free tier). Steps 1 to 6 are one-time setup. Only steps 7 to 10 repeat on every later deploy. `chat.example.com` and `example.com` below stand for your own hostname and zone.
+Backroom used to deploy to Cloudflare Workers (free tier). Steps 1 to 6 are one-time setup. Only steps 7 to 10 repeat on every later deploy (step 11 is only a note about the desktop app). `chat.example.com` and `example.com` below stand for your own hostname and zone.
 
 > **The committed `apps/worker/wrangler.jsonc` and the `deploy` scripts in `apps/worker/package.json` hold the original maintainer's values** (domain, D1 database id, KV namespace id, `EMAIL_FROM`). Replace them with your own before deploying.
 
@@ -100,13 +100,11 @@ The first deploy creates the `WorkspaceHub` Durable Object class from migration 
 
 If the first owner email does not arrive, the admin "emails failed" banner cannot help (nobody can sign in yet). Run `npx wrangler tail` in `apps/worker` in a second terminal, request the link again, and look for an `email_failed` line; then check the Resend dashboard logs (the send, your domain still verified, the API key valid) and the spam folder. No `email_failed` line and no Resend log entry usually means `OWNER_EMAIL` does not match the address typed, or the request was rate limited (5 per hour per address).
 
-## 11. Desktop app (when the address changes or for a new build)
+## 11. Desktop app (nothing to do per deploy)
 
-```
-BACKROOM_APP_URL=https://chat.example.com npm run build -w apps/desktop
-```
+The desktop app is a generic client now: it asks for the server's address on first launch, so a Workers deployment needs no special build. Users install the app as described in the [README](../README.md#desktop-app) and enter your hostname (for example `https://chat.example.com`). The app checks `<hostname>/health`, which the Worker also serves.
 
-Install the produced `.deb` or AppImage. The `backroom://` deep-link handler is registered by the installed app (the `.deb` installs the desktop entry; an AppImage must be launched once, or integrated with a tool such as AppImageLauncher, before the OS routes `backroom://` links).
+Only packagers who want a default address baked in need a build-time value: `BACKROOM_APP_URL=https://chat.example.com npm run build -w apps/desktop`. It is optional and is used only until the user saves an address.
 
 ## 12. Rollback
 
