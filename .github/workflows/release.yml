@@ -314,8 +314,13 @@ jobs:
     env:
       VERSION: ${{ needs.version.outputs.version }}
     steps:
-      - name: Install git and namcap
-        run: pacman -Syu --noconfirm --needed git namcap
+      # The keyring first: an image that is months old may not know the packagers' current keys.
+      - name: Update the system and install git and namcap
+        run: |
+          set -euo pipefail
+          pacman -Sy --noconfirm archlinux-keyring
+          pacman -Su --noconfirm
+          pacman -S --noconfirm --needed git namcap
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -408,8 +413,13 @@ jobs:
     env:
       VERSION: ${{ needs.version.outputs.version }}
     steps:
-      - name: Install git and namcap
-        run: pacman -Syu --noconfirm --needed git namcap
+      # The keyring first: an image that is months old may not know the packagers' current keys.
+      - name: Update the system and install git and namcap
+        run: |
+          set -euo pipefail
+          pacman -Sy --noconfirm archlinux-keyring
+          pacman -Su --noconfirm
+          pacman -S --noconfirm --needed git namcap
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
