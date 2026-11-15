@@ -1,5 +1,8 @@
-//! Tray icon: Show / Quit menu and the unread count in the tooltip and, for
-//! AppIndicator trays on Linux (which ignore tooltips), as a label.
+//! Tray icon: Show / Change server… / Quit menu and the unread count in the
+//! tooltip and, for AppIndicator trays on Linux (which ignore tooltips), as a
+//! label. "Change server…" also sits in the macOS app menu and, when Linux has
+//! no tray host, in a small menu bar on the main window, so it stays reachable
+//! even when the remote page is broken. One handler serves every menu.
 //!
 //! Tray-host detection: on Linux the tray icon is only visible when a
 //! StatusNotifier host runs (GNOME without the AppIndicator extension has
@@ -10,13 +13,15 @@
 use std::sync::mpsc;
 use std::time::Duration;
 
-use tauri::menu::{Menu, MenuItem};
+use tauri::menu::{Menu, MenuEvent, MenuItem, MenuItemKind, PredefinedMenuItem, Submenu};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Runtime};
 
 pub const TRAY_ID: &str = "backroom";
-const MENU_SHOW: &str = "show";
-const MENU_QUIT: &str = "quit";
+pub const MENU_SHOW: &str = "show";
+pub const MENU_CHANGE_SERVER: &str = "change_server";
+pub const MENU_QUIT: &str = "quit";
+pub const CHANGE_SERVER_LABEL: &str = "Change server…";
 
 /// "Backroom — N unread", or "Backroom" when nothing is unread.
 pub fn tooltip_text(unread: i64) -> String {
@@ -114,18 +119,63 @@ fn status_notifier_watcher_present() -> Result<bool, ProbeError> {
     dbus.name_has_owner(name).map_err(|_| ProbeError)
 }
 
-pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
+/// The one menu handler. Tauri registers a tray's menu handler as a global
+/// one, so it also receives the app menu and window menu events (same ids).
+fn on_menu_event<R: Runtime>(app: &AppHandle<R>, event: MenuEvent) {
+    match event.id().as_ref() {
+        MENU_SHOW => crate::show_main(app),
+        MENU_CHANGE_SERVER => crate::change_server(app),
+        MENU_QUIT => app.exit(0),
+        _ => {}
+    }
+}
+
+fn change_server_item<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<MenuItem<R>> {
+    MenuItem::with_id(
+        app,
+        MENU_CHANGE_SERVER,
+        CHANGE_SERVER_LABEL,
+        true,
+        None::<&str>,
+    )
+}
+
+/// Tray menu: Show, Change server…, Quit.
+pub fn tray_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
     let show = MenuItem::with_id(app, MENU_SHOW, "Show", true, None::<&str>)?;
+    let change = change_server_item(app)?;
     let quit = MenuItem::with_id(app, MENU_QUIT, "Quit", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&show, &quit])?;
+    Menu::with_items(app, &[&show, &change, &quit])
+}
+
+/// Menu bar for the main window when there is no tray host (Linux without a
+/// StatusNotifier host): "Backroom" › Change server…, Quit.
+pub fn window_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
+    let change = change_server_item(app)?;
+    let separator = PredefinedMenuItem::separator(app)?;
+    let quit = MenuItem::with_id(app, MENU_QUIT, "Quit", true, None::<&str>)?;
+    let backroom = Submenu::with_items(app, "Backroom", true, &[&change, &separator, &quit])?;
+    Menu::with_items(app, &[&backroom])
+}
+
+/// macOS: the default app menu with "Change server…" after "About Backroom".
+/// Compiled everywhere (so it is type-checked on Linux), called only on macOS.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn install_app_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
+    let menu = Menu::default(app)?;
+    if let Some(MenuItemKind::Submenu(app_menu)) = menu.items()?.into_iter().next() {
+        app_menu.insert(&change_server_item(app)?, 1)?;
+    }
+    app.set_menu(menu)?;
+    Ok(())
+}
+
+pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
+    let menu = tray_menu(app)?;
     let mut builder = TrayIconBuilder::with_id(TRAY_ID)
         .menu(&menu)
         .tooltip(tooltip_text(0))
-        .on_menu_event(|app, event| match event.id().as_ref() {
-            MENU_SHOW => crate::show_main(app),
-            MENU_QUIT => app.exit(0),
-            _ => {}
-        });
+        .on_menu_event(on_menu_event);
     if let Some(icon) = app.default_window_icon() {
         builder = builder.icon(icon.clone());
     }
@@ -196,6 +246,45 @@ mod tests {
     #[test]
     fn watcher_name_is_the_status_notifier_watcher() {
         assert_eq!(STATUS_NOTIFIER_WATCHER, "org.kde.StatusNotifierWatcher");
+    }
+
+    fn texts<R: Runtime>(items: Vec<MenuItemKind<R>>) -> Vec<String> {
+        items
+            .into_iter()
+            .map(|item| match item {
+                MenuItemKind::MenuItem(i) => i.text().unwrap(),
+                MenuItemKind::Submenu(s) => format!("{} ›", s.text().unwrap()),
+                MenuItemKind::Predefined(_) => "---".to_string(),
+                _ => "?".to_string(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn tray_and_window_menus_offer_change_server() {
+        assert_eq!(CHANGE_SERVER_LABEL, "Change server…");
+        let app = tauri::test::mock_app();
+        let tray = tray_menu(app.handle()).unwrap();
+        assert_eq!(
+            texts(tray.items().unwrap()),
+            ["Show", "Change server…", "Quit"]
+        );
+        let ids: Vec<String> = tray
+            .items()
+            .unwrap()
+            .iter()
+            .map(|i| i.id().as_ref().to_string())
+            .collect();
+        assert_eq!(ids, [MENU_SHOW, MENU_CHANGE_SERVER, MENU_QUIT]);
+        let window = window_menu(app.handle()).unwrap();
+        let Some(MenuItemKind::Submenu(sub)) = window.items().unwrap().into_iter().next() else {
+            panic!("a Backroom submenu");
+        };
+        assert_eq!(sub.text().unwrap(), "Backroom");
+        assert_eq!(
+            texts(sub.items().unwrap()),
+            ["Change server…", "---", "Quit"]
+        );
     }
 
     #[test]

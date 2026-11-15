@@ -2,6 +2,10 @@
 //! and the runtime capability that grants exactly them to the main window on
 //! the app origin. Arguments are validated by `policy`; nothing here logs
 //! titles, bodies or secrets.
+//!
+//! Plus the two setup-page commands (`check_server`, `save_server`), granted by
+//! the static LOCAL capability `capabilities/setup-page.json`: main window, the
+//! app's own origin only, never a remote page.
 
 use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
@@ -11,6 +15,7 @@ use tauri::{AppHandle, Manager, Runtime, State, Url, Webview};
 use tauri_plugin_notification::NotificationExt;
 
 use crate::auth::VerifierStore;
+use crate::config::{self, ServerState};
 use crate::{policy, tray, MAIN_WINDOW};
 
 /// Identifier of the runtime capability for the remote app page.
@@ -30,6 +35,12 @@ pub const REMOTE_PERMISSIONS: [&str; 7] = [
     "allow-login-challenge",
     "allow-take-pending-navigation",
 ];
+
+/// Identifier of the static capability for the bundled setup page.
+pub const SETUP_CAPABILITY_ID: &str = "setup-page";
+
+/// Permissions the bundled setup page gets (and nothing else does).
+pub const SETUP_PERMISSIONS: [&str; 2] = ["allow-check-server", "allow-save-server"];
 
 /// How long a channel link waits for the page to pull it.
 pub const PENDING_NAV_TTL: Duration = Duration::from_secs(60);
@@ -96,6 +107,76 @@ pub(crate) fn require_main<R: Runtime>(webview: &Webview<R>) -> Result<(), Strin
     } else {
         Err("forbidden".into())
     }
+}
+
+/// Setup commands: the main window, and only while it shows the bundled page
+/// (on top of the capability, which already says the same).
+pub(crate) fn require_setup_page<R: Runtime>(webview: &Webview<R>) -> Result<(), String> {
+    require_main(webview)?;
+    match webview.url() {
+        Ok(url) if policy::is_app_local(&url) => Ok(()),
+        _ => Err("forbidden".into()),
+    }
+}
+
+/// `check_server(url) -> {origin, insecure}`: normalises the address and asks
+/// `<origin>/health` (from Rust, off the main thread) whether a Backroom
+/// server answers. Errors are sentences the page shows as they are.
+#[tauri::command]
+pub async fn check_server<R: Runtime>(
+    webview: Webview<R>,
+    url: String,
+) -> Result<serde_json::Value, String> {
+    require_setup_page(&webview)?;
+    let origin = config::normalize_server_url(&url).map_err(|e| e.to_string())?;
+    let probe = origin.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        config::check_health(&probe, config::HEALTH_TIMEOUT)
+    })
+    .await
+    .map_err(|_| "Could not check the server. Try again.".to_string())?
+    .map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({ "origin": origin.origin(), "insecure": origin.insecure() }))
+}
+
+/// `save_server(url) -> origin`: validates again (the page's checks count for
+/// nothing), saves `server.json`, adds the remote capability for exactly this
+/// origin, records it as the current origin and only then navigates the main
+/// window there (so the navigation lock lets this one load through). Works
+/// once per process: an origin, once set, changes only through "Change
+/// server…", which restarts the app.
+#[tauri::command]
+pub fn save_server<R: Runtime>(
+    app: AppHandle<R>,
+    webview: Webview<R>,
+    state: State<'_, ServerState>,
+    url: String,
+) -> Result<String, String> {
+    require_setup_page(&webview)?;
+    let origin = config::normalize_server_url(&url).map_err(|e| e.to_string())?;
+    {
+        let mut slot = state.slot();
+        if slot.is_some() {
+            return Err("Backroom is already connected to a server.".into());
+        }
+        let dir = state
+            .config_dir()
+            .ok_or_else(|| "Could not save the server address.".to_string())?;
+        config::save_config(dir, Some(&origin))
+            .map_err(|_| "Could not save the server address.".to_string())?;
+        app.add_capability(remote_capability(origin.url()))
+            .map_err(|_| "Could not connect to the server.".to_string())?;
+        *slot = Some(origin.url().clone());
+        // The guard drops here: the navigation hook reads this state.
+    }
+    eprintln!("backroom: server_saved {}", origin.origin());
+    let window = app
+        .get_webview_window(MAIN_WINDOW)
+        .ok_or_else(|| "Could not open the server.".to_string())?;
+    window
+        .navigate(origin.url().clone())
+        .map_err(|_| "Could not open the server.".to_string())?;
+    Ok(origin.origin())
 }
 
 #[tauri::command]
@@ -255,11 +336,38 @@ mod tests {
         generated.sort();
         let mut granted: Vec<String> = REMOTE_PERMISSIONS
             .iter()
+            .chain(SETUP_PERMISSIONS.iter())
             .filter(|p| !p.starts_with("core:"))
             .map(|p| p.to_string())
             .collect();
         granted.sort();
         assert_eq!(generated, granted);
+    }
+
+    #[test]
+    fn setup_capability_is_local_main_only_and_grants_just_the_setup_commands() {
+        let file: serde_json::Value =
+            serde_json::from_str(include_str!("../capabilities/setup-page.json")).unwrap();
+        assert_eq!(file["identifier"], SETUP_CAPABILITY_ID);
+        assert_eq!(file["local"], true);
+        assert!(file.get("remote").is_none(), "never a remote URL");
+        assert!(file.get("webviews").is_none());
+        assert_eq!(file["windows"], serde_json::json!(["main"]));
+        assert_eq!(file["permissions"], serde_json::json!(SETUP_PERMISSIONS));
+        // The only static capability: everything else is added at runtime.
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("capabilities");
+        let names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["setup-page.json".to_string()]);
+    }
+
+    #[test]
+    fn remote_and_setup_permissions_do_not_overlap() {
+        for p in SETUP_PERMISSIONS {
+            assert!(!REMOTE_PERMISSIONS.contains(&p), "{p}");
+        }
     }
 
     #[test]

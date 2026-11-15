@@ -249,7 +249,7 @@ state-changing requests require a matching `Origin`.
   in the system browser; `/verify` of a desktop token creates no browser session
   and instead returns a one-time desktop code (32 bytes, 2-minute TTL, stored
   hashed), and the page redirects to `backroom://auth?code=…`. The app then loads
-  `APP_URL/desktop-auth#code=…&verifier=…` in its webview, which calls
+  `<server origin>/desktop-auth#code=…&verifier=…` in its webview, which calls
   `POST /auth/desktop/exchange {code, verifier}`; the server checks
   `sha256(verifier)` against the stored challenge and sets the session cookie in
   the webview. A code injected by another local app fails without the verifier.
@@ -340,16 +340,52 @@ the server it only appears if a blob file has gone missing. The 25 MB file limit
 
 - Tauri 2 (Rust + system WebKitGTK 4.1 on Linux); Linux bundles `.deb` and
   AppImage via `tauri build`. `@tauri-apps/cli` is a dev dependency (no global
-  installs). App URL comes from build-time env `BACKROOM_APP_URL`
-  (default `http://localhost:8787`).
-- Main window is created in Rust and loads the remote `APP_URL`. Navigation
-  lockdown: `on_navigation` allows only the app origin; any other http(s) URL
-  opens in the default browser and is denied in-app; new-window requests are
-  denied in-app and opened in the default browser. No other schemes load.
+  installs).
+- Server address (revised 2026-11-15, Phase 8, P8-R1): chosen at runtime, so
+  one released build works with any self-hosted server. Stored in
+  `server.json` in the app config dir (Linux `~/.config/app.backroom.desktop/`;
+  dir 0700, file 0600, written atomically) as `{"serverUrl": "<origin>"}`.
+  Precedence at startup: a valid stored origin, then the optional build-time
+  default `BACKROOM_APP_URL` (only when there is no `server.json` at all; used
+  by smoke tests and distro builds), then the bundled setup page. A file that
+  is unreadable, oversized, malformed or holds a refused address is never
+  trusted: the app shows the setup page.
+- Address rules (Rust, `config::normalize_server_url`; the page's own checks
+  count for nothing): trimmed, `https://` added when no scheme is given, http or
+  https only, no credentials, no path other than `/`, no query or fragment, no
+  `*.localhost` host, at most 263 characters; host lowercased and punycoded,
+  default port dropped; the result is a bare origin. Plain http is accepted only
+  for `localhost`, loopback, RFC 1918 addresses and `.local` names, and the page
+  then warns that traffic is not encrypted and asks for a second Connect.
+- Setup page (`apps/desktop/dist/`, served from the app's own origin
+  `tauri://localhost`, or `http(s)://tauri.localhost` on Windows): one field,
+  Connect, an inline error (`role="alert"`), light/dark, no external resources,
+  its own CSP. It calls `check_server(url) -> {origin, insecure}` (normalises,
+  then `GET <origin>/health` from Rust: 5 s timeout, no redirects, 1 KiB body
+  cap, User-Agent `Backroom-Desktop/<version>`, expects HTTP 200 and exactly
+  `{"ok":true}`) and `save_server(url)` (normalises again, saves, adds the remote
+  capability for that origin, then navigates the main window there from Rust;
+  once per process). Both are granted only by the static LOCAL capability
+  `capabilities/setup-page.json` (main window, app origin, no remote URLs).
+- "Change server…" (tray menu; macOS app menu; a small window menu bar when
+  Linux has no tray host, so it works even when the remote page is broken)
+  writes `{"serverUrl": null}` and restarts the app. Tauri cannot remove a
+  runtime capability, so the restart is what revokes the old origin together
+  with its page state and any pending verifier; the new process shows the
+  setup page, even when a build-time default exists.
+- Main window is created in Rust and loads the server origin (or the setup
+  page). Navigation lockdown (origin read from managed state on every
+  request): `on_navigation` allows only the server origin; any other http(s)
+  URL opens in the default browser and is denied in-app; new-window requests
+  are denied in-app and opened in the default browser. No other schemes load.
+  While the setup page shows, only the app's own origin loads, nothing opens
+  in the browser and no viewer opens; deep links are ignored (an auth link
+  keeps its verifier).
 - Remote-page IPC is granted by a capability added at runtime whose `remote.urls`
-  is exactly the app origin, permitting only the app's own commands plus
-  event listening. The web app reaches them through `apps/web/src/desktop/bridge.ts`
-  (`@tauri-apps/api`), and is a no-op outside the desktop app.
+  is exactly the server origin, permitting only the app's own commands plus
+  event listening (never the setup commands). The web app reaches them through
+  `apps/web/src/desktop/bridge.ts` (`@tauri-apps/api`), and is a no-op outside
+  the desktop app.
 - Commands: `notify({title, body, channelId})`, `set_badge(count)`,
   `platform()`, `login_challenge()`, `take_pending_navigation()`. Command
   arguments are validated in Rust (lengths, ULID channel ids, count bounds).

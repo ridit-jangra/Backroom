@@ -1,0 +1,141 @@
+:root {
+  color-scheme: light dark;
+  --bg: #f6f6f4;
+  --card: #ffffff;
+  --text: #1d1d1f;
+  --muted: #5c5c63;
+  --border: #c9c9cf;
+  --accent: #2f5bd3;
+  --accent-text: #ffffff;
+  --error: #b3261e;
+  --notice-bg: #fff4d6;
+  --notice-text: #5b4200;
+  --focus: #2f5bd3;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #161618;
+    --card: #222226;
+    --text: #ececf0;
+    --muted: #a6a6ae;
+    --border: #4a4a52;
+    --accent: #7c9cf5;
+    --accent-text: #0e0e10;
+    --error: #ff8a80;
+    --notice-bg: #3a3112;
+    --notice-text: #f3dd9b;
+    --focus: #9db4ff;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  min-height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Cantarell, "Noto Sans", sans-serif;
+}
+
+body {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  padding: 24px 16px;
+}
+
+main {
+  width: 100%;
+  max-width: 440px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 28px 24px;
+}
+
+h1 {
+  margin: 0 0 20px;
+  font-size: 1.5rem;
+}
+
+label {
+  display: block;
+  font-weight: 600;
+}
+
+#hint {
+  margin: 4px 0 10px;
+  color: var(--muted);
+  font-size: 0.9375rem;
+}
+
+input {
+  width: 100%;
+  padding: 10px 12px;
+  font: inherit;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+input[aria-invalid="true"] {
+  border-color: var(--error);
+}
+
+button {
+  margin-top: 16px;
+  padding: 10px 20px;
+  font: inherit;
+  font-weight: 600;
+  color: var(--accent-text);
+  background: var(--accent);
+  border: 0;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+button:disabled {
+  opacity: 0.6;
+  cursor: progress;
+}
+
+input:focus-visible,
+button:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.error {
+  margin: 8px 0 0;
+  color: var(--error);
+}
+
+/* Kept in the accessibility tree so the live regions announce changes. */
+.error:empty,
+.status:empty {
+  margin: 0;
+}
+
+.notice {
+  margin: 12px 0 0;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--notice-bg);
+  color: var(--notice-text);
+}
+
+.notice[hidden] {
+  display: none;
+}
+
+.status {
+  margin: 12px 0 0;
+  color: var(--muted);
+}

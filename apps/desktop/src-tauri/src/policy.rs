@@ -94,6 +94,31 @@ pub fn nav_decision(target: &Url, origin: &Url) -> Nav {
     }
 }
 
+/// The webview's own origin, where the bundled setup page runs:
+/// `tauri://localhost` (Linux, macOS) or `http(s)://tauri.localhost`
+/// (Windows). No port, no credentials.
+pub fn is_app_local(url: &Url) -> bool {
+    let own = match url.scheme() {
+        "tauri" => url.host_str() == Some("localhost"),
+        "http" | "https" => url.host_str() == Some("tauri.localhost"),
+        _ => false,
+    };
+    own && url.port().is_none() && url.username().is_empty() && url.password().is_none()
+}
+
+/// Navigation rule for a window given the current server origin. With an
+/// origin it is [`nav_decision`]. Without one the setup page is showing: only
+/// the app's own origin loads and everything else is dropped (no browser
+/// either). `save_server` sets the origin before it navigates, so its one
+/// navigation passes as an ordinary same-origin load.
+pub fn window_nav(target: &Url, origin: Option<&Url>) -> Nav {
+    match origin {
+        Some(origin) => nav_decision(target, origin),
+        None if is_app_local(target) => Nav::Allow,
+        None => Nav::Drop,
+    }
+}
+
 /// Accepts only `backroom://auth?code=<10..100 base64url chars>` and
 /// `backroom://channel/<26-char ULID>`. Matching is on the raw string (no URL
 /// normalisation), so dot segments, extra query pairs, fragments, trailing
@@ -118,7 +143,9 @@ pub fn parse_deep_link(s: &str) -> Option<DeepLink> {
 /// in the fragment, so they never reach a server or its logs. Callers pass a
 /// code from [`parse_deep_link`] and a verifier from the store (both base64url).
 pub fn desktop_auth_url(origin: &Url, code: &str, verifier: &str) -> Url {
-    let mut url = origin.join("desktop-auth").expect("origin joins a relative path");
+    let mut url = origin
+        .join("desktop-auth")
+        .expect("origin joins a relative path");
     url.set_fragment(Some(&format!("code={code}&verifier={verifier}")));
     url
 }
@@ -221,7 +248,7 @@ fn truncate_bytes(s: &str, max: usize) -> &str {
 
 /// Unicode general category Cf (format characters): bidi controls, zero-width
 /// characters, BOM, tags and the like. A static table, so no extra crate.
-fn is_format_char(c: char) -> bool {
+pub(crate) fn is_format_char(c: char) -> bool {
     matches!(
         c as u32,
         0x00AD
@@ -432,6 +459,75 @@ mod tests {
         }
     }
 
+    // ---- setup page (no server yet) ----
+
+    #[test]
+    fn app_local_is_only_the_webviews_own_origin() {
+        for ok in [
+            "tauri://localhost",
+            "tauri://localhost/index.html",
+            "http://tauri.localhost/",
+            "https://tauri.localhost/setup.js",
+        ] {
+            assert!(is_app_local(&u(ok)), "{ok}");
+        }
+        for bad in [
+            "tauri://evil/",
+            "tauri://localhost:1/",
+            "http://localhost/",
+            "http://localhost:8787/",
+            "https://tauri.localhost.evil.com/",
+            "http://x.tauri.localhost/",
+            "http://tauri.localhost:8080/",
+            "http://user@tauri.localhost/",
+            "ipc://localhost/",
+            "file:///index.html",
+            "about:blank",
+        ] {
+            assert!(!is_app_local(&u(bad)), "{bad}");
+        }
+    }
+
+    #[test]
+    fn without_a_server_only_the_setup_page_loads() {
+        assert_eq!(
+            window_nav(&u("tauri://localhost/index.html"), None),
+            Nav::Allow
+        );
+        assert_eq!(window_nav(&u("http://tauri.localhost/"), None), Nav::Allow);
+        for s in [
+            "https://chat.example.com/",
+            "http://localhost:8787/",
+            "javascript:alert(1)",
+            "file:///etc/passwd",
+            "about:blank",
+            "tauri://evil/",
+        ] {
+            assert_eq!(window_nav(&u(s), None), Nav::Drop, "{s}");
+        }
+    }
+
+    #[test]
+    fn with_a_server_the_setup_page_is_out_of_reach() {
+        let o = origin();
+        assert_eq!(
+            window_nav(&u("http://localhost:8787/x"), Some(&o)),
+            Nav::Allow
+        );
+        assert_eq!(
+            window_nav(&u("https://example.com/"), Some(&o)),
+            Nav::OpenExternal
+        );
+        assert_eq!(window_nav(&u("tauri://localhost/"), Some(&o)), Nav::Drop);
+        for s in [
+            "https://chat.example.com/",
+            "javascript:x",
+            "http://localhost:8787/",
+        ] {
+            assert_eq!(window_nav(&u(s), Some(&o)), nav_decision(&u(s), &o), "{s}");
+        }
+    }
+
     // ---- ExternalOpenLimiter ----
 
     #[test]
@@ -462,7 +558,10 @@ mod tests {
     #[test]
     fn download_name_keeps_plain_names() {
         assert_eq!(sanitize_download_name("report.pdf"), "report.pdf");
-        assert_eq!(sanitize_download_name("my photo (1).jpg"), "my photo (1).jpg");
+        assert_eq!(
+            sanitize_download_name("my photo (1).jpg"),
+            "my photo (1).jpg"
+        );
         assert_eq!(sanitize_download_name("résumé.txt"), "résumé.txt");
     }
 
@@ -511,7 +610,10 @@ mod tests {
         assert!(out.ends_with(".pdf"));
         // A long "extension" is not kept whole.
         let long_ext = format!("x.{}", "e".repeat(400));
-        assert_eq!(sanitize_download_name(&long_ext).len(), MAX_DOWNLOAD_NAME_BYTES);
+        assert_eq!(
+            sanitize_download_name(&long_ext).len(),
+            MAX_DOWNLOAD_NAME_BYTES
+        );
         // Room for the collision suffix within NAME_MAX (255 bytes).
         assert!(MAX_DOWNLOAD_NAME_BYTES + " (4294967295)".len() <= 255);
         assert_eq!(sanitize_download_name("short.txt"), "short.txt");
@@ -544,7 +646,11 @@ mod tests {
     #[test]
     fn unique_path_never_overwrites() {
         let dir = Path::new("/home/u/Downloads");
-        let taken = [dir.join("a.pdf"), dir.join("a (1).pdf"), dir.join("a (2).pdf")];
+        let taken = [
+            dir.join("a.pdf"),
+            dir.join("a (1).pdf"),
+            dir.join("a (2).pdf"),
+        ];
         assert_eq!(
             unique_download_path(dir, "a.pdf", |p| taken.iter().any(|t| t == p)),
             dir.join("a (3).pdf")

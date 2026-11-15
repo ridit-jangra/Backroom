@@ -74,10 +74,10 @@ Desktop installers: coming soon. Until then, build from source.
 `apps/desktop` is a Tauri 2 app (Rust) that opens your Backroom server in a locked-down native window. Linux only for now (`.deb` and AppImage). You need Rust (stable), the WebKitGTK 4.1 and libsoup 3 development packages and the usual Tauri Linux build libraries. On Debian/Ubuntu that is `libwebkit2gtk-4.1-dev libsoup-3.0-dev libayatana-appindicator3-dev librsvg2-dev`.
 
 ```sh
-BACKROOM_APP_URL=https://chat.example.com npm run build -w apps/desktop
+npm run build -w apps/desktop
 ```
 
-`BACKROOM_APP_URL` is compiled in. It must be your server's exact public origin (scheme, host and port, no path, no redirects). The packages land in `apps/desktop/src-tauri/target/release/bundle/`. `apps/desktop/scripts/smoke.sh` builds a debug app for `http://localhost:8788`, starts the Node server there with a scratch data folder and the console mailer, and checks that the app loads (under `xvfb-run`, or `--direct` on your display; `--server-only` checks just the server part). Sign-in uses the same email link: the link opens in your browser, which hands a one-time code back to the app through a `backroom://` link (PKCE, so an intercepted code is useless).
+On first launch the app asks for your server's address (for example `https://chat.example.com`), checks that a Backroom server answers there and remembers it in `~/.config/app.backroom.desktop/server.json`. Plain `http://` is accepted only for localhost, private network addresses and `.local` names. To switch servers later, use "Change server…" in the tray menu (or in the window's menu when your desktop has no tray); the app restarts and asks again. Packagers can bake in a default with `BACKROOM_APP_URL=https://chat.example.com npm run build -w apps/desktop`: it is used only until the user saves an address. The packages land in `apps/desktop/src-tauri/target/release/bundle/`. `apps/desktop/scripts/smoke.sh` builds a debug app for `http://localhost:8788`, starts the Node server there with a scratch data folder and the console mailer, and checks that the app loads (under `xvfb-run`, or `--direct` on your display; `--server-only` checks just the server part). Sign-in uses the same email link: the link opens in your browser, which hands a one-time code back to the app through a `backroom://` link (PKCE, so an intercepted code is useless).
 
 ## Repository layout
 

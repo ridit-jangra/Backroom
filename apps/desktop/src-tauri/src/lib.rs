@@ -1,17 +1,20 @@
 pub mod auth;
 pub mod commands;
+pub mod config;
 pub mod policy;
 pub mod tray;
 
 use std::collections::HashMap;
-use std::path::Path;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Mutex, PoisonError};
 use std::time::Instant;
 
 use auth::VerifierStore;
 use commands::PendingNavigation;
+use config::{ServerState, Start, Stored};
 use policy::{DeepLink, ExternalOpenLimiter, Nav};
+use tauri::ipc::CapabilityBuilder;
 use tauri::webview::{DownloadEvent, NewWindowResponse};
 use tauri::{
     AppHandle, Emitter, Manager, Runtime, Url, Webview, WebviewUrl, WebviewWindowBuilder,
@@ -21,11 +24,17 @@ use tauri_plugin_deep_link::DeepLinkExt;
 use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_opener::OpenerExt;
 
-/// Build-time app URL (`BACKROOM_APP_URL`), default for local development.
-const APP_URL: &str = match option_env!("BACKROOM_APP_URL") {
-    Some(url) => url,
-    None => "http://localhost:8787",
-};
+/// Optional build-time default server (`BACKROOM_APP_URL`), used only when
+/// there is no `server.json` at all (smoke tests, distro builds). Released
+/// builds have none and ask on first launch (P8-R1).
+const BUILD_DEFAULT_URL: Option<&str> = option_env!("BACKROOM_APP_URL");
+
+/// The bundled setup page (`apps/desktop/dist/index.html`).
+const SETUP_PAGE: &str = "index.html";
+
+/// Set while "Change server…" clears the config and restarts, so a second
+/// click cannot race it.
+static CHANGING_SERVER: AtomicBool = AtomicBool::new(false);
 
 pub const MAIN_WINDOW: &str = "main";
 /// Event the web app listens to (bridge.ts `NAVIGATE_EVENT`), payload `{ channelId }`.
@@ -60,16 +69,22 @@ enum DeepLinkAction {
     NoVerifier,
     /// Channel link: ask the page to open this channel.
     EmitNavigate(String),
+    /// No server yet (the setup page is showing): ignore, keep any verifier.
+    NoServer,
     /// Anything else: ignore.
     Ignore,
 }
 
-/// Pure routing decision; the verifier is taken only for a valid auth link.
+/// Pure routing decision; the verifier is taken only for a valid auth link
+/// while a server origin is set.
 fn deep_link_action(
     raw: &str,
-    origin: &Url,
+    origin: Option<&Url>,
     take_verifier: impl FnOnce() -> Option<String>,
 ) -> DeepLinkAction {
+    let Some(origin) = origin else {
+        return DeepLinkAction::NoServer;
+    };
     match policy::parse_deep_link(raw) {
         Some(DeepLink::Auth { code }) => match take_verifier() {
             Some(verifier) => {
@@ -150,25 +165,111 @@ pub fn run() {
             commands::set_badge,
             commands::platform,
             commands::login_challenge,
-            commands::take_pending_navigation
+            commands::take_pending_navigation,
+            commands::check_server,
+            commands::save_server
         ])
         .setup(|app| {
-            let origin = policy::app_origin(APP_URL)?;
-            app.add_capability(commands::remote_capability(&origin))?;
+            let dir = app.path().app_config_dir().ok();
+            if dir.is_none() {
+                eprintln!("backroom: config_dir_unavailable");
+            }
+            let origin = boot(app.handle(), dir, BUILD_DEFAULT_URL)?;
             let handle = app.handle().clone();
             restrict_data_dir(&handle);
             let close = tray::close_policy(tray::host_available());
             if let Some(token) = close.log {
                 eprintln!("backroom: {token}");
             }
-            build_main_window(&handle, &origin, close.on_close)?;
+            #[cfg(target_os = "macos")]
+            tray::install_app_menu(&handle)?;
+            build_main_window(&handle, origin.as_ref(), close.on_close)?;
             tray::build(&handle)?;
             setup_notification_clicks(&handle);
-            setup_deep_links(&handle, origin);
+            setup_deep_links(&handle);
             Ok(())
         })
         .run(tauri::generate_context!())
         .expect("error while running Backroom");
+}
+
+/// The remote capability a start needs: one for a remote start, none for the
+/// setup page. The only path from `server.json` to a capability.
+fn start_capability(start: &Start) -> Option<CapabilityBuilder> {
+    match start {
+        Start::Remote(origin) => Some(commands::remote_capability(origin.url())),
+        Start::Setup => None,
+    }
+}
+
+/// Startup decision: reads `server.json` from `dir`, applies the precedence
+/// (stored config, build-time default, setup page), adds the remote capability
+/// only for a remote start and manages [`ServerState`]. Returns the origin, or
+/// `None` for the setup page.
+fn boot<R: Runtime>(
+    app: &AppHandle<R>,
+    dir: Option<PathBuf>,
+    build_default: Option<&str>,
+) -> tauri::Result<Option<Url>> {
+    let stored = dir.as_deref().map_or(Stored::Missing, config::load_config);
+    if stored == Stored::Invalid {
+        eprintln!("backroom: server_config_invalid");
+    }
+    let start = config::resolve_start(&stored, build_default);
+    if let Some(capability) = start_capability(&start) {
+        app.add_capability(capability)?;
+    }
+    let origin = match start {
+        Start::Remote(origin) => Some(origin.url().clone()),
+        Start::Setup => {
+            eprintln!("backroom: setup_page");
+            None
+        }
+    };
+    app.manage(ServerState::new(origin.clone(), dir));
+    Ok(origin)
+}
+
+/// The origin this process serves right now (`None` on the setup page).
+fn current_origin<R: Runtime>(app: &AppHandle<R>) -> Option<Url> {
+    app.try_state::<ServerState>().and_then(|s| s.current())
+}
+
+/// "Change server…": writes the cleared config and restarts the app.
+///
+/// Tauri can add runtime capabilities but not remove them, and the old page,
+/// its cookies-in-memory, pending verifier and pending navigation all live in
+/// this process. Restarting is what revokes the old origin: the new process
+/// reads `{"serverUrl": null}`, adds no remote capability and shows the setup
+/// page (even when a build-time default exists). Reachable from the tray, the
+/// macOS app menu and the no-tray window menu, so it works when the page does
+/// not. On the setup page already it only shows the window.
+pub(crate) fn change_server<R: Runtime>(app: &AppHandle<R>) {
+    let Some(state) = app.try_state::<ServerState>() else {
+        return;
+    };
+    if state.current().is_none() {
+        show_main(app);
+        return;
+    }
+    if CHANGING_SERVER.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    if !clear_server_config(&state) {
+        // Restarting now would reconnect to the old server: stay put.
+        eprintln!("backroom: server_config_clear_failed");
+        CHANGING_SERVER.store(false, Ordering::SeqCst);
+        return;
+    }
+    eprintln!("backroom: server_cleared");
+    app.restart();
+}
+
+/// Writes `{"serverUrl": null}` so the next start shows the setup page.
+fn clear_server_config(state: &ServerState) -> bool {
+    state
+        .config_dir()
+        .is_some_and(|dir| config::save_config(dir, None).is_ok())
 }
 
 /// Shows, restores and focuses the main window.
@@ -180,24 +281,44 @@ pub(crate) fn show_main<R: Runtime>(app: &AppHandle<R>) {
     }
 }
 
+/// What the main window loads: the server origin, or the bundled setup page.
+fn main_url(origin: Option<&Url>) -> WebviewUrl {
+    match origin {
+        Some(origin) => WebviewUrl::External(origin.clone()),
+        None => WebviewUrl::App(SETUP_PAGE.into()),
+    }
+}
+
 fn build_main_window<R: Runtime>(
     app: &AppHandle<R>,
-    origin: &Url,
+    origin: Option<&Url>,
     on_close: tray::CloseAction,
 ) -> tauri::Result<()> {
-    let builder = WebviewWindowBuilder::new(app, MAIN_WINDOW, WebviewUrl::External(origin.clone()))
+    let builder = WebviewWindowBuilder::new(app, MAIN_WINDOW, main_url(origin))
         .title("Backroom")
         .inner_size(1200.0, 800.0)
         .min_inner_size(800.0, 560.0)
         // On WebKitGTK the download handler lives on the shared web context, so
         // this one also covers downloads started in viewer windows.
         .on_download(download_handler(app.clone()));
-    let builder = if smoke_enabled() {
-        smoke_builder(builder, app, origin)
+    // Without a tray host "Change server…" would be unreachable when the page
+    // is broken: give the main window a small menu bar instead (macOS has its
+    // app menu).
+    #[cfg(not(target_os = "macos"))]
+    let builder = if on_close == tray::CloseAction::Quit {
+        builder.menu(tray::window_menu(app)?)
     } else {
         builder
     };
-    let window = lock_down(builder, app, origin).build()?;
+    let builder = match (smoke_enabled(), origin) {
+        (true, Some(origin)) => smoke_builder(builder, app, origin),
+        (true, None) => {
+            println!("smoke no server");
+            std::process::exit(1);
+        }
+        (false, _) => builder,
+    };
+    let window = lock_down(builder, app).build()?;
 
     // With a tray host, closing hides to the tray (its Quit exits); without
     // one the window could never come back, so closing quits (viewers too).
@@ -219,6 +340,9 @@ fn build_main_window<R: Runtime>(
 /// Navigation lockdown shared by the main and viewer windows: only the app
 /// origin loads in-app; other http(s) goes to the default browser; everything
 /// else is dropped. Same-origin new-window requests open an in-app viewer.
+/// The origin is read from [`ServerState`] on every request; while the setup
+/// page shows (no origin) only the app's own origin loads, nothing opens in
+/// the browser and no viewer opens (see [`policy::window_nav`]).
 ///
 /// Tauri's `on_navigation` hook receives only the URL (no frame information),
 /// so cross-origin subframe navigations cannot be told apart from top-level
@@ -226,26 +350,27 @@ fn build_main_window<R: Runtime>(
 fn lock_down<'a, R: Runtime, M: Manager<R>>(
     builder: WebviewWindowBuilder<'a, R, M>,
     app: &AppHandle<R>,
-    origin: &Url,
 ) -> WebviewWindowBuilder<'a, R, M> {
     let nav_app = app.clone();
-    let nav_origin = origin.clone();
     let new_window_app = app.clone();
-    let new_window_origin = origin.clone();
     builder
-        .on_navigation(move |url| match policy::nav_decision(url, &nav_origin) {
-            Nav::Allow => true,
-            Nav::OpenExternal => {
-                open_external(&nav_app, url);
-                false
+        .on_navigation(move |url| {
+            match policy::window_nav(url, current_origin(&nav_app).as_ref()) {
+                Nav::Allow => true,
+                Nav::OpenExternal => {
+                    open_external(&nav_app, url);
+                    false
+                }
+                Nav::Drop => false,
             }
-            Nav::Drop => false,
         })
         .on_new_window(move |url, _features| {
-            match policy::nav_decision(&url, &new_window_origin) {
-                Nav::Allow => open_viewer(&new_window_app, &new_window_origin, url),
-                Nav::OpenExternal => open_external(&new_window_app, &url),
-                Nav::Drop => {}
+            if let Some(origin) = current_origin(&new_window_app) {
+                match policy::nav_decision(&url, &origin) {
+                    Nav::Allow => open_viewer(&new_window_app, url),
+                    Nav::OpenExternal => open_external(&new_window_app, &url),
+                    Nav::Drop => {}
+                }
             }
             // Never the webview's own popup: viewers are built by us, without
             // an opener link to the page that asked.
@@ -256,7 +381,7 @@ fn lock_down<'a, R: Runtime, M: Manager<R>>(
 /// Opens a same-origin URL (e.g. a file link with target=_blank) in a new
 /// `viewer-<n>` window. It shares the webview session (cookies) but matches no
 /// capability, so it has no IPC.
-fn open_viewer<R: Runtime>(app: &AppHandle<R>, origin: &Url, url: Url) {
+fn open_viewer<R: Runtime>(app: &AppHandle<R>, url: Url) {
     let allowed = app
         .state::<ViewerOpenLimiter>()
         .0
@@ -268,7 +393,6 @@ fn open_viewer<R: Runtime>(app: &AppHandle<R>, origin: &Url, url: Url) {
         return;
     }
     let handle = app.clone();
-    let origin = origin.clone();
     // Built after the new-window callback returns, not inside it.
     let queued = app.run_on_main_thread(move || {
         let label = format!(
@@ -288,7 +412,7 @@ fn open_viewer<R: Runtime>(app: &AppHandle<R>, origin: &Url, url: Url) {
             target_os = "openbsd"
         )))]
         let builder = builder.on_download(download_handler(handle.clone()));
-        if lock_down(builder, &handle, &origin).build().is_err() {
+        if lock_down(builder, &handle).build().is_err() {
             eprintln!("backroom: viewer_window_failed");
         }
     });
@@ -425,7 +549,7 @@ fn restrict_data_dir<R: Runtime>(app: &AppHandle<R>) {
     let _ = app;
 }
 
-fn setup_deep_links<R: Runtime>(app: &AppHandle<R>, origin: Url) {
+fn setup_deep_links<R: Runtime>(app: &AppHandle<R>) {
     let appimage = app.env().appimage.is_some();
     if should_register_scheme(cfg!(debug_assertions), appimage, smoke_enabled())
         && app.deep_link().register_all().is_err()
@@ -433,18 +557,20 @@ fn setup_deep_links<R: Runtime>(app: &AppHandle<R>, origin: Url) {
         eprintln!("backroom: deep_link_register_failed");
     }
 
+    // The origin is read per link: it is `None` while the setup page shows.
     let handle = app.clone();
-    let listen_origin = origin.clone();
     app.deep_link().on_open_url(move |event| {
         for url in event.urls() {
-            handle_deep_link(&handle, &listen_origin, url.as_str(), &show_notice);
+            let origin = current_origin(&handle);
+            handle_deep_link(&handle, origin.as_ref(), url.as_str(), &show_notice);
         }
     });
 
     // A link that started this (first) instance.
     if let Ok(Some(urls)) = app.deep_link().get_current() {
+        let origin = current_origin(app);
         for url in urls {
-            handle_deep_link(app, &origin, url.as_str(), &show_notice);
+            handle_deep_link(app, origin.as_ref(), url.as_str(), &show_notice);
         }
     }
 }
@@ -460,7 +586,7 @@ fn show_notice<R: Runtime>(app: &AppHandle<R>, text: &str) {
 /// `notice` shows a native notification (injected so tests stay headless).
 fn handle_deep_link<R: Runtime>(
     app: &AppHandle<R>,
-    origin: &Url,
+    origin: Option<&Url>,
     raw: &str,
     notice: &dyn Fn(&AppHandle<R>, &str),
 ) {
@@ -490,6 +616,12 @@ fn handle_deep_link<R: Runtime>(
             app.state::<PendingNavigation>().store(&id);
             show_main(app);
             emit_navigate(app, &id);
+        }
+        // The setup page has no use for a link; an auth link keeps its
+        // verifier (the page that asked for it may come back after setup).
+        DeepLinkAction::NoServer => {
+            eprintln!("backroom: deep_link_ignored_no_server");
+            show_main(app);
         }
         DeepLinkAction::Ignore => {}
     }
@@ -541,9 +673,11 @@ mod tests {
 
     #[test]
     fn auth_link_with_verifier_navigates_to_desktop_auth() {
-        let action = deep_link_action(&format!("backroom://auth?code={CODE}"), &origin(), || {
-            Some("ver".to_string())
-        });
+        let action = deep_link_action(
+            &format!("backroom://auth?code={CODE}"),
+            Some(&origin()),
+            || Some("ver".to_string()),
+        );
         assert_eq!(
             action,
             DeepLinkAction::NavigateMain(
@@ -557,7 +691,11 @@ mod tests {
 
     #[test]
     fn auth_link_without_verifier_is_no_verifier() {
-        let action = deep_link_action(&format!("backroom://auth?code={CODE}"), &origin(), || None);
+        let action = deep_link_action(
+            &format!("backroom://auth?code={CODE}"),
+            Some(&origin()),
+            || None,
+        );
         assert_eq!(action, DeepLinkAction::NoVerifier);
     }
 
@@ -568,12 +706,15 @@ mod tests {
             "garbage",
             "backroom://channel/x",
         ] {
-            let action = deep_link_action(raw, &origin(), || panic!("verifier taken for {raw}"));
+            let action =
+                deep_link_action(raw, Some(&origin()), || panic!("verifier taken for {raw}"));
             assert_eq!(action, DeepLinkAction::Ignore, "{raw}");
         }
-        let action = deep_link_action(&format!("backroom://channel/{ULID}"), &origin(), || {
-            panic!("verifier taken for a channel link")
-        });
+        let action = deep_link_action(
+            &format!("backroom://channel/{ULID}"),
+            Some(&origin()),
+            || panic!("verifier taken for a channel link"),
+        );
         assert_eq!(action, DeepLinkAction::EmitNavigate(ULID.to_string()));
     }
 
@@ -606,7 +747,7 @@ mod tests {
 
         handle_deep_link(
             handle,
-            &origin(),
+            Some(&origin()),
             &format!("backroom://auth?code={CODE}"),
             &no_notice,
         );
@@ -634,7 +775,7 @@ mod tests {
         let (seen, notice) = recorder();
         handle_deep_link(
             handle,
-            &origin(),
+            Some(&origin()),
             &format!("backroom://auth?code={CODE}"),
             &notice,
         );
@@ -649,7 +790,7 @@ mod tests {
         let (seen, notice) = recorder();
         handle_deep_link(
             app.handle(),
-            &origin(),
+            Some(&origin()),
             &format!("backroom://auth?code={CODE}"),
             &notice,
         );
@@ -671,7 +812,7 @@ mod tests {
         assert_eq!(first, second);
         handle_deep_link(
             app.handle(),
-            &origin(),
+            Some(&origin()),
             &format!("backroom://auth?code={CODE}"),
             &no_notice,
         );
@@ -694,7 +835,7 @@ mod tests {
             app.state::<VerifierStore>().login_challenge();
             handle_deep_link(
                 app.handle(),
-                &origin(),
+                Some(&origin()),
                 &format!("backroom://auth?code={CODE}"),
                 &no_notice,
             );
@@ -780,13 +921,13 @@ mod tests {
         });
         handle_deep_link(
             app.handle(),
-            &origin(),
+            Some(&origin()),
             &format!("backroom://channel/{ULID}"),
             &no_notice,
         );
         handle_deep_link(
             app.handle(),
-            &origin(),
+            Some(&origin()),
             "backroom://channel/nope",
             &no_notice,
         );
@@ -803,7 +944,7 @@ mod tests {
         let app = mock_app();
         handle_deep_link(
             app.handle(),
-            &origin(),
+            Some(&origin()),
             &format!("backroom://channel/{ULID}"),
             &no_notice,
         );
@@ -814,14 +955,14 @@ mod tests {
         // Invalid channel links and auth links never fill the slot.
         handle_deep_link(
             app.handle(),
-            &origin(),
+            Some(&origin()),
             "backroom://channel/nope",
             &no_notice,
         );
         let (_seen, notice) = recorder();
         handle_deep_link(
             app.handle(),
-            &origin(),
+            Some(&origin()),
             &format!("backroom://auth?code={CODE}"),
             &notice,
         );
@@ -907,6 +1048,500 @@ mod tests {
             Some(ULID.to_string())
         );
         assert_eq!(take(&main, "http://localhost:8787/").unwrap(), None);
+    }
+
+    // ---- runtime server address (Phase 8) ----
+
+    static SCRATCH_SEQ: AtomicU32 = AtomicU32::new(0);
+
+    /// A fresh, empty scratch dir standing in for the app config dir.
+    fn scratch_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "backroom-lib-test-{}-{}-{name}",
+            std::process::id(),
+            SCRATCH_SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    fn server(input: &str) -> config::ServerOrigin {
+        config::normalize_server_url(input).unwrap()
+    }
+
+    /// Booted like `run()`: real context (with the static setup capability),
+    /// the real commands, `boot` reading `dir`, and the main window on
+    /// whatever boot chose. Each call is a fresh process, as after a restart.
+    fn booted_app(
+        dir: &Path,
+        build_default: Option<&str>,
+    ) -> (App<MockRuntime>, tauri::WebviewWindow<MockRuntime>) {
+        let app = mock_builder()
+            .manage(VerifierStore::default())
+            .manage(PendingNavigation::default())
+            .invoke_handler(tauri::generate_handler![
+                commands::platform,
+                commands::take_pending_navigation,
+                commands::check_server,
+                commands::save_server
+            ])
+            .build(tauri::generate_context!())
+            .expect("mock app");
+        let origin = boot(app.handle(), Some(dir.to_path_buf()), build_default).expect("boot");
+        let main = WebviewWindowBuilder::new(&app, MAIN_WINDOW, main_url(origin.as_ref()))
+            .build()
+            .unwrap();
+        (app, main)
+    }
+
+    /// One IPC call through the real ACL; errors come back as plain text.
+    fn call(
+        w: &tauri::WebviewWindow<MockRuntime>,
+        cmd: &str,
+        url: &str,
+        args: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        let mut request = invoke_request(cmd, Url::parse(url).unwrap());
+        request.body = tauri::ipc::InvokeBody::Json(args);
+        tauri::test::get_ipc_response(w, request)
+            .map(|body| body.deserialize::<serde_json::Value>().unwrap())
+            .map_err(|e| {
+                e.as_str()
+                    .map(String::from)
+                    .unwrap_or_else(|| e.to_string())
+            })
+    }
+
+    /// The ACL's refusal (our own command errors never say "not allowed").
+    fn denied(result: Result<serde_json::Value, String>) -> bool {
+        matches!(result, Err(e) if e.contains("not allowed"))
+    }
+
+    fn no_args() -> serde_json::Value {
+        serde_json::json!({})
+    }
+
+    #[test]
+    fn without_a_server_the_setup_page_loads_with_no_remote_capability() {
+        let dir = scratch_dir("setup");
+        let (app, main) = booted_app(&dir, None);
+        let local = main.url().unwrap();
+        assert!(policy::is_app_local(&local), "{local}");
+        // (The mock runtime reports the bare app origin; the page is index.html.)
+        assert!(matches!(main_url(None), WebviewUrl::App(p) if p.as_os_str() == SETUP_PAGE));
+        assert_eq!(app.state::<ServerState>().current(), None);
+        let local = local.as_str();
+
+        // The setup commands pass the ACL: their own validation answers.
+        assert_eq!(
+            call(
+                &main,
+                "check_server",
+                local,
+                serde_json::json!({ "url": "ftp://x.example" })
+            ),
+            Err(config::ConfigError::UnsupportedScheme.to_string())
+        );
+        assert_eq!(
+            call(
+                &main,
+                "save_server",
+                local,
+                serde_json::json!({ "url": "javascript:alert(1)" })
+            ),
+            Err(config::ConfigError::UnsupportedScheme.to_string())
+        );
+        assert_eq!(config::load_config(&dir), Stored::Missing, "nothing saved");
+
+        // The remote commands are not granted to the setup page.
+        assert!(denied(call(
+            &main,
+            "take_pending_navigation",
+            local,
+            no_args()
+        )));
+        assert!(denied(call(&main, "platform", local, no_args())));
+
+        // No remote origin gets anything, the setup commands least of all.
+        for remote in [
+            "http://localhost:8787/",
+            "https://chat.example.com/",
+            "http://tauri.localhost.evil.example/",
+        ] {
+            for cmd in ["check_server", "save_server", "take_pending_navigation"] {
+                let args = serde_json::json!({ "url": "https://chat.example.com" });
+                assert!(
+                    denied(call(&main, cmd, remote, args)),
+                    "{cmd} from {remote}"
+                );
+            }
+        }
+
+        // A viewer window on the app origin gets nothing either.
+        let viewer = WebviewWindowBuilder::new(
+            &app,
+            format!("{VIEWER_PREFIX}1"),
+            WebviewUrl::App(SETUP_PAGE.into()),
+        )
+        .build()
+        .unwrap();
+        let args = serde_json::json!({ "url": "https://chat.example.com" });
+        assert!(denied(call(&viewer, "check_server", local, args)));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_server_connects_once_and_only_the_saved_origin_gets_remote_commands() {
+        let dir = scratch_dir("save");
+        let (app, main) = booted_app(&dir, None);
+        let local = main.url().unwrap().to_string();
+
+        let saved = call(
+            &main,
+            "save_server",
+            &local,
+            serde_json::json!({ "url": "  http://LOCALHOST:8787/ " }),
+        );
+        assert_eq!(saved, Ok(serde_json::json!("http://localhost:8787")));
+        assert_eq!(
+            config::load_config(&dir),
+            Stored::Server(server("http://localhost:8787"))
+        );
+        assert_eq!(app.state::<ServerState>().current(), Some(origin()));
+        assert_eq!(main.url().unwrap(), origin(), "navigated by Rust");
+
+        // Remote commands: the saved origin only.
+        assert_eq!(
+            call(
+                &main,
+                "take_pending_navigation",
+                "http://localhost:8787/c/x",
+                no_args()
+            ),
+            Ok(serde_json::Value::Null)
+        );
+        for other in [
+            "http://localhost:8788/",
+            "https://localhost:8787/",
+            "http://127.0.0.1:8787/",
+        ] {
+            assert!(
+                denied(call(&main, "take_pending_navigation", other, no_args())),
+                "{other}"
+            );
+        }
+        assert!(denied(call(
+            &main,
+            "take_pending_navigation",
+            &local,
+            no_args()
+        )));
+        // The saved origin never gets the setup commands.
+        let args = serde_json::json!({ "url": "https://evil.example" });
+        assert!(denied(call(
+            &main,
+            "save_server",
+            "http://localhost:8787/",
+            args
+        )));
+
+        // A second save is refused (the window no longer shows the setup page).
+        let args = serde_json::json!({ "url": "https://evil.example" });
+        assert!(call(&main, "save_server", &local, args).is_err());
+        assert_eq!(app.state::<ServerState>().current(), Some(origin()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_server_refuses_to_replace_a_connected_origin() {
+        // Even if the setup page were somehow back in a connected process,
+        // the origin stays: changing it takes a restart.
+        let dir = scratch_dir("already");
+        config::save_config(&dir, Some(&server("http://localhost:8787"))).unwrap();
+        let app = mock_builder()
+            .invoke_handler(tauri::generate_handler![commands::save_server])
+            .build(tauri::generate_context!())
+            .expect("mock app");
+        boot(app.handle(), Some(dir.clone()), None).unwrap();
+        let main = WebviewWindowBuilder::new(&app, MAIN_WINDOW, WebviewUrl::App(SETUP_PAGE.into()))
+            .build()
+            .unwrap();
+        let local = main.url().unwrap().to_string();
+        let args = serde_json::json!({ "url": "https://evil.example" });
+        assert_eq!(
+            call(&main, "save_server", &local, args),
+            Err("Backroom is already connected to a server.".to_string())
+        );
+        assert_eq!(
+            config::load_config(&dir),
+            Stored::Server(server("http://localhost:8787"))
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn after_changing_the_server_the_previous_origin_is_denied() {
+        let dir = scratch_dir("change");
+        config::save_config(&dir, Some(&server("http://localhost:8787"))).unwrap();
+        {
+            let (app, main) = booted_app(&dir, None);
+            assert_eq!(app.state::<ServerState>().current(), Some(origin()));
+            assert!(call(
+                &main,
+                "take_pending_navigation",
+                "http://localhost:8787/",
+                no_args()
+            )
+            .is_ok());
+            // "Change server…" clears the config, then restarts.
+            assert!(clear_server_config(&app.state::<ServerState>()));
+        }
+        assert_eq!(config::load_config(&dir), Stored::Cleared);
+
+        // The new process shows the setup page, even with a build-time default.
+        let (app, main) = booted_app(&dir, Some("http://localhost:8787"));
+        assert_eq!(app.state::<ServerState>().current(), None);
+        let local = main.url().unwrap().to_string();
+        assert!(policy::is_app_local(&main.url().unwrap()));
+        assert!(denied(call(
+            &main,
+            "take_pending_navigation",
+            "http://localhost:8787/",
+            no_args()
+        )));
+        let args = serde_json::json!({ "url": "http://localhost:8788" });
+        assert!(call(&main, "save_server", &local, args).is_ok());
+        assert!(call(
+            &main,
+            "take_pending_navigation",
+            "http://localhost:8788/",
+            no_args()
+        )
+        .is_ok());
+        assert!(denied(call(
+            &main,
+            "take_pending_navigation",
+            "http://localhost:8787/",
+            no_args()
+        )));
+        drop((app, main));
+
+        // And after the next restart the new origin is the one that loads.
+        let (app, main) = booted_app(&dir, Some("http://localhost:8787"));
+        let new_origin = server("http://localhost:8788").url().clone();
+        assert_eq!(
+            app.state::<ServerState>().current(),
+            Some(new_origin.clone())
+        );
+        assert_eq!(main.url().unwrap(), new_origin);
+        assert!(denied(call(
+            &main,
+            "take_pending_navigation",
+            "http://localhost:8787/",
+            no_args()
+        )));
+        assert!(call(
+            &main,
+            "take_pending_navigation",
+            "http://localhost:8788/",
+            no_args()
+        )
+        .is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_hostile_stored_config_never_reaches_the_capability_builder() {
+        for (i, hostile) in [
+            r#"{"serverUrl":"http://evil.example"}"#,
+            r#"{"serverUrl":"https://evil.example/phish"}"#,
+            r#"{"serverUrl":"https://evil.example/*"}"#,
+            r#"{"serverUrl":"javascript:alert(1)"}"#,
+            r#"{"serverUrl":"https://user:pw@evil.example"}"#,
+            r#"{"serverUrl":"https://tauri.localhost"}"#,
+            "garbage",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let dir = scratch_dir(&format!("hostile-{i}"));
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join(config::CONFIG_FILE), hostile).unwrap();
+            let stored = config::load_config(&dir);
+            assert_eq!(stored, Stored::Invalid, "{hostile}");
+            // Not even the build-time default: a broken file asks the user.
+            let start = config::resolve_start(&stored, Some("http://localhost:8787"));
+            assert_eq!(start, Start::Setup, "{hostile}");
+            assert!(start_capability(&start).is_none(), "{hostile}");
+
+            let (app, main) = booted_app(&dir, Some("http://localhost:8787"));
+            assert_eq!(app.state::<ServerState>().current(), None, "{hostile}");
+            assert!(policy::is_app_local(&main.url().unwrap()));
+            for url in [
+                "http://evil.example/",
+                "https://evil.example/",
+                "https://evil.example/phish",
+                "http://localhost:8787/",
+            ] {
+                assert!(
+                    denied(call(&main, "take_pending_navigation", url, no_args())),
+                    "{hostile}: {url}"
+                );
+            }
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    #[test]
+    fn deep_links_on_the_setup_page_are_ignored_and_keep_the_verifier() {
+        let action = deep_link_action(&format!("backroom://auth?code={CODE}"), None, || {
+            panic!("verifier taken without a server")
+        });
+        assert_eq!(action, DeepLinkAction::NoServer);
+
+        let dir = scratch_dir("deeplink");
+        let (app, main) = booted_app(&dir, None);
+        let challenge = app.state::<VerifierStore>().login_challenge();
+        let before = main.url().unwrap();
+        let origin = current_origin(app.handle());
+        assert_eq!(origin, None);
+        handle_deep_link(
+            app.handle(),
+            origin.as_ref(),
+            &format!("backroom://auth?code={CODE}"),
+            &no_notice,
+        );
+        handle_deep_link(
+            app.handle(),
+            origin.as_ref(),
+            &format!("backroom://channel/{ULID}"),
+            &no_notice,
+        );
+        assert_eq!(main.url().unwrap(), before, "main not navigated");
+        assert_eq!(app.state::<PendingNavigation>().take(), None);
+        let verifier = app
+            .state::<VerifierStore>()
+            .take_verifier()
+            .expect("verifier kept");
+        assert_eq!(auth::challenge_for(&verifier), challenge);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_build_default_loads_only_without_a_config_file() {
+        let dir = scratch_dir("default");
+        let (app, main) = booted_app(&dir, Some("http://localhost:8787"));
+        assert_eq!(app.state::<ServerState>().current(), Some(origin()));
+        assert_eq!(main.url().unwrap(), origin());
+        assert!(call(
+            &main,
+            "take_pending_navigation",
+            "http://localhost:8787/",
+            no_args()
+        )
+        .is_ok());
+        assert_eq!(
+            config::load_config(&dir),
+            Stored::Missing,
+            "a default is not saved"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn setup_page_is_self_contained_and_accessible() {
+        let html = include_str!("../../dist/index.html");
+        let js = include_str!("../../dist/setup.js");
+        let css = include_str!("../../dist/setup.css");
+
+        // Only the two sibling files are referenced.
+        let mut refs = Vec::new();
+        for attr in ["src=\"", "href=\""] {
+            for (i, _) in html.match_indices(attr) {
+                let rest = &html[i + attr.len()..];
+                refs.push(&rest[..rest.find('"').unwrap()]);
+            }
+        }
+        refs.sort();
+        assert_eq!(refs, ["setup.css", "setup.js"]);
+        // No URL anywhere except the example text and the IPC origin in the CSP.
+        let stripped = html
+            .replace("https://chat.example.com", "")
+            .replace("http://ipc.localhost", "");
+        assert!(!stripped.contains("://"), "{stripped}");
+        assert!(!js.contains("://") && !css.contains("://"));
+        for banned in ["@import", "url(", "@font-face"] {
+            assert!(!css.contains(banned), "{banned}");
+        }
+        for banned in [
+            "fetch(",
+            "XMLHttpRequest",
+            "import(",
+            "eval(",
+            "innerHTML",
+            "WebSocket",
+        ] {
+            assert!(!js.contains(banned), "{banned}");
+        }
+        assert!(
+            !html.contains("<script>") && !html.contains("style="),
+            "no inline code"
+        );
+
+        // CSP: only the page's own files and the IPC channel.
+        let csp_start = html
+            .find("<meta http-equiv=\"Content-Security-Policy\" content=\"")
+            .expect("a CSP meta tag");
+        let csp = &html[csp_start..];
+        let csp = &csp[csp.find("content=\"").unwrap() + 9..];
+        let csp = &csp[..csp.find('"').unwrap()];
+        for part in [
+            "default-src 'none'",
+            "script-src 'self'",
+            "style-src 'self'",
+            "connect-src ipc: http://ipc.localhost",
+            "base-uri 'none'",
+            "form-action 'none'",
+        ] {
+            assert!(csp.contains(part), "{part} in {csp}");
+        }
+        assert!(!csp.contains("unsafe"), "{csp}");
+
+        // The required parts.
+        for part in [
+            "<label for=\"server-url\">",
+            "id=\"server-url\"",
+            "<button id=\"connect\" type=\"submit\">Connect</button>",
+            "role=\"alert\"",
+            "id=\"insecure\"",
+            "Enter the address of your Backroom server, for example https://chat.example.com",
+            "<html lang=\"en\">",
+        ] {
+            assert!(html.contains(part), "{part}");
+        }
+        assert!(css.contains("prefers-color-scheme: dark"));
+        assert!(css.contains(":focus-visible"));
+        for part in [
+            "__TAURI_INTERNALS__",
+            "'check_server'",
+            "'save_server'",
+            "preventDefault",
+        ] {
+            assert!(js.contains(part), "{part}");
+        }
+
+        // The app serves this page with its own CSP, and never exposes the
+        // global Tauri API (the remote page uses the bridge's imports).
+        let conf: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        assert_eq!(conf["build"]["frontendDist"], "../dist");
+        let app_csp = conf["app"]["security"]["csp"].as_str().unwrap();
+        assert!(
+            app_csp.contains("connect-src ipc: http://ipc.localhost"),
+            "{app_csp}"
+        );
+        assert!(!app_csp.contains("unsafe"));
+        assert!(conf["app"]["withGlobalTauri"].as_bool() != Some(true));
     }
 
     #[test]

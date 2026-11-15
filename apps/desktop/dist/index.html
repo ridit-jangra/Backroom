@@ -2,9 +2,39 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <title>Backroom</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src ipc: http://ipc.localhost; base-uri 'none'; form-action 'none'" />
+    <meta name="color-scheme" content="light dark" />
+    <title>Connect to your server · Backroom</title>
+    <link rel="stylesheet" href="setup.css" />
+    <script src="setup.js" defer></script>
   </head>
   <body>
-    <!-- Placeholder for Tauri's frontendDist. The app window loads the remote BACKROOM_APP_URL instead. -->
+    <main>
+      <h1>Backroom</h1>
+      <form id="setup" novalidate>
+        <label for="server-url">Server address</label>
+        <p id="hint">Enter the address of your Backroom server, for example https://chat.example.com</p>
+        <input
+          id="server-url"
+          name="server"
+          type="text"
+          inputmode="url"
+          autocomplete="url"
+          autocapitalize="none"
+          spellcheck="false"
+          maxlength="263"
+          required
+          aria-describedby="hint error insecure"
+        />
+        <p id="error" class="error" role="alert"></p>
+        <p id="insecure" class="notice" role="status" hidden>
+          This address uses plain http: messages to and from it are not encrypted. Use it only on a network you trust.
+          Press Connect again to continue.
+        </p>
+        <button id="connect" type="submit">Connect</button>
+        <p id="status" class="status" aria-live="polite"></p>
+      </form>
+    </main>
   </body>
 </html>
