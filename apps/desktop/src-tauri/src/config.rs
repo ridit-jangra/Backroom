@@ -21,14 +21,12 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
-use url::{Host, Url};
+use url::Url;
 
-use crate::policy;
+use crate::{origin, policy};
 
 /// File name inside the app config dir.
 pub const CONFIG_FILE: &str = "server.json";
-/// Longest accepted input: a 253-char DNS name plus room for scheme and port.
-pub const MAX_INPUT_CHARS: usize = 253 + 10;
 /// A larger `server.json` is not ours: it is ignored.
 pub const MAX_CONFIG_BYTES: u64 = 4096;
 /// Total time budget for the `/health` check.
@@ -61,168 +59,18 @@ impl ServerOrigin {
     }
 }
 
-/// Why an address was refused. `Display` is the text the setup page shows.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ConfigError {
-    Empty,
-    TooLong,
-    InvalidUrl,
-    UnsupportedScheme,
-    Credentials,
-    NotAnOrigin,
-    ReservedHost,
-    InsecureHost,
-    InvalidHostName,
-    UnusableOrigin,
-}
+pub use crate::origin::{ConfigError, MAX_INPUT_CHARS};
 
-impl fmt::Display for ConfigError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            ConfigError::Empty => "Enter your server's address.",
-            ConfigError::TooLong => "That address is too long.",
-            ConfigError::InvalidUrl => "That is not a valid server address.",
-            ConfigError::UnsupportedScheme => {
-                "Use an address that starts with https:// (or http:// on your own network)."
-            }
-            ConfigError::Credentials => "Leave any user name or password out of the address.",
-            ConfigError::NotAnOrigin => {
-                "Enter only the server address, without a path, \"?\" or \"#\"."
-            }
-            ConfigError::ReservedHost => "That address cannot be a Backroom server.",
-            ConfigError::InvalidHostName => {
-                "Server names may use only letters, digits, hyphens and dots."
-            }
-            ConfigError::UnusableOrigin => "The app cannot use this address.",
-            ConfigError::InsecureHost => {
-                "Use https:// for this server. Plain http:// works only for localhost, \
-                 private network addresses and .local names."
-            }
-        })
-    }
-}
-
-impl std::error::Error for ConfigError {}
-
-/// Normalises a typed server address to its origin.
-///
-/// Trims; adds `https://` when there is no scheme; accepts http and https only;
-/// rejects credentials, any path other than `/`, a query or fragment (even an
-/// empty one), whitespace or backslashes inside, empty or reserved hosts
-/// (`*.localhost`, which the webview uses for its own origins) and input over
-/// [`MAX_INPUT_CHARS`]. Plain http is allowed only for `localhost`, loopback
-/// and RFC 1918 addresses and `.local` names (`insecure: true`). Hosts come out
-/// lowercased and punycoded, default ports are dropped.
+/// Normalises a typed server address to its origin: the rules in
+/// [`crate::origin::check_origin`], then the same checks the build-time origin
+/// always had ([`policy::app_origin`], never weaker), then the capability
+/// pattern check. A `ServerOrigin` exists only when all of them pass.
 pub fn normalize_server_url(input: &str) -> Result<ServerOrigin, ConfigError> {
-    let s = input.trim();
-    if s.is_empty() {
-        return Err(ConfigError::Empty);
-    }
-    if s.chars().count() > MAX_INPUT_CHARS {
-        return Err(ConfigError::TooLong);
-    }
-    // The URL parser silently drops tabs and newlines and reads `\` as `/`;
-    // refuse them (and invisible format characters) instead of guessing.
-    if s.starts_with('/')
-        || s.contains('\\')
-        || s.chars()
-            .any(|c| c.is_whitespace() || c.is_control() || policy::is_format_char(c))
-    {
-        return Err(ConfigError::InvalidUrl);
-    }
-    let candidate = if has_scheme(s) {
-        s.to_string()
-    } else {
-        format!("https://{s}")
-    };
-    let url = Url::parse(&candidate).map_err(|_| ConfigError::InvalidUrl)?;
-    if !matches!(url.scheme(), "http" | "https") {
-        return Err(ConfigError::UnsupportedScheme);
-    }
-    if !url.username().is_empty() || url.password().is_some() {
-        return Err(ConfigError::Credentials);
-    }
-    // Checked on the raw text as well: the parser resolves `/%2e%2e/` and
-    // `/./` to `/`, which must not pass for "no path".
-    if !raw_path_is_empty(&candidate)
-        || url.path() != "/"
-        || url.query().is_some()
-        || url.fragment().is_some()
-    {
-        return Err(ConfigError::NotAnOrigin);
-    }
-    if url.port() == Some(0) {
-        return Err(ConfigError::InvalidUrl);
-    }
-    let host = url.host().ok_or(ConfigError::InvalidUrl)?;
-    match host {
-        Host::Domain(d) => {
-            if d.is_empty() || d.starts_with('.') || d.ends_with('.') {
-                return Err(ConfigError::InvalidUrl);
-            }
-            if !is_ldh_hostname(d) {
-                return Err(ConfigError::InvalidHostName);
-            }
-            // `*.localhost` names the webview's own origins (`tauri.localhost`,
-            // `ipc.localhost`) on some platforms.
-            if d.ends_with(".localhost") {
-                return Err(ConfigError::ReservedHost);
-            }
-        }
-        Host::Ipv4(ip) if ip.is_unspecified() || ip.is_broadcast() => {
-            return Err(ConfigError::InvalidUrl)
-        }
-        Host::Ipv6(ip) if ip.is_unspecified() => return Err(ConfigError::InvalidUrl),
-        _ => {}
-    }
-    let insecure = url.scheme() == "http";
-    if insecure && !is_private_host(&host) {
-        return Err(ConfigError::InsecureHost);
-    }
-    // The same checks the build-time origin always had, never weaker.
+    let (url, insecure) = origin::check_origin(input)?;
     let url = policy::app_origin(&url.origin().ascii_serialization())
         .map_err(|_| ConfigError::InvalidUrl)?;
     verify_pattern(&url)?;
     Ok(ServerOrigin { url, insecure })
-}
-
-/// True when `s` starts with a URL scheme. `host:port` (`chat.example.com:8443`,
-/// `localhost:8787`) is not a scheme.
-fn has_scheme(s: &str) -> bool {
-    let Some(i) = s.find(':') else {
-        return false;
-    };
-    let (scheme, rest) = (&s[..i], &s[i + 1..]);
-    let valid = scheme.starts_with(|c: char| c.is_ascii_alphabetic())
-        && scheme
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'));
-    if !valid {
-        return false;
-    }
-    let port = rest.split(['/', '?', '#']).next().unwrap_or("");
-    !(!port.is_empty() && port.chars().all(|c| c.is_ascii_digit()))
-}
-
-/// The text after `scheme://authority` is empty or exactly `/`.
-fn raw_path_is_empty(candidate: &str) -> bool {
-    let Some((_, after)) = candidate.split_once("://") else {
-        return false;
-    };
-    match after.find(['/', '?', '#']) {
-        Some(i) => &after[i..] == "/",
-        None => true,
-    }
-}
-
-/// Hosts where plain http is acceptable: this machine, RFC 1918 networks and
-/// mDNS `.local` names.
-fn is_private_host(host: &Host<&str>) -> bool {
-    match host {
-        Host::Domain(d) => *d == "localhost" || (d.len() > ".local".len() && d.ends_with(".local")),
-        Host::Ipv4(ip) => ip.is_loopback() || ip.is_private(),
-        Host::Ipv6(ip) => ip.is_loopback(),
-    }
 }
 
 /// The capability URL pattern for `origin`: `<scheme>://<host>[:port]/*`,
@@ -274,22 +122,6 @@ fn verify_pattern(origin: &Url) -> Result<(), ConfigError> {
     }
 }
 
-/// After IDNA: dot-separated LDH labels (`a-z`, `0-9`, `-`, 1-63 chars, no
-/// leading or trailing hyphen), at most 253 chars. Everything else (`*`,
-/// `(`, `+`, `_`, …) is refused: the URL parser keeps such characters, and
-/// several are URLPattern syntax.
-fn is_ldh_hostname(d: &str) -> bool {
-    d.len() <= 253
-        && d.split('.').all(|label| {
-            (1..=63).contains(&label.len())
-                && !label.starts_with('-')
-                && !label.ends_with('-')
-                && label
-                    .bytes()
-                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-        })
-}
-
 /// What `server.json` says.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Stored {
@@ -321,19 +153,29 @@ pub fn parse_config(bytes: &[u8]) -> Stored {
     }
 }
 
-/// Reads `<dir>/server.json`. Only a regular file is read (a FIFO or a
+/// Reads `<dir>/server.json`. Only a regular file is read (a symlink, FIFO or a
 /// directory under that name is `Invalid`, never waited on).
 pub fn load_config(dir: &Path) -> Stored {
     let path = dir.join(CONFIG_FILE);
-    match fs::metadata(&path) {
-        Ok(meta) if meta.is_file() && meta.len() <= MAX_CONFIG_BYTES => {}
-        Ok(_) => return Stored::Invalid,
+    let mut options = OpenOptions::new();
+    options.read(true);
+    // Unix: a symlink is refused (O_NOFOLLOW) and a FIFO never blocks the open
+    // (O_NONBLOCK); what was opened is then checked on the handle itself, so
+    // nothing can be swapped in between the check and the read.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let file = match options.open(&path) {
+        Ok(file) => file,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Stored::Missing,
         Err(_) => return Stored::Invalid,
-    }
-    let Ok(file) = File::open(&path) else {
-        return Stored::Invalid;
     };
+    match file.metadata() {
+        Ok(meta) if meta.is_file() && meta.len() <= MAX_CONFIG_BYTES => {}
+        _ => return Stored::Invalid,
+    }
     let mut bytes = Vec::new();
     match file.take(MAX_CONFIG_BYTES + 1).read_to_end(&mut bytes) {
         Ok(n) if n as u64 <= MAX_CONFIG_BYTES => parse_config(&bytes),
@@ -390,6 +232,13 @@ fn create_private_dir(dir: &Path) -> io::Result<()> {
         fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
     }
     Ok(())
+}
+
+/// True when the build-time default would have applied but the rules refuse
+/// it (logged as `build_default_refused`; build.rs normally stops such a build).
+pub fn build_default_refused(stored: &Stored, build_default: Option<&str>) -> bool {
+    *stored == Stored::Missing
+        && build_default.is_some_and(|raw| normalize_server_url(raw).is_err())
 }
 
 /// What the main window loads at startup.
@@ -1141,6 +990,37 @@ mod tests {
         cleanup(&dir);
         assert_eq!(dir_mode, 0o700);
         assert_eq!(file_mode, 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_refuses_a_symlinked_config() {
+        let dir = scratch("symlink");
+        fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("elsewhere.json");
+        fs::write(&target, r#"{"serverUrl":"https://chat.example.com"}"#).unwrap();
+        std::os::unix::fs::symlink(&target, dir.join(CONFIG_FILE)).unwrap();
+        assert_eq!(load_config(&dir), Stored::Invalid);
+        // A dangling symlink is not "missing" either.
+        fs::remove_file(&target).unwrap();
+        assert_eq!(load_config(&dir), Stored::Invalid);
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn a_refused_build_default_is_reported() {
+        assert!(build_default_refused(
+            &Stored::Missing,
+            Some("http://chat.example.com")
+        ));
+        assert!(build_default_refused(&Stored::Missing, Some("https://*")));
+        assert!(!build_default_refused(
+            &Stored::Missing,
+            Some("http://localhost:8788")
+        ));
+        assert!(!build_default_refused(&Stored::Missing, None));
+        // With a file the default is not consulted at all.
+        assert!(!build_default_refused(&Stored::Cleared, Some("https://*")));
     }
 
     #[test]

@@ -1,10 +1,17 @@
-/// Fails the build early on a bad `BACKROOM_APP_URL` (it must parse and be http/https).
+// The runtime's own address rules (url + std only), so a build-time default
+// the app would refuse fails the build instead of being silently ignored.
+#[allow(dead_code)]
+#[path = "src/origin.rs"]
+mod origin;
+
+/// Fails the build early on a `BACKROOM_APP_URL` that the app's address rules
+/// refuse (the runtime would ignore it and show the setup page).
 fn validate_app_url() {
     println!("cargo:rerun-if-env-changed=BACKROOM_APP_URL");
+    println!("cargo:rerun-if-changed=src/origin.rs");
     if let Ok(raw) = std::env::var("BACKROOM_APP_URL") {
-        match url::Url::parse(&raw) {
-            Ok(u) if matches!(u.scheme(), "http" | "https") => {}
-            _ => panic!("BACKROOM_APP_URL must be a valid http:// or https:// URL"),
+        if let Err(e) = origin::check_origin(&raw) {
+            panic!("BACKROOM_APP_URL is refused by the app's address rules: {e}");
         }
     }
 }

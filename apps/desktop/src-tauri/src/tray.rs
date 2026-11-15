@@ -2,7 +2,7 @@
 //! tooltip and, for AppIndicator trays on Linux (which ignore tooltips), as a
 //! label. "Change server…" also sits in the macOS app menu and, when Linux has
 //! no tray host, in a small menu bar on the main window, so it stays reachable
-//! even when the remote page is broken. One handler serves every menu.
+//! even when the remote page is broken. One global handler serves every menu.
 //!
 //! Tray-host detection: on Linux the tray icon is only visible when a
 //! StatusNotifier host runs (GNOME without the AppIndicator extension has
@@ -119,14 +119,34 @@ fn status_notifier_watcher_present() -> Result<bool, ProbeError> {
     dbus.name_has_owner(name).map_err(|_| ProbeError)
 }
 
-/// The one menu handler. Tauri registers a tray's menu handler as a global
-/// one, so it also receives the app menu and window menu events (same ids).
-fn on_menu_event<R: Runtime>(app: &AppHandle<R>, event: MenuEvent) {
-    match event.id().as_ref() {
-        MENU_SHOW => crate::show_main(app),
-        MENU_CHANGE_SERVER => crate::change_server(app),
-        MENU_QUIT => app.exit(0),
-        _ => {}
+/// What a menu item does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MenuAction {
+    Show,
+    ChangeServer,
+    Quit,
+}
+
+/// Pure mapping from a menu item id to its action.
+pub fn menu_action(id: &str) -> Option<MenuAction> {
+    match id {
+        MENU_SHOW => Some(MenuAction::Show),
+        MENU_CHANGE_SERVER => Some(MenuAction::ChangeServer),
+        MENU_QUIT => Some(MenuAction::Quit),
+        _ => None,
+    }
+}
+
+/// The one menu handler, registered globally with `Builder::on_menu_event`
+/// in `run()`: it serves the tray menu, the macOS app menu and the no-tray
+/// window menu alike (same ids). The tray adds no handler of its own, which
+/// would run a second time for every event.
+pub fn on_menu_event<R: Runtime>(app: &AppHandle<R>, event: MenuEvent) {
+    match menu_action(event.id().as_ref()) {
+        Some(MenuAction::Show) => crate::show_main(app),
+        Some(MenuAction::ChangeServer) => crate::change_server(app),
+        Some(MenuAction::Quit) => app.exit(0),
+        None => {}
     }
 }
 
@@ -174,8 +194,7 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     let menu = tray_menu(app)?;
     let mut builder = TrayIconBuilder::with_id(TRAY_ID)
         .menu(&menu)
-        .tooltip(tooltip_text(0))
-        .on_menu_event(on_menu_event);
+        .tooltip(tooltip_text(0));
     if let Some(icon) = app.default_window_icon() {
         builder = builder.icon(icon.clone());
     }
@@ -258,6 +277,18 @@ mod tests {
                 _ => "?".to_string(),
             })
             .collect()
+    }
+
+    #[test]
+    fn menu_ids_map_to_actions() {
+        assert_eq!(menu_action(MENU_SHOW), Some(MenuAction::Show));
+        assert_eq!(
+            menu_action(MENU_CHANGE_SERVER),
+            Some(MenuAction::ChangeServer)
+        );
+        assert_eq!(menu_action(MENU_QUIT), Some(MenuAction::Quit));
+        assert_eq!(menu_action("about"), None);
+        assert_eq!(menu_action(""), None);
     }
 
     #[test]

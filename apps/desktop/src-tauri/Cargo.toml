@@ -33,6 +33,11 @@ url = "=2.5.8"
 
 # Same version and (default) features as the zbus the opener, notification and
 # single-instance plugins already pull in; used only for the tray-host probe.
+# Already in the tree (same version); only for O_NOFOLLOW / O_NONBLOCK when
+# reading server.json.
+[target.'cfg(unix)'.dependencies]
+libc = "=0.2.191"
+
 [target.'cfg(target_os = "linux")'.dependencies]
 zbus = "=5.19.0"
 

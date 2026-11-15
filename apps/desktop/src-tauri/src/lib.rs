@@ -1,6 +1,7 @@
 pub mod auth;
 pub mod commands;
 pub mod config;
+pub mod origin;
 pub mod policy;
 pub mod tray;
 
@@ -160,6 +161,9 @@ pub fn run() {
         .manage(PendingNavigation::default())
         .manage(ExternalLimiter::default())
         .manage(ViewerOpenLimiter::default())
+        // Every menu (tray, macOS app menu, the no-tray window menu bar) goes
+        // through this one global handler; the tray registers none of its own.
+        .on_menu_event(tray::on_menu_event)
         .invoke_handler(tauri::generate_handler![
             commands::notify,
             commands::set_badge,
@@ -214,6 +218,11 @@ fn boot<R: Runtime>(
     let stored = dir.as_deref().map_or(Stored::Missing, config::load_config);
     if stored == Stored::Invalid {
         eprintln!("backroom: server_config_invalid");
+    }
+    if config::build_default_refused(&stored, build_default) {
+        // build.rs refuses such a default; this catches the pattern check only
+        // the runtime can make.
+        eprintln!("backroom: build_default_refused");
     }
     let mut start = config::resolve_start(&stored, build_default);
     if let Some(capability) = start_capability(&start) {
@@ -1249,10 +1258,45 @@ mod tests {
             args
         )));
 
-        // A second save is refused (the window no longer shows the setup page).
+        // A second save is refused: the window no longer shows the setup page.
         let args = serde_json::json!({ "url": "https://evil.example" });
-        assert!(call(&main, "save_server", &local, args).is_err());
+        assert_eq!(
+            call(&main, "save_server", &local, args),
+            Err("forbidden".to_string())
+        );
         assert_eq!(app.state::<ServerState>().current(), Some(origin()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn setup_commands_refuse_a_remote_webview_even_with_a_local_ipc_origin() {
+        // The capability looks at the IPC request's origin; require_setup_page
+        // also looks at what the window actually shows.
+        #[cfg(not(windows))]
+        const LOCAL: &str = "tauri://localhost/";
+        #[cfg(windows)]
+        const LOCAL: &str = "http://tauri.localhost/";
+        let dir = scratch_dir("remote-webview");
+        let app = mock_builder()
+            .invoke_handler(tauri::generate_handler![
+                commands::check_server,
+                commands::save_server
+            ])
+            .build(tauri::generate_context!())
+            .expect("mock app");
+        boot(app.handle(), Some(dir.clone()), None).unwrap();
+        let main = WebviewWindowBuilder::new(&app, MAIN_WINDOW, WebviewUrl::External(origin()))
+            .build()
+            .unwrap();
+        for cmd in ["check_server", "save_server"] {
+            let args = serde_json::json!({ "url": "https://chat.example.com" });
+            assert_eq!(
+                call(&main, cmd, LOCAL, args),
+                Err("forbidden".to_string()),
+                "{cmd}"
+            );
+        }
+        assert_eq!(config::load_config(&dir), Stored::Missing);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

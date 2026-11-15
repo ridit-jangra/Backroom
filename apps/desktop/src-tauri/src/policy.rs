@@ -94,15 +94,14 @@ pub fn nav_decision(target: &Url, origin: &Url) -> Nav {
     }
 }
 
-/// The webview's own origin, where the bundled setup page runs:
-/// `tauri://localhost` (Linux, macOS) or `http(s)://tauri.localhost`
-/// (Windows). No port, no credentials.
+/// The webview's own origin on this platform, where the bundled setup page
+/// runs: `tauri://localhost` (Linux, macOS) or `http(s)://tauri.localhost`
+/// (Windows; the other spelling is refused). No port, no credentials.
 pub fn is_app_local(url: &Url) -> bool {
-    let own = match url.scheme() {
-        "tauri" => url.host_str() == Some("localhost"),
-        "http" | "https" => url.host_str() == Some("tauri.localhost"),
-        _ => false,
-    };
+    #[cfg(not(windows))]
+    let own = url.scheme() == "tauri" && url.host_str() == Some("localhost");
+    #[cfg(windows)]
+    let own = matches!(url.scheme(), "http" | "https") && url.host_str() == Some("tauri.localhost");
     own && url.port().is_none() && url.username().is_empty() && url.password().is_none()
 }
 
@@ -202,7 +201,7 @@ pub fn sanitize_download_name(name: &str) -> String {
     let base = name.rsplit(['/', '\\']).next().unwrap_or("");
     let cleaned: String = base
         .chars()
-        .filter(|c| !c.is_control() && !is_format_char(*c))
+        .filter(|c| !c.is_control() && !crate::origin::is_format_char(*c))
         .collect();
     let cleaned = cleaned
         .trim_start_matches(|c: char| c == '.' || c.is_whitespace())
@@ -244,35 +243,6 @@ fn truncate_bytes(s: &str, max: usize) -> &str {
         end -= 1;
     }
     &s[..end]
-}
-
-/// Unicode general category Cf (format characters): bidi controls, zero-width
-/// characters, BOM, tags and the like. A static table, so no extra crate.
-pub(crate) fn is_format_char(c: char) -> bool {
-    matches!(
-        c as u32,
-        0x00AD
-            | 0x0600..=0x0605
-            | 0x061C
-            | 0x06DD
-            | 0x070F
-            | 0x0890..=0x0891
-            | 0x08E2
-            | 0x180E
-            | 0x200B..=0x200F
-            | 0x202A..=0x202E
-            | 0x2060..=0x2064
-            | 0x2066..=0x206F
-            | 0xFEFF
-            | 0xFFF9..=0xFFFB
-            | 0x110BD
-            | 0x110CD
-            | 0x13430..=0x1343F
-            | 0x1BCA0..=0x1BCA3
-            | 0x1D173..=0x1D17A
-            | 0xE0001
-            | 0xE0020..=0xE007F
-    )
 }
 
 /// `dir/name`, or `dir/stem (n).ext` for the first `n` that does not exist, so
@@ -463,13 +433,28 @@ mod tests {
 
     #[test]
     fn app_local_is_only_the_webviews_own_origin() {
-        for ok in [
-            "tauri://localhost",
-            "tauri://localhost/index.html",
-            "http://tauri.localhost/",
-            "https://tauri.localhost/setup.js",
-        ] {
+        // Per platform: the other platform's spelling is refused.
+        #[cfg(not(windows))]
+        let (own, foreign) = (
+            ["tauri://localhost", "tauri://localhost/index.html"],
+            [
+                "http://tauri.localhost/",
+                "https://tauri.localhost/setup.js",
+            ],
+        );
+        #[cfg(windows)]
+        let (own, foreign) = (
+            [
+                "http://tauri.localhost/",
+                "https://tauri.localhost/setup.js",
+            ],
+            ["tauri://localhost", "tauri://localhost/index.html"],
+        );
+        for ok in own {
             assert!(is_app_local(&u(ok)), "{ok}");
+        }
+        for bad in foreign {
+            assert!(!is_app_local(&u(bad)), "{bad}");
         }
         for bad in [
             "tauri://evil/",
@@ -490,11 +475,12 @@ mod tests {
 
     #[test]
     fn without_a_server_only_the_setup_page_loads() {
-        assert_eq!(
-            window_nav(&u("tauri://localhost/index.html"), None),
-            Nav::Allow
-        );
-        assert_eq!(window_nav(&u("http://tauri.localhost/"), None), Nav::Allow);
+        #[cfg(not(windows))]
+        let (own, foreign) = ("tauri://localhost/index.html", "http://tauri.localhost/");
+        #[cfg(windows)]
+        let (own, foreign) = ("http://tauri.localhost/", "tauri://localhost/index.html");
+        assert_eq!(window_nav(&u(own), None), Nav::Allow);
+        assert_eq!(window_nav(&u(foreign), None), Nav::Drop);
         for s in [
             "https://chat.example.com/",
             "http://localhost:8787/",
