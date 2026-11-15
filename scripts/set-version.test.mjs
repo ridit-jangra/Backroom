@@ -50,6 +50,8 @@ test('validates versions', () => {
   for (const ok of ['0.0.0', '1.2.3', '10.20.30', '1.0.0-rc.1', '1.0.0-beta', '1.0.0-0.3.7', '1.0.0-x-y.7']) {
     assert.ok(isValidVersion(ok), ok);
   }
+  for (const ok of ['255.255.65535', '0.255.0', '1.2.65535-rc.1']) assert.ok(isValidVersion(ok), ok);
+  for (const bad of ['256.0.0', '0.256.0', '0.0.65536', '1000.0.0']) assert.ok(!isValidVersion(bad), bad);
   for (const bad of ['', '1', '1.2', 'v1.2.3', '01.2.3', '1.02.3', '1.2.3-', '1.2.3-01', '1.2.3+build', '1.2.3 ', ' 1.2.3', '1.2.3\n', '1.2.3-a..b', '1.2.3-a_b', '1.2.3.4']) {
     assert.ok(!isValidVersion(bad), JSON.stringify(bad));
   }
@@ -156,4 +158,56 @@ test('never takes a version line from the next block', () => {
   assert.equal(r.status, 1);
   assert.match(r.stderr, /no version line in the backroom-desktop block/);
   assert.equal(git('status', '--porcelain'), '');
+});
+
+test('refuses versions an MSI cannot carry, in both modes', () => {
+  for (const bad of ['256.0.0', '1.256.0', '1.2.65536']) {
+    const r = run(bad);
+    assert.equal(r.status, 1, bad);
+    assert.match(r.stderr, /not a valid version/, bad);
+    const c = run(bad, '--check');
+    assert.equal(c.status, 1, bad);
+    assert.match(c.stderr, /not a valid version/, bad);
+  }
+  assert.equal(git('status', '--porcelain'), '');
+});
+
+test('refuses a tree with only staged changes', () => {
+  writeFileSync(join(dir, 'staged.txt'), 'x');
+  git('add', 'staged.txt');
+  const r = run('1.0.0');
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /uncommitted changes/);
+  assert.equal(git('status', '--porcelain'), 'A  staged.txt\n');
+});
+
+test('refuses a tree with only a modified tracked file', () => {
+  const p = 'apps/desktop/src-tauri/tauri.conf.json';
+  writeFileSync(join(dir, p), read(p) + '\n');
+  const r = run('1.0.0');
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /uncommitted changes/);
+  assert.equal(git('status', '--porcelain'), ` M ${p}\n`);
+});
+
+test('refuses --check together with --force', () => {
+  const r = run('0.1.0', '--check', '--force');
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /--check and --force/);
+});
+
+test('fails safely on a file with CRLF line endings', () => {
+  for (const p of ['apps/desktop/src-tauri/Cargo.toml', 'apps/desktop/package.json']) {
+    git('reset', '-q', '--hard');
+    writeFileSync(join(dir, p), read(p).replace(/\n/g, '\r\n'));
+    git('commit', '-q', '-am', 'crlf');
+    const r = run('4.0.0');
+    assert.equal(r.status, 1, p);
+    assert.match(r.stderr, new RegExp(`${p.replace(/[./]/g, '\\$&')}: CRLF line endings`), p);
+    assert.equal(git('status', '--porcelain'), '', p);
+    const c = run('0.1.0', '--check');
+    assert.equal(c.status, 1, p);
+    assert.match(c.stderr, /CRLF line endings/, p);
+    git('reset', '-q', '--hard', 'HEAD~1');
+  }
 });

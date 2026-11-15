@@ -17,13 +17,24 @@ import { isDeepStrictEqual } from 'node:util';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-// x.y.z with an optional pre-release (semver 2.0.0 section 9). Build metadata (+...)
+// x.y.z (at most 255.255.65535, see MSI_LIMITS) with an optional pre-release (semver 2.0.0 section 9). Build metadata (+...)
 // is refused: tags, file names and package managers would each treat it differently.
 const SEMVER =
   /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?$/;
 
+// The MSI (WiX) product version is major.minor.build with limits 255.255.65535.
+const MSI_LIMITS = [255, 255, 65535];
+
 export function isValidVersion(v) {
-  return typeof v === 'string' && v.length <= 64 && SEMVER.test(v);
+  if (typeof v !== 'string' || v.length > 64) return false;
+  const m = SEMVER.exec(v);
+  return m !== null && MSI_LIMITS.every((max, i) => Number(m[i + 1]) <= max);
+}
+
+function readText(root, rel) {
+  const text = readFileSync(join(root, rel), 'utf8');
+  if (text.includes('\r')) fail(`${rel}: CRLF line endings (or a stray CR); convert the file to LF first`);
+  return text;
 }
 
 class VersionError extends Error {}
@@ -124,7 +135,7 @@ export const FILES = [
 
 /** Current version per file: [{ rel, version }]. */
 export function readVersions(root) {
-  return FILES.map((f) => ({ rel: f.rel, version: f.read(readFileSync(join(root, f.rel), 'utf8')) }));
+  return FILES.map((f) => ({ rel: f.rel, version: f.read(readText(root, f.rel)) }));
 }
 
 function gitDirty(root) {
@@ -146,12 +157,14 @@ function gitDirty(root) {
  * Throws VersionError on invalid input, a dirty tree (unless force) or a file it cannot edit.
  */
 export function setVersion(root, version, { force = false } = {}) {
-  if (!isValidVersion(version)) fail(`not a valid version: ${JSON.stringify(version)} (expected x.y.z or x.y.z-pre)`);
+  if (!isValidVersion(version)) {
+    fail(`not a valid version: ${JSON.stringify(version)} (expected x.y.z or x.y.z-pre, at most 255.255.65535)`);
+  }
   if (!force && gitDirty(root)) fail('the git tree has uncommitted changes; commit or stash them, or pass --force');
   // Read and compute every edit first, so a failure leaves all files untouched.
   const edits = FILES.map((f) => {
     const path = join(root, f.rel);
-    const text = readFileSync(path, 'utf8');
+    const text = readText(root, f.rel);
     const from = f.read(text);
     return { f, path, from, out: from === version ? null : f.rewrite(text, from, version) };
   });
@@ -179,6 +192,7 @@ function main(argv) {
   const flags = new Set(argv.filter((a) => a.startsWith('--')));
   const args = argv.filter((a) => !a.startsWith('--'));
   for (const f of flags) if (f !== '--force' && f !== '--check') fail(`unknown option ${f}`);
+  if (flags.has('--check') && flags.has('--force')) fail('--check and --force cannot be combined');
   if (args.length !== 1) fail('usage: node scripts/set-version.mjs <x.y.z[-pre]> [--force | --check]');
   const root = fileURLToPath(new URL('..', import.meta.url));
   const lines = flags.has('--check') ? checkVersion(root, args[0]) : setVersion(root, args[0], { force: flags.has('--force') });
