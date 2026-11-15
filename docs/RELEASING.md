@@ -32,6 +32,7 @@ Released builds have no server address baked in. On first launch they show a set
 5. Watch the **Release** workflow run in the Actions tab.
    - The `version` job fails straight away if the tagged commit is not on `main`, or if the tag (minus the `v`) does not match the version in the files, so a mis-tagged commit never builds.
    - The `linux`, `windows` and `macos` jobs build the installers.
+   - The `arch` job builds the Arch package (`backroom-bin`) in an Arch container from the deb the `linux` job just built, and runs `namcap`. The `arch-source` job builds the from-source `backroom` package end to end. Both are skipped for pre-releases.
    - The `release` job:
      - checks that every expected file exists (and nothing else);
      - writes `SHA256SUMS` and compares it with the hashes each build job recorded right after building;
@@ -43,7 +44,7 @@ Released builds have no server address baked in. On first launch they show a set
    - `SHA256SUMS` lists them all;
    - the notes read well (edit them freely). Every `@` in a commit subject gets an invisible zero-width space after it so the notes cannot mention a user or team, but still scan the notes for anything that should not be public before publishing;
    - run the [manual checklist](#manual-pre-release-checklist) against the attached installers.
-7. Click **Publish release**. Only then can anyone see it. Package-manager manifests are bumped from this release's `SHA256SUMS` after publishing.
+7. Click **Publish release**. Only then can anyone see it. Then bump the package-manager manifests from this release's `SHA256SUMS` and publish them by hand: see [packaging/README.md](../packaging/README.md).
 
 If a build fails, fix it on `main`, delete the tag (`git push origin :refs/tags/v1.2.3` and `git tag -d v1.2.3`), delete any draft that was created, and tag again. The release job refuses to create a release for a tag that does not exist on GitHub (`--verify-tag`). It also stops with an error when a release for the tag already exists; delete that draft or release first, then re-run the job.
 
@@ -52,7 +53,7 @@ If a build fails, fix it on `main`, delete the tag (`git push origin :refs/tags/
 From the Actions tab, choose **Release** → **Run workflow**, then pick a branch. `dry_run` defaults to true.
 
 - **What it builds:** the same three build jobs as a tag run, for the version the files on that branch carry. The `version` job still checks that all five files agree.
-- **Where the bundles land:** the run's **Artifacts** section, as `backroom-linux`, `backroom-windows` and `backroom-macos`. Each holds `release-assets/` (the installers) and `hashes/<job>.sha256`. They are kept for 14 days.
+- **Where the bundles land:** the run's **Artifacts** section, as `backroom-linux`, `backroom-windows`, `backroom-macos` and `backroom-arch`. Each holds `release-assets/` (the installers) and `hashes/<job>.sha256`. They are kept for 14 days.
 - **Caches:** a dry run may restore the Rust build cache, and only a dry run on `main` saves it. Tag builds never restore any cache, so nothing another run wrote can end up in a released installer.
 - **What it never does:** create a release. Manual runs never create one, whatever `dry_run` says. The `release` job runs only for a pushed `v*.*.*` tag. `dry_run` exists so the intent shows in the run's inputs. A real release always starts with a tag push.
 
@@ -64,7 +65,7 @@ A version with a pre-release part (`1.3.0-beta.1`) becomes a GitHub pre-release,
 
 - **No RPM.** RPM versions may not contain `-`. The Tauri CLI fails with `invalid version "0.2.0-beta.1": contains invalid character` (verified by a local build), so the Linux job builds only the deb and the AppImage.
 - **No MSI.** WiX accepts only a numeric pre-release of at most 65535 (Tauri documentation), so the Windows job builds only the NSIS installer.
-- **Manifests:** package-manager manifests (`packaging/`) must not reference the RPM or the MSI for a pre-release version, because those files do not exist.
+- **No Arch package, no manifests.** pacman versions cannot contain `-`, so the `arch` jobs are skipped. The package-manager manifests (`packaging/`) target stable releases only, and `scripts/packaging-bump.mjs` refuses pre-release versions.
 - The deb is built, but Debian reads `1.3.0-beta.1` as upstream version `1.3.0` with revision `beta.1`. It therefore sorts **after** a later `1.3.0` deb. Testers should uninstall the pre-release deb before installing the final release.
 
 ## Asset names
@@ -79,6 +80,7 @@ A version with a pre-release part (`1.3.0-beta.1`) becomes a GitHub pre-release,
 | Windows | `Backroom_<v>_x64-setup.exe` | NSIS, per-user install | Tauri documentation (`<productName>_<version>_<arch>-setup.exe`); not built here |
 | Windows | `Backroom_<v>_x64_en-US.msi` | MSI; not built for pre-releases | Tauri documentation (`<productName>_<version>_<arch>_<lang>.msi`); not built here |
 | macOS (Apple silicon and Intel) | `Backroom_<v>_universal.dmg` | one universal dmg | Tauri documentation (`<productName>_<version>_<arch>.dmg`, `universal` for `universal-apple-darwin`); not built here |
+| Arch Linux | `backroom-bin-<v>-1-x86_64.pkg.tar.zst` | `sudo pacman -U`; not built for pre-releases | **Verified** by a local `makepkg` of `packaging/aur/backroom-bin` from the 0.1.0 deb |
 | All | `SHA256SUMS` | `sha256sum` format, file names sorted | written by the release job |
 
 Windows and macOS cannot be built on the Linux machine where this was set up. The first dry run confirms those names: if a name is wrong, the build job's "Collect the installers" step fails and lists what was produced.
