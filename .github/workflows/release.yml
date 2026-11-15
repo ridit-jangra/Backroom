@@ -444,6 +444,11 @@ jobs:
         working-directory: /tmp/aur-source
         run: |
           set -euo pipefail
+          # `cargo` is a virtual package that rustup also provides (and conflicts with); install
+          # the real toolchain package first so pacman cannot pick rustup, which has no default
+          # toolchain in a clean container. The PKGBUILD keeps `cargo` in makedepends (Arch
+          # guidelines); it is already satisfied by `rust`.
+          pacman -S --noconfirm --needed rust
           mapfile -t deps < <(runuser -u builder -- makepkg --printsrcinfo | sed -n 's/^\t\(make\)\?depends = //p')
           pacman -S --noconfirm --needed "${deps[@]}"
 
