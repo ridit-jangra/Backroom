@@ -1,8 +1,12 @@
 # Releasing the desktop app
 
-The desktop app (`apps/desktop`) is released through GitHub Releases by `.github/workflows/release.yml`. The workflow builds every platform, then creates a **draft** release. A maintainer reviews the draft and publishes it by hand. Nothing is published automatically, and the workflow uses no secrets: the release job only gets the automatic `GITHUB_TOKEN`, with `contents: write`.
+The desktop app (`apps/desktop`) is released through GitHub Releases by `.github/workflows/release.yml`. The workflow builds every platform, then creates a release as a draft, downloads every asset back and checks it against `SHA256SUMS`, and only then **publishes it**. If any step fails the release stays an unpublished draft. The workflow uses no secrets: the release job only gets the automatic `GITHUB_TOKEN`, with `contents: write`.
 
 Released builds have no server address baked in. On first launch they show a setup page that asks for the server's address. One build therefore works with any Backroom server.
+
+## Version numbers
+
+Releases are numbered `0.0.N`, counting up from `0.0.1` to `0.0.99` (no leading zero: `0.0.1`, not `0.0.01`). Each release raises `N` by one. The tag is `v0.0.N`. After `0.0.99` the next release is `0.1.0`, which restarts the count.
 
 ## Cutting a release
 
@@ -19,7 +23,7 @@ Released builds have no server address baked in. On first launch they show a set
    - It refuses files with CRLF line endings (convert them to LF first).
    - Running it again with the same version changes nothing.
    - `node scripts/set-version.mjs 1.2.3 --check` only verifies the files. The workflow runs this check.
-3. Run the tests (`npm test`), then commit: `git commit -am "chore(release): 1.2.3"`.
+3. Run the tests (`npm test`), then commit: `git commit -am "chore(release): 1.2.3"`. (Examples below use `1.2.3`; use your real `0.0.N`.)
 4. Tag the commit and push the branch and the tag together:
 
    ```sh
@@ -38,13 +42,14 @@ Released builds have no server address baked in. On first launch they show a set
      - writes `SHA256SUMS` and compares it with the hashes each build job recorded right after building;
      - refuses to continue if any release (draft or published) already exists for the tag;
      - creates a draft release named "Backroom 1.2.3", whose notes list the commit subjects since the previous tag;
-     - downloads every uploaded asset again and checks it against `SHA256SUMS`.
-6. Open the draft under Releases and check it:
+     - downloads every uploaded asset again and checks it against `SHA256SUMS`;
+     - publishes the release (public, and marked latest unless it is a pre-release).
+6. Open the published release under Releases and check it (to hold a release back, delete it and re-tag; edit the notes freely afterwards):
    - every asset from the table below is attached;
    - `SHA256SUMS` lists them all;
    - the notes read well (edit them freely). Every `@` in a commit subject gets an invisible zero-width space after it so the notes cannot mention a user or team, but still scan the notes for anything that should not be public before publishing;
    - run the [manual checklist](#manual-pre-release-checklist) against the attached installers.
-7. Click **Publish release**. Only then can anyone see it. Then bump the package-manager manifests from this release's `SHA256SUMS` and publish them by hand: see [packaging/README.md](../packaging/README.md).
+7. The release is already public. Then bump the package-manager manifests from this release's `SHA256SUMS` and publish them by hand: see [packaging/README.md](../packaging/README.md).
 
 If a build fails, fix it on `main`, delete the tag (`git push origin :refs/tags/v1.2.3` and `git tag -d v1.2.3`), delete any draft that was created, and tag again. The release job refuses to create a release for a tag that does not exist on GitHub (`--verify-tag`). It also stops with an error when a release for the tag already exists; delete that draft or release first, then re-run the job.
 
@@ -63,7 +68,7 @@ Use a dry run before the first tag of a release cycle, and after any change to t
 
 ## Pre-releases
 
-A version with a pre-release part (`1.3.0-beta.1`) becomes a GitHub pre-release, still a draft. Some formats cannot carry such a version:
+A version with a pre-release part (`1.3.0-beta.1`) becomes a GitHub pre-release, published as a pre-release. Some formats cannot carry such a version:
 
 - **No RPM.** RPM versions may not contain `-`. The Tauri CLI fails with `invalid version "0.2.0-beta.1": contains invalid character` (verified by a local build), so the Linux job builds only the deb and the AppImage.
 - **No MSI.** WiX accepts only a numeric pre-release of at most 65535 (Tauri documentation), so the Windows job builds only the NSIS installer.
@@ -135,7 +140,7 @@ To build the AppImage, the Tauri CLI downloads `linuxdeploy` and its plugins fro
 
 ## Manual pre-release checklist
 
-None of these can be automated in CI. Run them on the draft's installers, on a real desktop for each OS, before publishing.
+None of these can be automated in CI. Run them on the published installers, on a real desktop for each OS. Because publishing is automatic, the first releases are the test: treat them as early builds.
 
 - [ ] **First-run setup page in a real webview:** WebKitGTK (Linux), WebView2 (Windows) and WKWebView (macOS).
   - Start with no saved server: delete `server.json` from the app's config directory (`~/.config/app.backroom.desktop/` on Linux).

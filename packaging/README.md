@@ -20,7 +20,7 @@ Every manifest is committed at version `0.0.0` with all-zero checksums. This pla
 
 ## After each release: bump the manifests
 
-Do this once the GitHub release is **published**: the draft's assets cannot be downloaded anonymously.
+Do this once the GitHub release is published (the workflow now publishes it automatically): a draft's assets cannot be downloaded anonymously.
 
 ```sh
 node scripts/packaging-bump.mjs 1.2.3

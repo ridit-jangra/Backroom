@@ -1,8 +1,8 @@
 name: Release
 
 # Builds the desktop app for Linux, Windows and macOS and, for a pushed version tag only,
-# creates a DRAFT GitHub Release with the installers and SHA256SUMS. Nothing is published:
-# a maintainer reviews the draft and publishes it by hand (docs/RELEASING.md).
+# creates a GitHub Release with the installers and SHA256SUMS: it is created as a draft, every asset is
+# downloaded back and checked, and only then is it published (docs/RELEASING.md).
 #
 # Manual runs (workflow_dispatch) only build: the bundles land in the run's artifacts and no
 # release is created, whatever `dry_run` says. No secrets are used; the release job gets the
@@ -642,3 +642,13 @@ jobs:
           fi
           cmp verify/SHA256SUMS assets/SHA256SUMS
           (cd verify && sha256sum -c SHA256SUMS)
+
+      # Publishes the release only after every asset has been downloaded back and matched against
+      # SHA256SUMS. A failure in any earlier step leaves the draft unpublished for a maintainer to inspect.
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release edit "$TAG" --draft=false
+          gh release view "$TAG" --json url,isDraft,isPrerelease --jq '"published: \(.url) draft=\(.isDraft) prerelease=\(.isPrerelease)"'
