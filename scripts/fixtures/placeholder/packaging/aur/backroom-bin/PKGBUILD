@@ -1,0 +1,51 @@
+# Maintainer: Ridit (https://github.com/ridit-jangra)
+#
+# Prebuilt Backroom desktop app, repackaged from the release's Debian package.
+# Kept in the Backroom repository (packaging/aur/backroom-bin); pkgver and sha256sums are set
+# by scripts/packaging-bump.mjs from the release's SHA256SUMS. pkgver 0.0.0 with all-zero sums
+# is the placeholder used before the first release: it cannot build.
+
+pkgname=backroom-bin
+pkgver=0.0.0
+pkgrel=1
+pkgdesc='Desktop app for Backroom, a self-hosted team chat (prebuilt)'
+arch=('x86_64')
+url='https://github.com/ridit-jangra/Backroom'
+license=('MIT')
+# Libraries the binary links (readelf NEEDED, mapped with pacman -Qo), plus
+# libayatana-appindicator, which the tray code loads at runtime with dlopen, and
+# hicolor-icon-theme for the icon directories.
+depends=('cairo' 'dbus' 'gdk-pixbuf2' 'glib2' 'glibc' 'gtk3' 'hicolor-icon-theme'
+         'libayatana-appindicator' 'libgcc' 'libsoup3' 'webkit2gtk-4.1')
+provides=('backroom')
+conflicts=('backroom')
+# A prebuilt binary has no debug information to split off.
+options=('!debug')
+source=("Backroom_${pkgver}_amd64.deb::${url}/releases/download/v${pkgver}/Backroom_${pkgver}_amd64.deb"
+        "backroom-LICENSE-${pkgver}::https://raw.githubusercontent.com/ridit-jangra/Backroom/v${pkgver}/LICENSE")
+noextract=("Backroom_${pkgver}_amd64.deb")
+sha256sums=('0000000000000000000000000000000000000000000000000000000000000000'
+            '0000000000000000000000000000000000000000000000000000000000000000')
+
+prepare() {
+  rm -rf payload
+  mkdir payload
+  bsdtar -xOf "Backroom_${pkgver}_amd64.deb" 'data.tar.*' | bsdtar -xf - -C payload
+}
+
+package() {
+  cd payload
+  install -Dm755 usr/bin/backroom-desktop "$pkgdir/usr/bin/backroom-desktop"
+  # Exec=backroom-desktop %u and MimeType=x-scheme-handler/backroom; (backroom:// links).
+  install -Dm644 usr/share/applications/Backroom.desktop \
+    "$pkgdir/usr/share/applications/Backroom.desktop"
+  # The deb puts the 256 px icon in 256x256@2 (a scale-2 directory); install it as 256x256.
+  local icon size
+  for icon in usr/share/icons/hicolor/*/apps/backroom-desktop.png; do
+    size=${icon#usr/share/icons/hicolor/}
+    size=${size%%/*}
+    size=${size%@2}
+    install -Dm644 "$icon" "$pkgdir/usr/share/icons/hicolor/$size/apps/backroom-desktop.png"
+  done
+  install -Dm644 "$srcdir/backroom-LICENSE-${pkgver}" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

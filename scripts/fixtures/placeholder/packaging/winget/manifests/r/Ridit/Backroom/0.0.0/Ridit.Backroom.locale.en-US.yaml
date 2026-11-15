@@ -1,0 +1,21 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.9.0.schema.json
+
+PackageIdentifier: Ridit.Backroom
+PackageVersion: 0.0.0
+PackageLocale: en-US
+Publisher: Ridit
+PublisherUrl: https://github.com/ridit-jangra
+PackageName: Backroom
+PackageUrl: https://github.com/ridit-jangra/Backroom
+License: MIT
+LicenseUrl: https://github.com/ridit-jangra/Backroom/blob/main/LICENSE
+ShortDescription: Desktop app for Backroom, a self-hosted team chat.
+Description: Desktop app for Backroom, a self-hosted team chat. Asks for your server's address on first launch.
+Moniker: backroom
+Tags:
+- chat
+- self-hosted
+- team-chat
+ReleaseNotesUrl: https://github.com/ridit-jangra/Backroom/releases/tag/v0.0.0
+ManifestType: defaultLocale
+ManifestVersion: 1.9.0

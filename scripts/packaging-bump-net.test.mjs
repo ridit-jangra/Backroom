@@ -46,7 +46,7 @@ beforeEach(async () => {
   for (const rel of ['scripts/packaging-bump.mjs', 'scripts/packaging-lib.mjs', 'scripts/set-version.mjs']) {
     cpSync(join(REPO, rel), join(dir, rel));
   }
-  cpSync(join(REPO, 'packaging'), join(dir, 'packaging'), { recursive: true });
+  cpSync(join(REPO, 'scripts/fixtures/placeholder/packaging'), join(dir, 'packaging'), { recursive: true });
   cpSync(join(REPO, 'LICENSE'), join(dir, 'LICENSE'));
   mod = await import(`${pathToFileURL(join(dir, 'scripts/packaging-bump.mjs')).href}?t=${Math.random()}`);
 });

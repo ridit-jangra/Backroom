@@ -19,7 +19,7 @@ let dir;
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'packaging-validate-'));
-  cpSync(join(REPO, 'packaging'), join(dir, 'packaging'), { recursive: true });
+  cpSync(join(REPO, 'scripts/fixtures/placeholder/packaging'), join(dir, 'packaging'), { recursive: true });
 });
 
 afterEach(() => {

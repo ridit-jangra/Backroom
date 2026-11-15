@@ -1,0 +1,68 @@
+# Maintainer: Ridit (https://github.com/ridit-jangra)
+#
+# Backroom desktop app built from the tagged source. Kept in the Backroom repository
+# (packaging/aur/backroom); pkgver and sha256sums are set by scripts/packaging-bump.mjs.
+# pkgver 0.0.0 with an all-zero sum is the placeholder used before the first release.
+
+pkgname=backroom
+pkgver=0.0.0
+pkgrel=1
+pkgdesc='Desktop app for Backroom, a self-hosted team chat'
+arch=('x86_64')
+url='https://github.com/ridit-jangra/Backroom'
+license=('MIT')
+# Same runtime dependencies as backroom-bin (see its PKGBUILD for how they were derived).
+depends=('cairo' 'dbus' 'gdk-pixbuf2' 'glib2' 'glibc' 'gtk3' 'hicolor-icon-theme'
+         'libayatana-appindicator' 'libgcc' 'libsoup3' 'webkit2gtk-4.1')
+# nodejs and npm only run the Tauri CLI (@tauri-apps/cli, pinned in package-lock.json).
+makedepends=('cargo' 'librsvg' 'nodejs' 'npm' 'pkgconf')
+# Conservative: some Rust crates in the Tauri tree fail with LTO when the distro flags add it.
+# Unverified; remove if a build without it succeeds.
+options=('!lto')
+source=("backroom-${pkgver}.tar.gz::${url}/archive/refs/tags/v${pkgver}.tar.gz")
+sha256sums=('0000000000000000000000000000000000000000000000000000000000000000')
+
+prepare() {
+  cd "Backroom-${pkgver}"
+  export npm_config_cache="$srcdir/npm-cache"
+  # Only the desktop workspace's dependencies (the Tauri CLI), without install scripts.
+  npm ci --workspace apps/desktop --include-workspace-root=false --ignore-scripts \
+    --no-audit --no-fund
+  # No RUSTUP_TOOLCHAIN override: with the `rust` package cargo needs none, and a rustup user
+  # without an installed toolchain gets rustup's own clear error instead of a confusing one.
+  export CARGO_HOME="$srcdir/cargo-home"
+  cargo fetch --locked --manifest-path apps/desktop/src-tauri/Cargo.toml \
+    --target "$(rustc -vV | sed -n 's/^host: //p')"
+}
+
+build() {
+  cd "Backroom-${pkgver}"
+  export CARGO_HOME="$srcdir/cargo-home"
+  # The binary only; the deb/rpm/AppImage bundlers are not needed. Arguments after `--` go
+  # to cargo: --frozen keeps it offline and on the locked versions fetched in prepare().
+  (cd apps/desktop && ../../node_modules/.bin/tauri build --no-bundle -- --frozen)
+
+  # The desktop file, rendered from the template the deb and rpm use.
+  sed -e '/^{{#if comment}}$/d' -e '/^{{\/if}}$/d' \
+    -e 's/{{categories}}/Office;/' -e 's/{{comment}}/Backroom team chat/' \
+    -e 's/{{exec}}/backroom-desktop/g' -e 's/{{icon}}/backroom-desktop/' \
+    -e 's/{{name}}/Backroom/' \
+    apps/desktop/src-tauri/linux/backroom.desktop.hbs > Backroom.desktop
+  if grep -q '{{' Backroom.desktop; then
+    echo 'backroom.desktop.hbs has template syntax this PKGBUILD does not render' >&2
+    return 1
+  fi
+}
+
+package() {
+  cd "Backroom-${pkgver}"
+  install -Dm755 apps/desktop/src-tauri/target/release/backroom-desktop \
+    "$pkgdir/usr/bin/backroom-desktop"
+  install -Dm644 Backroom.desktop "$pkgdir/usr/share/applications/Backroom.desktop"
+  local icons=apps/desktop/src-tauri/icons hicolor="$pkgdir/usr/share/icons/hicolor"
+  install -Dm644 "$icons/32x32.png" "$hicolor/32x32/apps/backroom-desktop.png"
+  install -Dm644 "$icons/128x128.png" "$hicolor/128x128/apps/backroom-desktop.png"
+  install -Dm644 "$icons/128x128@2x.png" "$hicolor/256x256/apps/backroom-desktop.png"
+  install -Dm644 "$icons/icon.png" "$hicolor/512x512/apps/backroom-desktop.png"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}
