@@ -1,4 +1,4 @@
-import { env, runDurableObjectAlarm, runInDurableObject } from 'cloudflare:test';
+import { createExecutionContext, env, runDurableObjectAlarm, runInDurableObject, waitOnExecutionContext } from 'cloudflare:test';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/app';
 import { catchUp } from '../src/messaging/read';
@@ -270,5 +270,72 @@ describe('hub frames for deletes', () => {
     carol.send({ t: 'delete', messageId: p.id, clientId: 'cas-1-xxxxxx' });
     expect((await carol.next('nack')).code).toBe('forbidden');
     await bob.none('message.delete', 100);
+  });
+});
+
+describe('search after a cascade', () => {
+  async function hits(s: Awaited<ReturnType<typeof setup>>, word: string): Promise<string[]> {
+    const ctx = createExecutionContext();
+    const res = await s.app.request(`/w/clubhack/search?q=${word}`, { headers: { Cookie: s.carol.cookie } }, env, ctx);
+    await waitOnExecutionContext(ctx);
+    expect(res.status).toBe(200);
+    return ((await res.json()) as { results: { message: { id: string } }[] }).results.map((r) => r.message.id);
+  }
+
+  it('finds neither the starter nor a cascaded reply by a unique word, and still finds a survivor', async () => {
+    const s = await setup();
+    const p = await s.say({ userId: s.alice.userId, body: 'quokkaword starter' });
+    const r = await s.say({ userId: s.bob.userId, parentId: p.id, body: 'reply with quokkaword too' });
+    const solo = await s.say({ userId: s.alice.userId, body: 'quokkaword survivor' });
+    expect((await hits(s, 'quokkaword')).sort()).toEqual([p.id, r.id, solo.id].sort());
+    const d = await deleteMessage(env.DB, { messageId: p.id, userId: s.alice.userId, now: 9_000 });
+    expect(d.ok).toBe(true);
+    expect(await hits(s, 'quokkaword')).toEqual([solo.id]);
+  });
+});
+
+describe("an admin or owner deleting another user's reply", () => {
+  it('a plain member is refused; an admin and the owner may delete it, counters recomputed and frames sent', async () => {
+    const s = await setup();
+    const p = await s.say({ userId: s.alice.userId });
+    const r1 = await s.say({ userId: s.bob.userId, parentId: p.id });
+    const r2 = await s.say({ userId: s.bob.userId, parentId: p.id });
+    const r3 = await s.say({ userId: s.bob.userId, parentId: p.id });
+    // carol is a plain member; the starter's author (alice) is also just a member.
+    expect(await deleteMessage(env.DB, { messageId: r1.id, userId: s.carol.userId, now: 9_000 })).toEqual({ ok: false, code: 'forbidden' });
+    expect(await deleteMessage(env.DB, { messageId: r1.id, userId: s.alice.userId, now: 9_000 })).toEqual({ ok: false, code: 'forbidden' });
+    expect(await row(p.id)).toMatchObject({ replyCount: 3 });
+    expect((await row(r1.id))!.deletedAt).toBeNull();
+
+    await env.DB.prepare("UPDATE workspace_members SET role = 'admin' WHERE user_id = ?").bind(s.carol.userId).run();
+    const da = await deleteMessage(env.DB, { messageId: r3.id, userId: s.carol.userId, now: 9_001 });
+    if (!da.ok) throw new Error(da.code);
+    expect(da.replies).toEqual([]);
+    expect(da.parent).toEqual({ id: p.id, channelId: GENERAL, replyCount: 2, lastReplyAt: r2.createdAt });
+    const dow = await deleteMessage(env.DB, { messageId: r2.id, userId: s.owner.userId, now: 9_002 });
+    if (!dow.ok) throw new Error(dow.code);
+    expect(dow.parent).toEqual({ id: p.id, channelId: GENERAL, replyCount: 1, lastReplyAt: r1.createdAt });
+    expect(await row(p.id)).toMatchObject({ replyCount: 1, lastReplyAt: r1.createdAt, deletedAt: null });
+  });
+
+  it("over the socket an admin's delete of another user's reply sends message.delete then thread.counts; a member's is nacked", async () => {
+    const s = await setup();
+    const p = await s.say({ userId: s.alice.userId });
+    const r1 = await s.say({ userId: s.bob.userId, parentId: p.id });
+    const r2 = await s.say({ userId: s.bob.userId, parentId: p.id });
+    await env.DB.prepare("UPDATE workspace_members SET role = 'admin' WHERE user_id = ?").bind(s.carol.userId).run();
+    const alice = await connect(s.app, s.alice.cookie);
+    const bob = await connect(s.app, s.bob.cookie);
+    const carol = await connect(s.app, s.carol.cookie);
+    alice.send({ t: 'delete', messageId: r1.id, clientId: 'mem-1-xxxxxx' });
+    expect((await alice.next('nack')).code).toBe('forbidden');
+    await bob.none('message.delete', 100);
+    carol.send({ t: 'delete', messageId: r2.id });
+    for (const sock of [alice, bob, carol]) {
+      expect((await sock.next('message.delete')).message).toMatchObject({ id: r2.id, parentId: p.id, body: '' });
+      expect(await sock.next('thread.counts')).toEqual({
+        t: 'thread.counts', channelId: GENERAL, parentId: p.id, replyCount: 1, lastReplyAt: r1.createdAt,
+      });
+    }
   });
 });

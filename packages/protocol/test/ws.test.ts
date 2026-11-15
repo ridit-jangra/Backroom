@@ -95,6 +95,10 @@ describe('thread.counts frame', () => {
     expect(parseHubFrame(JSON.stringify({ ...counts, replyCount: -1 }))).toBeNull();
     expect(parseHubFrame(JSON.stringify({ ...counts, replyCount: 1.5 }))).toBeNull();
     expect(parseHubFrame(JSON.stringify({ ...counts, parentId: undefined }))).toBeNull();
+    // lastReplyAt: a non-negative integer or null.
+    expect(parseHubFrame(JSON.stringify({ ...counts, lastReplyAt: 0 }))).toEqual({ ...counts, lastReplyAt: 0 });
+    expect(parseHubFrame(JSON.stringify({ ...counts, lastReplyAt: -1 }))).toBeNull();
+    expect(parseHubFrame(JSON.stringify({ ...counts, lastReplyAt: 1.5 }))).toBeNull();
   });
   it('an old client (the union without it) ignores the frame without throwing, as it does any unknown type', () => {
     const oldUnion = z.union(HubFrame.options.filter((o) => (o.shape.t as { value: string }).value !== 'thread.counts') as never);

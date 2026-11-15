@@ -89,7 +89,7 @@ export const HubFrame = z.union([
     channelId: z.string(),
     parentId: z.string(),
     replyCount: z.number().int().min(0),
-    lastReplyAt: z.number().int().nullable(),
+    lastReplyAt: z.number().int().min(0).nullable(),
   }),
   z.object({ t: z.literal('read'), channelId: z.string(), seq: z.number().int() }),
   z.object({ t: z.literal('channel.update'), channel: ChannelInfoSchema }),

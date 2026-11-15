@@ -385,6 +385,64 @@ describe('WorkspaceHub on the Node shim over real WebSockets', () => {
     expect((await bob.next('ack')).message.body).toBe('still here');
   });
 
+  it('a starter delete cascades over the Node adapter: tombstones, zero counters, frames, and search finds nothing', async () => {
+    const alice = await connect(ALICE);
+    const bob = await connect(BOB);
+    const search = async (q: string) => {
+      const ctx = { waitUntil() {}, passThroughOnException() {}, props: {} } as unknown as ExecutionContext;
+      const res = await app.fetch(
+        new Request(`${origin}/w/clubhack/search?q=${q}`, { headers: { Cookie: `backroom_session=${tokens.get(CAROL)}` } }),
+        env,
+        ctx,
+      );
+      expect(res.status).toBe(200);
+      return ((await res.json()) as { results: unknown[] }).results.length;
+    };
+    alice.send({ t: 'send', clientId: 'cas-1-xxxxxx', channelId: GENERAL, body: 'wombatword starter' });
+    const starter = (await alice.next('ack')).message;
+    bob.send({ t: 'send', clientId: 'cas-2-xxxxxx', channelId: GENERAL, body: 'wombatword reply', parentId: starter.id });
+    const r1 = (await bob.next('ack')).message;
+    alice.send({ t: 'send', clientId: 'cas-3-xxxxxx', channelId: GENERAL, body: 'second reply', parentId: starter.id });
+    const r2 = (await alice.next('ack')).message;
+    expect(await count(`SELECT reply_count AS n FROM messages WHERE id = '${starter.id}'`)).toBe(2);
+    expect(await search('wombatword')).toBe(2);
+
+    alice.send({ t: 'delete', messageId: starter.id });
+    for (const c of [alice, bob]) {
+      const ids = [
+        (await c.next('message.delete')).message.id,
+        (await c.next('message.delete')).message.id,
+        (await c.next('message.delete')).message.id,
+      ];
+      expect(ids).toEqual([starter.id, r1.id, r2.id]);
+    }
+    // A starter delete carries no counters frame; a reply delete does (next step).
+    await bob.none('thread.counts');
+    const tomb = await count(
+      `SELECT COUNT(*) AS n FROM messages WHERE id IN ('${starter.id}', '${r1.id}', '${r2.id}') AND deleted_at IS NOT NULL AND body = ''`,
+    );
+    expect(tomb).toBe(3);
+    expect(await count(`SELECT reply_count AS n FROM messages WHERE id = '${starter.id}'`)).toBe(0);
+    expect(await search('wombatword')).toBe(0);
+  });
+
+  it('a reply delete sends message.delete then thread.counts over a real WebSocket', async () => {
+    const alice = await connect(ALICE);
+    const bob = await connect(BOB);
+    alice.send({ t: 'send', clientId: 'cnt-1-xxxxxx', channelId: GENERAL, body: 'starter' });
+    const starter = (await alice.next('ack')).message;
+    bob.send({ t: 'send', clientId: 'cnt-2-xxxxxx', channelId: GENERAL, body: 'one', parentId: starter.id });
+    const r1 = (await bob.next('ack')).message;
+    bob.send({ t: 'send', clientId: 'cnt-3-xxxxxx', channelId: GENERAL, body: 'two', parentId: starter.id });
+    const r2 = (await bob.next('ack')).message;
+    bob.send({ t: 'delete', messageId: r2.id });
+    const c = await alice.next('thread.counts');
+    expect(c).toEqual({ t: 'thread.counts', channelId: GENERAL, parentId: starter.id, replyCount: 1, lastReplyAt: r1.createdAt });
+    expect((await alice.next('message.delete')).message.id).toBe(r2.id);
+    const order = alice.frames.map((f) => f.t).filter((t) => t === 'message.delete' || t === 'thread.counts');
+    expect(order).toEqual(['message.delete', 'thread.counts']);
+  });
+
   it('logs nothing that contains a message body', async () => {
     const logs: string[] = [];
     for (const m of ['log', 'info', 'warn', 'error'] as const) {

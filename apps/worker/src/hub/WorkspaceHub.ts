@@ -474,21 +474,29 @@ export class WorkspaceHub extends DurableObject<Env> {
     if (!row) return nack('not_found');
     const channelId = row.channelId;
     await this.enqueue(channelId, async () => {
-      let r: Awaited<ReturnType<typeof editMessage>> | Awaited<ReturnType<typeof deleteMessage>>;
+      let frames: HubFrame[];
+      let failure: NackCode | null = null;
       try {
-        r =
-          f.t === 'edit'
-            ? await editMessage(this.env.DB, { messageId: f.messageId, userId, body: f.body, now: this.now() })
-            : await deleteMessage(this.env.DB, { messageId: f.messageId, userId, now: this.now() });
+        if (f.t === 'edit') {
+          const r = await editMessage(this.env.DB, { messageId: f.messageId, userId, body: f.body, now: this.now() });
+          if (r.ok) frames = [{ t: 'message.edit', message: r.message }];
+          else {
+            frames = [];
+            failure = r.code;
+          }
+        } else {
+          const r = await deleteMessage(this.env.DB, { messageId: f.messageId, userId, now: this.now() });
+          if (r.ok) frames = deleteFrames(r);
+          else {
+            frames = [];
+            failure = r.code;
+          }
+        }
       } catch {
         console.error(JSON.stringify({ level: 'error', code: `${f.t}_failed` }));
         return nack('failed');
       }
-      if (!r.ok) return nack(r.code);
-      const frames: HubFrame[] =
-        f.t === 'edit'
-          ? [{ t: 'message.edit', message: r.message }]
-          : deleteFrames(r as DeleteResult);
+      if (failure !== null) return nack(failure);
       const targets = this.socketsForChannel(channelId);
       // A public channel's author may edit after leaving it; they still see their own change.
       if (!targets.includes(ws)) targets.push(ws);
