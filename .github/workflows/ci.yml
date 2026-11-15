@@ -63,6 +63,55 @@ jobs:
         working-directory: apps/desktop/src-tauri
         run: cargo clippy -- -D warnings
 
+  # Offline checks of the package-manager manifests in packaging/ (no network, no npm install:
+  # the scripts use Node built-ins only). makepkg is not on Ubuntu, so the test comparing
+  # .SRCINFO with real makepkg output is skipped here; the release workflow's Arch jobs build
+  # both PKGBUILDs for real.
+  packaging-check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+
+      - name: PKGBUILD syntax
+        run: |
+          bash -n packaging/aur/backroom-bin/PKGBUILD
+          bash -n packaging/aur/backroom/PKGBUILD
+
+      # Ruby is preinstalled on GitHub's Ubuntu images; skip the syntax check where it is not.
+      - name: Cask syntax (ruby -c)
+        run: |
+          if command -v ruby >/dev/null; then
+            ruby -c packaging/homebrew/backroom.rb
+          else
+            echo "ruby not installed; structural checks run in the next step"
+          fi
+
+      - name: Manifest structure
+        run: node scripts/packaging-validate.mjs
+
+      # Passes in the committed placeholder state (0.0.0) without SHA256SUMS. After a bump to a
+      # real version it would download that release's SHA256SUMS, so CI checks only the
+      # placeholder state offline: run the full check locally after each bump (packaging/README.md).
+      - name: Manifest versions and checksums (placeholder state)
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^pkgver=//p' packaging/aur/backroom-bin/PKGBUILD)"
+          if [ "$version" = 0.0.0 ]; then
+            node scripts/packaging-bump.mjs --check
+          else
+            echo "manifests carry ${version}; the checksum check needs the release's SHA256SUMS and runs locally"
+          fi
+
+      - name: Packaging script tests
+        run: node --test scripts/packaging-bump.test.mjs scripts/packaging-validate.test.mjs
+
   e2e:
     needs: test
     runs-on: ubuntu-24.04
