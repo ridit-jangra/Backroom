@@ -90,11 +90,13 @@ Once the first release is published, the [Releases page](https://github.com/ridi
 | Arch Linux | `backroom-bin-<v>-1-x86_64.pkg.tar.zst` | `sudo pacman -U backroom-bin-<v>-1-x86_64.pkg.tar.zst` |
 | All | `SHA256SUMS` | check a download with `sha256sum -c SHA256SUMS --ignore-missing` (macOS: `shasum -a 256 -c SHA256SUMS --ignore-missing`) |
 
-The Linux files, and the Arch package, are built and checked on a Linux machine. The Windows and macOS file names come from Tauri's documentation and have not been produced yet: the first release run confirms them. Pre-releases (versions such as `1.0.0-beta.1`) have no `.rpm`, `.msi` or Arch package.
+The Linux files, and the Arch package, are built and checked on a Linux machine. The Windows and macOS installers are built by the release workflow (the file names above come from release 0.0.1) but have not yet been tried on real machines, so treat them as early builds. Pre-releases (versions such as `1.0.0-beta.1`) have no `.rpm`, `.msi` or Arch package.
 
 #### Package managers
 
 Each of these is **available once the maintainer publishes it**. The manifests are in the repository, but none has been submitted yet, so these commands do not work today. How they are published is described in [packaging/README.md](packaging/README.md).
+
+The AUR packages are not published yet. Until they are, Arch users can install the release file directly: download `backroom-bin-<v>-1-x86_64.pkg.tar.zst` from the [latest release](https://github.com/ridit-jangra/Backroom/releases/latest) and run `sudo pacman -U` on it.
 
 | Platform | Command |
 |---|---|
