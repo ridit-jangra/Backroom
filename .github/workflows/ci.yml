@@ -36,9 +36,11 @@ jobs:
             libwebkit2gtk-4.1-dev libsoup-3.0-dev \
             libayatana-appindicator3-dev librsvg2-dev
 
-      # dtolnay/rust-toolchain has no release tags; it is selected by the branch `stable`.
-      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      # dtolnay/rust-toolchain has no release tags. Pinned to a master commit: the `stable` branch
+      # is rebuilt on every master update, so an old `stable` SHA is not reachable from any branch.
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-10-16 (Add 1.99.1 patch release)
         with:
+          toolchain: stable
           components: clippy
 
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
