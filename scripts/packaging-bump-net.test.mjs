@@ -178,12 +178,13 @@ test('download refuses a non-https start URL and a start URL on another host by 
   await assert.rejects(mod.download('https://example.com/x', 1024), /host example\.com/);
 });
 
-test('the default allow-list is the four GitHub hosts', () => {
+test('the default allow-list is the five GitHub hosts', () => {
   assert.deepEqual(mod.ALLOWED_HOSTS, [
     'github.com',
     'objects.githubusercontent.com',
     'release-assets.githubusercontent.com',
     'raw.githubusercontent.com',
+    'codeload.github.com',
   ]);
 });
 

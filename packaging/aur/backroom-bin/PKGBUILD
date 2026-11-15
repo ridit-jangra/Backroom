@@ -6,7 +6,7 @@
 # is the placeholder used before the first release: it cannot build.
 
 pkgname=backroom-bin
-pkgver=0.0.0
+pkgver=0.0.1
 pkgrel=1
 pkgdesc='Desktop app for Backroom, a self-hosted team chat (prebuilt)'
 arch=('x86_64')
@@ -24,8 +24,8 @@ options=('!debug')
 source=("Backroom_${pkgver}_amd64.deb::${url}/releases/download/v${pkgver}/Backroom_${pkgver}_amd64.deb"
         "backroom-LICENSE-${pkgver}::https://raw.githubusercontent.com/ridit-jangra/Backroom/v${pkgver}/LICENSE")
 noextract=("Backroom_${pkgver}_amd64.deb")
-sha256sums=('0000000000000000000000000000000000000000000000000000000000000000'
-            '0000000000000000000000000000000000000000000000000000000000000000')
+sha256sums=('df3262fb887faf7ea9f177f4c8a091552ee4d30aed1559f6321e511b0931927d'
+            'f3f73da762665d257b645ca0aa1c3364ffface91de73becbc3b8e7e0273b30f8')
 
 prepare() {
   rm -rf payload

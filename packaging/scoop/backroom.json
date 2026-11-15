@@ -1,5 +1,5 @@
 {
-    "version": "0.0.0",
+    "version": "0.0.1",
     "description": "Desktop app for Backroom, a self-hosted team chat. Asks for your server's address on first launch.",
     "homepage": "https://github.com/ridit-jangra/Backroom",
     "license": "MIT",
@@ -9,8 +9,8 @@
     ],
     "architecture": {
         "64bit": {
-            "url": "https://github.com/ridit-jangra/Backroom/releases/download/v0.0.0/Backroom_0.0.0_x64-setup.exe#/setup.exe",
-            "hash": "0000000000000000000000000000000000000000000000000000000000000000"
+            "url": "https://github.com/ridit-jangra/Backroom/releases/download/v0.0.1/Backroom_0.0.1_x64-setup.exe#/setup.exe",
+            "hash": "974ead23a66d877cb5752de84ae873448b4149b1142f83530481372e08a2cf91"
         }
     },
     "installer": {

@@ -15,8 +15,8 @@
 // must be downloaded by hand and passed as a local file). Without --sums it is downloaded from
 // the release (https://github.com/ridit-jangra/Backroom/releases/download/v<x.y.z>/SHA256SUMS).
 // Downloads follow at most 3 redirects, each of which must be https on github.com,
-// objects.githubusercontent.com, release-assets.githubusercontent.com or
-// raw.githubusercontent.com.
+// objects.githubusercontent.com, release-assets.githubusercontent.com,
+// raw.githubusercontent.com or codeload.github.com (where GitHub serves tag tarballs).
 // The source tarball is not in SHA256SUMS: pass its hash with --source-sha256, or let the
 // script download https://github.com/ridit-jangra/Backroom/archive/refs/tags/v<x.y.z>.tar.gz
 // and hash it. A local --sums file means "offline": then --source-sha256 is required.
@@ -88,6 +88,7 @@ export const ALLOWED_HOSTS = [
   'objects.githubusercontent.com',
   'release-assets.githubusercontent.com',
   'raw.githubusercontent.com',
+  'codeload.github.com',
 ];
 const LICENSE_BASE = 'https://raw.githubusercontent.com/ridit-jangra/Backroom';
 const SUMS_PREFIX = '/ridit-jangra/Backroom/releases/download/';

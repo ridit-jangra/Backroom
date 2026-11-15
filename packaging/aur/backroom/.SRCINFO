@@ -1,6 +1,6 @@
 pkgbase = backroom
 	pkgdesc = Desktop app for Backroom, a self-hosted team chat
-	pkgver = 0.0.0
+	pkgver = 0.0.1
 	pkgrel = 1
 	url = https://github.com/ridit-jangra/Backroom
 	arch = x86_64
@@ -22,7 +22,7 @@ pkgbase = backroom
 	depends = libsoup3
 	depends = webkit2gtk-4.1
 	options = !lto
-	source = backroom-0.0.0.tar.gz::https://github.com/ridit-jangra/Backroom/archive/refs/tags/v0.0.0.tar.gz
-	sha256sums = 0000000000000000000000000000000000000000000000000000000000000000
+	source = backroom-0.0.1.tar.gz::https://github.com/ridit-jangra/Backroom/archive/refs/tags/v0.0.1.tar.gz
+	sha256sums = cc911d5af66a292a08686121e614d2efdeff5eeb5b4c46355149a029f63b6e1d
 
 pkgname = backroom

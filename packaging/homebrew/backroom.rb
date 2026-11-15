@@ -4,8 +4,8 @@
 # version and sha256 are set by scripts/packaging-bump.mjs from the release's SHA256SUMS.
 # Version 0.0.0 with an all-zero sha256 is the placeholder used before the first release.
 cask "backroom" do
-  version "0.0.0"
-  sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+  version "0.0.1"
+  sha256 "6c4f74753c1b597936aa045b418147a51037b56c5db7dc76ad086c3e5f8e5470"
 
   url "https://github.com/ridit-jangra/Backroom/releases/download/v#{version}/Backroom_#{version}_universal.dmg"
   name "Backroom"

@@ -5,7 +5,7 @@
 # pkgver 0.0.0 with an all-zero sum is the placeholder used before the first release.
 
 pkgname=backroom
-pkgver=0.0.0
+pkgver=0.0.1
 pkgrel=1
 pkgdesc='Desktop app for Backroom, a self-hosted team chat'
 arch=('x86_64')
@@ -20,7 +20,7 @@ makedepends=('cargo' 'librsvg' 'nodejs' 'npm' 'pkgconf')
 # Unverified; remove if a build without it succeeds.
 options=('!lto')
 source=("backroom-${pkgver}.tar.gz::${url}/archive/refs/tags/v${pkgver}.tar.gz")
-sha256sums=('0000000000000000000000000000000000000000000000000000000000000000')
+sha256sums=('cc911d5af66a292a08686121e614d2efdeff5eeb5b4c46355149a029f63b6e1d')
 
 prepare() {
   cd "Backroom-${pkgver}"

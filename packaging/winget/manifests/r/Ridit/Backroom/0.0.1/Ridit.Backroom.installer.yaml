@@ -1,7 +1,7 @@
 # yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.9.0.schema.json
 
 PackageIdentifier: Ridit.Backroom
-PackageVersion: 0.0.0
+PackageVersion: 0.0.1
 InstallerLocale: en-US
 InstallerType: nullsoft
 Scope: user
@@ -17,7 +17,7 @@ Protocols:
 - backroom
 Installers:
 - Architecture: x64
-  InstallerUrl: https://github.com/ridit-jangra/Backroom/releases/download/v0.0.0/Backroom_0.0.0_x64-setup.exe
-  InstallerSha256: 0000000000000000000000000000000000000000000000000000000000000000
+  InstallerUrl: https://github.com/ridit-jangra/Backroom/releases/download/v0.0.1/Backroom_0.0.1_x64-setup.exe
+  InstallerSha256: 974EAD23A66D877CB5752DE84AE873448B4149B1142F83530481372E08A2CF91
 ManifestType: installer
 ManifestVersion: 1.9.0
