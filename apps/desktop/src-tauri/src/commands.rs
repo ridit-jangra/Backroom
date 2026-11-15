@@ -89,8 +89,11 @@ impl PendingNavigation {
 
 /// `remote-app`: window "main" only, remote URLs `<origin>/*` only, never local.
 /// Viewer windows match no capability, so they have no IPC at all.
+/// The pattern comes from [`config::remote_pattern`] (escaped); every origin
+/// that reaches here at runtime is a `ServerOrigin`, whose pattern was parsed
+/// and checked when it was made.
 pub fn remote_capability(origin: &Url) -> CapabilityBuilder {
-    let pattern = format!("{}/*", origin.as_str().trim_end_matches('/'));
+    let pattern = config::remote_pattern(origin);
     REMOTE_PERMISSIONS.iter().fold(
         CapabilityBuilder::new(CAPABILITY_ID)
             .remote(pattern)
@@ -162,10 +165,23 @@ pub fn save_server<R: Runtime>(
         let dir = state
             .config_dir()
             .ok_or_else(|| "Could not save the server address.".to_string())?;
+        // `origin` is fully checked (address rules and its capability pattern)
+        // before anything is written.
+        let previous = config::load_config(dir);
         config::save_config(dir, Some(&origin))
             .map_err(|_| "Could not save the server address.".to_string())?;
-        app.add_capability(remote_capability(origin.url()))
-            .map_err(|_| "Could not connect to the server.".to_string())?;
+        if app.add_capability(remote_capability(origin.url())).is_err() {
+            // Put the file back the way it was, so the next start does not
+            // try an origin this one could not use.
+            let restored = match previous {
+                config::Stored::Missing => std::fs::remove_file(dir.join(config::CONFIG_FILE)),
+                _ => config::save_config(dir, None),
+            };
+            if restored.is_err() {
+                eprintln!("backroom: server_config_restore_failed");
+            }
+            return Err("Could not connect to the server.".into());
+        }
         *slot = Some(origin.url().clone());
         // The guard drops here: the navigation hook reads this state.
     }

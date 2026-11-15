@@ -72,6 +72,8 @@ pub enum ConfigError {
     NotAnOrigin,
     ReservedHost,
     InsecureHost,
+    InvalidHostName,
+    UnusableOrigin,
 }
 
 impl fmt::Display for ConfigError {
@@ -88,6 +90,10 @@ impl fmt::Display for ConfigError {
                 "Enter only the server address, without a path, \"?\" or \"#\"."
             }
             ConfigError::ReservedHost => "That address cannot be a Backroom server.",
+            ConfigError::InvalidHostName => {
+                "Server names may use only letters, digits, hyphens and dots."
+            }
+            ConfigError::UnusableOrigin => "The app cannot use this address.",
             ConfigError::InsecureHost => {
                 "Use https:// for this server. Plain http:// works only for localhost, \
                  private network addresses and .local names."
@@ -145,11 +151,17 @@ pub fn normalize_server_url(input: &str) -> Result<ServerOrigin, ConfigError> {
     {
         return Err(ConfigError::NotAnOrigin);
     }
+    if url.port() == Some(0) {
+        return Err(ConfigError::InvalidUrl);
+    }
     let host = url.host().ok_or(ConfigError::InvalidUrl)?;
     match host {
         Host::Domain(d) => {
             if d.is_empty() || d.starts_with('.') || d.ends_with('.') {
                 return Err(ConfigError::InvalidUrl);
+            }
+            if !is_ldh_hostname(d) {
+                return Err(ConfigError::InvalidHostName);
             }
             // `*.localhost` names the webview's own origins (`tauri.localhost`,
             // `ipc.localhost`) on some platforms.
@@ -170,6 +182,7 @@ pub fn normalize_server_url(input: &str) -> Result<ServerOrigin, ConfigError> {
     // The same checks the build-time origin always had, never weaker.
     let url = policy::app_origin(&url.origin().ascii_serialization())
         .map_err(|_| ConfigError::InvalidUrl)?;
+    verify_pattern(&url)?;
     Ok(ServerOrigin { url, insecure })
 }
 
@@ -210,6 +223,71 @@ fn is_private_host(host: &Host<&str>) -> bool {
         Host::Ipv4(ip) => ip.is_loopback() || ip.is_private(),
         Host::Ipv6(ip) => ip.is_loopback(),
     }
+}
+
+/// The capability URL pattern for `origin`: `<scheme>://<host>[:port]/*`,
+/// with URLPattern syntax characters in the host escaped (an IPv6 literal's
+/// colons would otherwise make Tauri's parser panic inside `add_capability`).
+pub fn remote_pattern(origin: &Url) -> String {
+    let host: String = origin
+        .host_str()
+        .unwrap_or_default()
+        .chars()
+        .flat_map(|c| {
+            let special = matches!(c, '\\' | ':' | '*' | '?' | '+' | '(' | ')' | '{' | '}');
+            special.then_some('\\').into_iter().chain([c])
+        })
+        .collect();
+    let port = origin.port().map(|p| format!(":{p}")).unwrap_or_default();
+    format!("{}://{host}{port}/*", origin.scheme())
+}
+
+/// Parses `origin`'s pattern exactly as Tauri will, and checks that it matches
+/// the origin and not its neighbours. A `ServerOrigin` only exists after this
+/// passed, so nothing saved or loaded can reach the capability builder with a
+/// pattern that panics it or matches more than one origin.
+fn verify_pattern(origin: &Url) -> Result<(), ConfigError> {
+    let pattern: tauri::utils::acl::RemoteUrlPattern = remote_pattern(origin)
+        .parse()
+        .map_err(|_| ConfigError::UnusableOrigin)?;
+    let mut other_port = origin.clone();
+    let _ = other_port.set_port(Some(origin.port_or_known_default().map_or(1, |p| p ^ 1)));
+    let mut other_scheme = origin.clone();
+    let _ = other_scheme.set_scheme(if origin.scheme() == "http" {
+        "https"
+    } else {
+        "http"
+    });
+    let with_path = origin
+        .join("/x?y#z")
+        .map_err(|_| ConfigError::UnusableOrigin)?;
+    let other_host = Url::parse("https://backroom-pattern-check.invalid/").expect("static URL");
+    if pattern.test(origin)
+        && pattern.test(&with_path)
+        && !pattern.test(&other_port)
+        && !pattern.test(&other_scheme)
+        && !pattern.test(&other_host)
+    {
+        Ok(())
+    } else {
+        Err(ConfigError::UnusableOrigin)
+    }
+}
+
+/// After IDNA: dot-separated LDH labels (`a-z`, `0-9`, `-`, 1-63 chars, no
+/// leading or trailing hyphen), at most 253 chars. Everything else (`*`,
+/// `(`, `+`, `_`, …) is refused: the URL parser keeps such characters, and
+/// several are URLPattern syntax.
+fn is_ldh_hostname(d: &str) -> bool {
+    d.len() <= 253
+        && d.split('.').all(|label| {
+            (1..=63).contains(&label.len())
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        })
 }
 
 /// What `server.json` says.
@@ -448,6 +526,25 @@ impl ServerState {
         self.origin.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
+
+#[cfg(test)]
+/// Every kind of origin the rules accept (C1: IPv6 used to panic Tauri's
+/// URLPattern parser inside `add_capability`).
+pub(crate) const ORIGIN_SHAPES: [&str; 13] = [
+    "http://[::1]:8787",
+    "http://[::1]",
+    "https://[2001:db8::1]",
+    "https://[2001:db8::1]:8443",
+    "https://bücher.example",
+    "https://chat.example.com",
+    "https://chat.example.com:8443",
+    "https://8.8.8.8:8443",
+    "http://localhost",
+    "http://localhost:8787",
+    "http://192.168.1.20:8080",
+    "http://10.0.0.5",
+    "http://backroom.local:8787",
+];
 
 #[cfg(test)]
 mod tests {
@@ -693,17 +790,153 @@ mod tests {
         }
     }
 
+    fn parsed_pattern(o: &ServerOrigin) -> tauri::utils::acl::RemoteUrlPattern {
+        let pattern = remote_pattern(o.url());
+        pattern
+            .parse()
+            .unwrap_or_else(|e| panic!("{pattern} does not parse: {e}"))
+    }
+
     #[test]
     fn normalized_origins_pass_the_policy_check_and_its_capability_pattern() {
-        for input in [
-            "https://chat.example.com",
-            "http://localhost:8787",
-            "https://xn--bcher-kva.example:8443",
-            "http://[::1]:8787",
-        ] {
+        use tauri::ipc::RuntimeCapability;
+        use tauri::utils::acl::capability::CapabilityFile;
+        for input in ORIGIN_SHAPES {
             let o = ok(input);
             assert_eq!(policy::app_origin(o.url().as_str()).as_ref(), Ok(o.url()));
             assert_eq!(format!("{}/", o.origin()), o.url().as_str());
+            // The capability the app would build carries exactly this pattern,
+            // and the pattern parses (Tauri panics on one that does not).
+            let CapabilityFile::Capability(cap) =
+                crate::commands::remote_capability(o.url()).build()
+            else {
+                panic!("a single capability");
+            };
+            let urls = &cap.remote.as_ref().unwrap().urls;
+            assert_eq!(urls, &vec![remote_pattern(o.url())], "{input}");
+            parsed_pattern(&o);
+        }
+    }
+
+    #[test]
+    fn every_capability_pattern_matches_exactly_its_origin() {
+        for input in ORIGIN_SHAPES {
+            let o = ok(input);
+            let pattern = parsed_pattern(&o);
+            let url = o.url();
+            assert!(pattern.test(url), "{input}");
+            assert!(
+                pattern.test(&url.join("/c/x?y=1#z").unwrap()),
+                "{input} with a path"
+            );
+            let mut other_port = url.clone();
+            other_port.set_port(Some(1)).unwrap();
+            assert!(!pattern.test(&other_port), "{input} vs port 1");
+            let mut other_scheme = url.clone();
+            let flipped = if url.scheme() == "http" {
+                "https"
+            } else {
+                "http"
+            };
+            other_scheme.set_scheme(flipped).unwrap();
+            assert!(!pattern.test(&other_scheme), "{input} vs {flipped}");
+            for other in [
+                "https://other.example/",
+                "http://other.example/",
+                "https://[::2]:8787/",
+                "http://[::1]:8788/",
+                "https://[2001:db8::2]/",
+                "http://127.0.0.1:8787/",
+                "https://xn--bcher-kva.example.evil/",
+            ] {
+                let other = Url::parse(other).unwrap();
+                if other.origin() != url.origin() {
+                    assert!(!pattern.test(&other), "{input} matched {other}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ipv6_patterns_escape_their_colons() {
+        assert_eq!(
+            remote_pattern(ok("http://[::1]:8787").url()),
+            r"http://[\:\:1]:8787/*"
+        );
+        assert_eq!(
+            remote_pattern(ok("https://chat.example.com").url()),
+            "https://chat.example.com/*"
+        );
+    }
+
+    #[test]
+    fn urlpattern_metacharacters_in_hosts_are_refused() {
+        for input in [
+            "https://*",
+            "https://*/",
+            "https://*.example.com",
+            "https://a*b.example",
+            "https://chat(x).example.com",
+            "https://(x)",
+            "https://{a}.example.com",
+            "https://a{b}c",
+            "https://a+.example.com",
+            "https://a+b",
+            "http://*.local",
+            "http://localhost*",
+            "https://a_b.example.com",
+            "https://-a.example.com",
+            "https://a-.example.com",
+            "https://exa$mple.com",
+            "https://a!b.example",
+            "https://a'b.example",
+            "https://a=b.example",
+            "https://a&b.example",
+            "https://a;b.example",
+            "https://a,b.example",
+            "https://a~b.example",
+            "https://a|b.example",
+            "https://a^b.example",
+            "https://a\"b.example",
+        ] {
+            assert!(
+                matches!(
+                    normalize_server_url(input),
+                    Err(ConfigError::InvalidHostName | ConfigError::InvalidUrl)
+                ),
+                "{input}: {:?}",
+                normalize_server_url(input)
+            );
+        }
+        // `?` and `:` end the host; refused for other reasons.
+        for input in [
+            "https://a?b.example",
+            "https://a:b.example",
+            "https://a?.example",
+        ] {
+            assert!(normalize_server_url(input).is_err(), "{input}");
+        }
+        let long_label = format!("https://{}.example", "a".repeat(64));
+        assert_eq!(
+            normalize_server_url(&long_label),
+            Err(ConfigError::InvalidHostName)
+        );
+        let max_label = format!("https://{}.example", "a".repeat(63));
+        assert!(normalize_server_url(&max_label).is_ok());
+    }
+
+    #[test]
+    fn port_zero_is_refused() {
+        for input in [
+            "https://chat.example.com:0",
+            "http://localhost:0",
+            "http://[::1]:0",
+        ] {
+            assert_eq!(
+                normalize_server_url(input),
+                Err(ConfigError::InvalidUrl),
+                "{input}"
+            );
         }
     }
 
@@ -720,6 +953,8 @@ mod tests {
             ConfigError::NotAnOrigin,
             ConfigError::ReservedHost,
             ConfigError::InsecureHost,
+            ConfigError::InvalidHostName,
+            ConfigError::UnusableOrigin,
         ]
         .map(|e| e.to_string());
         let health = [

@@ -215,9 +215,13 @@ fn boot<R: Runtime>(
     if stored == Stored::Invalid {
         eprintln!("backroom: server_config_invalid");
     }
-    let start = config::resolve_start(&stored, build_default);
+    let mut start = config::resolve_start(&stored, build_default);
     if let Some(capability) = start_capability(&start) {
-        app.add_capability(capability)?;
+        // Never trust the file: if the capability cannot be added, ask again.
+        if app.add_capability(capability).is_err() {
+            eprintln!("backroom: server_capability_failed");
+            start = Start::Setup;
+        }
     }
     let origin = match start {
         Start::Remote(origin) => Some(origin.url().clone()),
@@ -1388,6 +1392,114 @@ mod tests {
                     "{hostile}: {url}"
                 );
             }
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// Another origin to probe with: same host on another port (or another
+    /// host entirely for default-port origins).
+    fn neighbour(o: &config::ServerOrigin) -> String {
+        let mut other = o.url().clone();
+        other
+            .set_port(Some(o.url().port().map_or(1, |p| p + 1)))
+            .unwrap();
+        other.to_string()
+    }
+
+    #[test]
+    fn every_origin_shape_boots_from_a_saved_config_without_panicking() {
+        for (i, input) in config::ORIGIN_SHAPES.into_iter().enumerate() {
+            let o = server(input);
+            let dir = scratch_dir(&format!("shape-boot-{i}"));
+            config::save_config(&dir, Some(&o)).unwrap();
+            let (app, main) = booted_app(&dir, None);
+            assert_eq!(
+                app.state::<ServerState>().current().as_ref(),
+                Some(o.url()),
+                "{input}"
+            );
+            assert_eq!(&main.url().unwrap(), o.url(), "{input}");
+            let page = o.url().join("/c/x").unwrap().to_string();
+            assert!(
+                call(&main, "take_pending_navigation", &page, no_args()).is_ok(),
+                "{input}"
+            );
+            let other = neighbour(&o);
+            assert!(
+                denied(call(&main, "take_pending_navigation", &other, no_args())),
+                "{input} vs {other}"
+            );
+            assert!(
+                denied(call(
+                    &main,
+                    "take_pending_navigation",
+                    "https://other.example/",
+                    no_args()
+                )),
+                "{input}"
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    #[test]
+    fn every_origin_shape_can_be_saved_from_the_setup_page() {
+        for (i, input) in config::ORIGIN_SHAPES.into_iter().enumerate() {
+            let o = server(input);
+            let dir = scratch_dir(&format!("shape-save-{i}"));
+            let (app, main) = booted_app(&dir, None);
+            let local = main.url().unwrap().to_string();
+            let saved = call(
+                &main,
+                "save_server",
+                &local,
+                serde_json::json!({ "url": input }),
+            );
+            assert_eq!(saved, Ok(serde_json::json!(o.origin())), "{input}");
+            assert_eq!(
+                config::load_config(&dir),
+                Stored::Server(o.clone()),
+                "{input}"
+            );
+            assert_eq!(app.state::<ServerState>().current().as_ref(), Some(o.url()));
+            assert!(call(
+                &main,
+                "take_pending_navigation",
+                o.url().as_str(),
+                no_args()
+            )
+            .is_ok());
+            let other = neighbour(&o);
+            assert!(
+                denied(call(&main, "take_pending_navigation", &other, no_args())),
+                "{input} vs {other}"
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    #[test]
+    fn a_hand_edited_ipv6_or_metacharacter_host_never_panics_boot() {
+        for (i, (text, expect_remote)) in [
+            (r#"{"serverUrl":"https://[2001:db8::1]"}"#, true),
+            (r#"{"serverUrl":"http://[::1]:8787"}"#, true),
+            (r#"{"serverUrl":"https://*"}"#, false),
+            (r#"{"serverUrl":"https://a+.example.com"}"#, false),
+            (r#"{"serverUrl":"https://chat(x).example.com"}"#, false),
+            (r#"{"serverUrl":"http://*.local"}"#, false),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let dir = scratch_dir(&format!("hand-{i}"));
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join(config::CONFIG_FILE), text).unwrap();
+            let (app, _main) = booted_app(&dir, None);
+            assert_eq!(
+                app.state::<ServerState>().current().is_some(),
+                expect_remote,
+                "{text}"
+            );
             let _ = std::fs::remove_dir_all(&dir);
         }
     }
