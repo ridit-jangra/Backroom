@@ -1,7 +1,8 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import type { MemberSummary, Message, Role } from '@backroom/protocol';
 import type { PendingSend } from '../realtime/outbox';
-import type { ChannelWindow } from '../state/chat';
+import { liveMessages, type ChannelWindow } from '../state/chat';
+import { Dialog } from './Dialog';
 import { parseReactionCode } from '@backroom/emoji';
 import { useEmoji } from '../emoji/EmojiContext';
 import { EmojiPicker } from '../emoji/EmojiPicker';
@@ -77,14 +78,18 @@ export function MessageRow({
   }, [connected]);
   const [sendError, setSendError] = useState(false);
   const offlineTitle = connected ? undefined : 'Reconnecting…';
-  const deleted = message.deletedAt !== null;
+  const [confirming, setConfirming] = useState(false);
+  const cancelRef = useRef<HTMLButtonElement>(null);
+  const confirmId = useId();
   const own = message.userId === me;
-  const canEdit = own && !deleted;
-  const canDelete = !deleted && (own || myRole === 'owner' || myRole === 'admin');
+  const canEdit = own;
+  const canDelete = own || myRole === 'owner' || myRole === 'admin';
   const replies = message.replyCount;
   const reactions = message.reactions ?? [];
-  const canReact = !!onReact && !deleted;
-  const showReactions = !deleted && reactions.length > 0;
+  const canReact = !!onReact;
+  const showReactions = reactions.length > 0;
+  // Deleted messages are never shown; lists filter them, this is the last line of defence.
+  if (message.deletedAt !== null) return null;
 
   // P3-R9: compare against the canonical code, so an alias pick toggles the reaction it names.
   function react(emojiCode: string, on: boolean) {
@@ -110,11 +115,7 @@ export function MessageRow({
           </time>
         </div>
       )}
-      {deleted ? (
-        <p className="msg-body muted">
-          <em>This message was deleted.</em>
-        </p>
-      ) : editing ? (
+      {editing ? (
         <Composer
           placeholder="Edit message"
           members={members}
@@ -138,7 +139,7 @@ export function MessageRow({
           {message.editedAt !== null && <span className="muted"> (edited)</span>}
         </p>
       )}
-      {!deleted && !!message.files?.length && <MessageFiles files={message.files} />}
+      {!!message.files?.length && <MessageFiles files={message.files} />}
       {showReactions && (
         <ReactionBar
           reactions={reactions}
@@ -158,9 +159,9 @@ export function MessageRow({
         </button>
       )}
       {sendError && <p role="alert" className="msg-error">Not connected — try again.</p>}
-      {(canEdit || canDelete || canReact || (!!onOpenThread && !deleted)) && !editing && (
+      {(canEdit || canDelete || canReact || !!onOpenThread) && !editing && (
         <div className="msg-toolbar" role="group" aria-label="Message actions">
-          {onOpenThread && !deleted && (
+          {onOpenThread && (
             <button type="button" className="tool" aria-label="Reply in thread" onClick={() => onOpenThread(message.id)}>
               Reply
             </button>
@@ -198,13 +199,37 @@ export function MessageRow({
               disabled={!connected}
               title={offlineTitle}
               onClick={() => {
-                if (globalThis.confirm('Delete this message?')) setSendError(!onDelete(message.id));
+                // A starter with live replies takes them along: say so in a real dialog first.
+                if (message.parentId === null && replies > 0) setConfirming(true);
+                else if (globalThis.confirm('Delete this message?')) setSendError(!onDelete(message.id));
               }}
             >
               Delete
             </button>
           )}
         </div>
+      )}
+      {confirming && (
+        <Dialog title="Delete this message?" onClose={() => setConfirming(false)} describedBy={confirmId} initialFocus={cancelRef}>
+          <p id={confirmId}>
+            This also deletes {replies} {replies === 1 ? 'reply' : 'replies'}. This can't be undone.
+          </p>
+          <div className="dialog-actions">
+            <button ref={cancelRef} type="button" onClick={() => setConfirming(false)}>
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="danger"
+              onClick={() => {
+                setConfirming(false);
+                setSendError(!onDelete(message.id));
+              }}
+            >
+              Delete
+            </button>
+          </div>
+        </Dialog>
       )}
     </li>
   );
@@ -286,7 +311,7 @@ export function MessageList({
   highlightId?: string | null;
   highlightNonce?: number;
 }) {
-  const messages = channelWindow?.messages ?? [];
+  const messages = liveMessages(channelWindow?.messages ?? []);
   const box = useRef<HTMLDivElement>(null);
   const atBottom = useRef(true);
   const prevFirst = useRef<string | undefined>(undefined);

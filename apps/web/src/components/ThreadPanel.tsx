@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef, useState } from 'react';
 import type { FileInfo, MemberSummary, Role, ThreadPage } from '@backroom/protocol';
 import type { PendingSend } from '../realtime/outbox';
+import { liveMessages } from '../state/chat';
 import { Composer } from './Composer';
 import { MessageRow, PendingRow, startsGroup } from './MessageList';
 import { TypingIndicator } from './TypingIndicator';
@@ -60,7 +61,7 @@ export function ThreadPanel({
 }) {
   const [also, setAlso] = useState(false);
   const alsoId = useId();
-  const replies = page?.replies ?? [];
+  const replies = liveMessages(page?.replies ?? []);
   const lastSeq = replies.reduce((a, m) => Math.max(a, m.seq), 0);
   const marked = useRef(0);
   const parentId = page?.parent.id;
@@ -111,7 +112,9 @@ export function ThreadPanel({
               highlightNonce={highlightNonce}
             />
           </ul>
-          <p className="muted thread-count">{replies.length === 1 ? '1 reply' : `${replies.length} replies`}</p>
+          {replies.length > 0 && (
+            <p className="muted thread-count">{replies.length === 1 ? '1 reply' : `${replies.length} replies`}</p>
+          )}
           <ul className="msg-list" aria-label="Replies">
             {replies.map((m, i) => (
               <MessageRow

@@ -304,7 +304,7 @@ describe('Workspace live view', () => {
     expect(within(bobRow).queryByRole('button', { name: 'Edit' })).toBeNull();
   });
 
-  it('renders deleted, edited and reply-count states', async () => {
+  it('renders edited and reply-count states and hides deleted messages', async () => {
     await boot({
       pages: {
         [GEN]: {
@@ -318,8 +318,9 @@ describe('Workspace live view', () => {
         },
       },
     });
-    expect(await within(log()).findByText('This message was deleted.')).toBeTruthy();
-    expect(within(log()).getByText('(edited)')).toBeTruthy();
+    expect(await within(log()).findByText('(edited)')).toBeTruthy();
+    expect(screen.queryByText(/was deleted/i)).toBeNull();
+    expect(log().querySelectorAll('li.msg')).toHaveLength(3);
     expect(within(log()).getByRole('button', { name: '1 reply' })).toBeTruthy();
     expect(within(log()).getByRole('button', { name: '3 replies' })).toBeTruthy();
     // P2-R10: useChat.openThread owns the thread fetch.

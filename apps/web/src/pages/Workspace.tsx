@@ -126,7 +126,8 @@ export function Workspace({ slug, channelId }: { slug: string; channelId?: strin
       parentId: m.parentId,
       alsoInChannel: m.alsoInChannel,
     });
-    if (!ok) setJumpError('That message is too far back to show here.');
+    if (ok === 'deleted') setJumpError('That message was deleted.');
+    else if (!ok) setJumpError('That message is too far back to show here.');
   }
   function submitSearch(e: React.FormEvent) {
     e.preventDefault();

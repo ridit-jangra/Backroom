@@ -1,12 +1,26 @@
-import { useEffect, useId, useRef, type ReactNode } from 'react';
+import { useEffect, useId, useRef, type ReactNode, type RefObject } from 'react';
 
 const FOCUSABLE = 'a[href], button:not(:disabled), input:not(:disabled), textarea:not(:disabled), select:not(:disabled), [tabindex]:not([tabindex="-1"])';
 
 /**
  * Minimal modal: labelled by its title, focused on open, focus kept inside, Escape closes (handled on
  * the document so it works wherever focus is), and focus returns to the opener on close.
+ * `describedBy` names the element holding the dialog's explanation; `initialFocus` picks the control
+ * focused on open (default: the dialog itself).
  */
-export function Dialog({ title, onClose, children }: { title: string; onClose: () => void; children: ReactNode }) {
+export function Dialog({
+  title,
+  onClose,
+  describedBy,
+  initialFocus,
+  children,
+}: {
+  title: string;
+  onClose: () => void;
+  describedBy?: string;
+  initialFocus?: RefObject<HTMLElement | null>;
+  children: ReactNode;
+}) {
   const titleId = useId();
   const box = useRef<HTMLDivElement>(null);
   const close = useRef(onClose);
@@ -14,7 +28,7 @@ export function Dialog({ title, onClose, children }: { title: string; onClose: (
 
   useEffect(() => {
     const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    box.current?.focus();
+    (initialFocus?.current ?? box.current)?.focus();
     const onKey = (e: KeyboardEvent) => {
       const el = box.current;
       if (!el) return;
@@ -53,7 +67,7 @@ export function Dialog({ title, onClose, children }: { title: string; onClose: (
 
   return (
     <div className="dialog-backdrop">
-      <div ref={box} className="dialog" role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1}>
+      <div ref={box} className="dialog" role="dialog" aria-modal="true" aria-labelledby={titleId} aria-describedby={describedBy} tabIndex={-1}>
         <h2 id={titleId}>{title}</h2>
         {children}
       </div>

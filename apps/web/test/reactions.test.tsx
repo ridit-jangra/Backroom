@@ -118,12 +118,13 @@ describe('reactions', () => {
     expect((screen.getByRole('button', { name: 'Add reaction' }) as HTMLButtonElement).disabled).toBe(true);
   });
 
-  it('a deleted message shows no reactions', async () => {
-    stubApi({ pages: { [GEN]: { messages: [msg(1, { deletedAt: 1_700_000_009_000, reactions: [{ emoji: '+1', userIds: [BOB] }] })], hasMore: false } } });
+  it('a deleted message is not rendered at all: no placeholder, reactions or toolbar', async () => {
+    stubApi({ pages: { [GEN]: { messages: [msg(1, { deletedAt: 1_700_000_009_000, reactions: [{ emoji: '+1', userIds: [BOB] }] }), msg(2, { body: 'still here' })], hasMore: false } } });
     await boot();
-    await screen.findByText('This message was deleted.');
+    await screen.findByText('still here');
+    expect(screen.queryByText(/was deleted/i)).toBeNull();
     expect(document.querySelector('.reaction')).toBeNull();
-    expect(screen.queryByRole('button', { name: 'Add reaction' })).toBeNull();
+    expect(screen.queryAllByRole('button', { name: 'Add reaction' })).toHaveLength(1);
   });
 
   it('deleting a custom emoji turns its uses into :name: text live', async () => {

@@ -40,6 +40,8 @@ export type ChatState = {
   highlightId: string | null;
   /** Bumps on every highlight so jumping to the same message again re-triggers the flash. */
   highlightNonce: number;
+  /** Thread starters known to be deleted: their replies are dropped and never shown again (HD-R7). */
+  deletedParents: Record<string, true>;
 };
 
 export type ChatEvent =
@@ -53,7 +55,11 @@ export type ChatEvent =
   | { t: 'local.focus'; focused: boolean }
   | { t: 'local.pending'; pending: PendingSend[] }
   | { t: 'local.connection'; state: SocketState }
-  | { t: 'local.tick'; now: number };
+  | { t: 'local.tick'; now: number }
+  /** The socket reconnected: other channels' cached windows and threads may hide missed deletions. */
+  | { t: 'local.reconnected' }
+  /** A thread fetch found its starter gone. */
+  | { t: 'local.threadGone'; parentId: string };
 
 export function initialChat(me: string): ChatState {
   return {
@@ -74,6 +80,7 @@ export function initialChat(me: string): ChatState {
     focused: true,
     highlightId: null,
     highlightNonce: 0,
+    deletedParents: {},
   };
 }
 
@@ -88,6 +95,66 @@ export function lastSeenFor(s: ChatState): Record<string, number> {
 }
 
 const NO_FILES: FileInfo[] = [];
+
+/**
+ * The one way every renderer reads messages: tombstones stay in state (seq continuity, "deleted wins"
+ * merging) but are never shown. Returns the same array when nothing is hidden.
+ */
+export function liveMessages(list: Message[]): Message[] {
+  return list.some((m) => m.deletedAt !== null) ? list.filter((m) => m.deletedAt === null) : list;
+}
+
+/** Forget a deleted starter's replies (every window, the thread cache) and close its thread. */
+function dropThread(s: ChatState, pid: string): ChatState {
+  let windows = s.windows;
+  for (const [cid, w] of Object.entries(s.windows)) {
+    if (w.messages.some((m) => m.parentId === pid)) {
+      windows = { ...windows, [cid]: { ...w, messages: w.messages.filter((m) => m.parentId !== pid) } };
+    }
+  }
+  const hasThread = pid in s.threads;
+  const threads = hasThread ? Object.fromEntries(Object.entries(s.threads).filter(([k]) => k !== pid)) : s.threads;
+  const marked = s.deletedParents[pid] === true;
+  const closes = s.openThreadId === pid;
+  if (windows === s.windows && !hasThread && marked && !closes) return s;
+  return {
+    ...s,
+    windows,
+    threads,
+    deletedParents: marked ? s.deletedParents : { ...s.deletedParents, [pid]: true },
+    openThreadId: closes ? null : s.openThreadId,
+  };
+}
+
+/** A starter tombstone (frame, history page, catch-up) takes its replies with it. */
+function cascadeTombstones(s: ChatState, list: Message[]): ChatState {
+  let next = s;
+  for (const m of list) if (m.parentId === null && m.deletedAt !== null) next = dropThread(next, m.id);
+  return next;
+}
+
+/** thread.counts: the server's exact live counters; the only path that may lower them. */
+function applyCounts(s: ChatState, f: Extract<HubFrame, { t: 'thread.counts' }>): ChatState {
+  const set = (p: Message): Message =>
+    p.deletedAt !== null || (p.replyCount === f.replyCount && p.lastReplyAt === f.lastReplyAt)
+      ? p
+      : { ...p, replyCount: f.replyCount, lastReplyAt: f.lastReplyAt };
+  let next = s;
+  const w = s.windows[f.channelId];
+  const i = w ? w.messages.findIndex((x) => x.id === f.parentId) : -1;
+  if (w && i !== -1) {
+    const updated = set(w.messages[i]!);
+    if (updated !== w.messages[i]) {
+      next = { ...next, windows: { ...next.windows, [f.channelId]: { ...w, messages: w.messages.map((x, j) => (j === i ? updated : x)) } } };
+    }
+  }
+  const t = next.threads[f.parentId];
+  if (t) {
+    const parent = set(t.parent);
+    if (parent !== t.parent) next = { ...next, threads: { ...next.threads, [f.parentId]: { ...t, parent } } };
+  }
+  return next;
+}
 
 /** Pick between a held message and an incoming copy; a replay never reverts newer edits or deletes. */
 function pick(held: Message | undefined, incoming: Message): Message {
@@ -209,7 +276,8 @@ function applyMessage(s: ChatState, m: Message): ChatState {
   const known =
     (inChannelView && (s.windows[m.channelId]?.messages.some((x) => x.id === m.id) ?? false)) ||
     (m.parentId !== null && (s.threads[m.parentId]?.replies.some((x) => x.id === m.id) ?? false));
-  const isNew = m.seq > prev && !known;
+  const orphan = m.parentId !== null && s.deletedParents[m.parentId] === true;
+  const isNew = m.seq > prev && !known && !orphan;
   let next: ChatState = { ...s, lastSeen: { ...s.lastSeen, [m.channelId]: Math.max(s.lastSeen[m.channelId] ?? 0, m.seq) } };
 
   let channel = ch;
@@ -227,6 +295,8 @@ function applyMessage(s: ChatState, m: Message): ChatState {
     next.channels = { ...next.channels, [m.channelId]: channel };
   }
 
+  if (orphan) return next;
+
   if (inChannelView) {
     const w = next.windows[m.channelId];
     if (w?.loaded) {
@@ -242,7 +312,7 @@ function applyMessage(s: ChatState, m: Message): ChatState {
     }
     if (isNew) next = bumpParent(next, m);
   }
-  return next;
+  return cascadeTombstones(next, [m]);
 }
 
 function bumpParent(s: ChatState, reply: Message): ChatState {
@@ -276,7 +346,7 @@ export function reduce(state: ChatState, e: ChatEvent, now: number): ChatState {
       return applyMessage(state, e.message);
     case 'message.edit':
     case 'message.delete':
-      return replaceEverywhere(state, e.message);
+      return cascadeTombstones(replaceEverywhere(state, e.message), [e.message]);
     case 'catchup': {
       let s = state;
       for (const m of [...e.messages].sort((a, b) => a.seq - b.seq)) s = applyMessage(s, m);
@@ -372,8 +442,8 @@ export function reduce(state: ChatState, e: ChatEvent, now: number): ChatState {
       for (const c of e.added) customEmoji[c.name] = c;
       return { ...state, customEmoji };
     }
-    // Task 2 applies these counters; until then the frame is ignored.
     case 'thread.counts':
+      return applyCounts(state, e);
     case 'notify':
     case 'pong':
       return state;
@@ -400,14 +470,27 @@ export function reduce(state: ChatState, e: ChatEvent, now: number): ChatState {
               [...e.page.messages, ...(old && e.mode === 'replace' ? old.messages.filter((m) => m.seq > maxSeq) : [])],
             )
           : mergeMessages(old.messages, e.page.messages);
-      return {
-        ...state,
-        windows: { ...state.windows, [e.channelId]: { messages, hasOlder: e.page.hasMore, loaded: true } },
-      };
+      return cascadeTombstones(
+        {
+          ...state,
+          windows: { ...state.windows, [e.channelId]: { messages, hasOlder: e.page.hasMore, loaded: true } },
+        },
+        messages,
+      );
     }
     case 'local.thread': {
+      if (e.page.parent.deletedAt !== null) return dropThread(replaceParentInWindow(state, e.page.parent), e.page.parent.id);
       const s = { ...state, threads: { ...state.threads, [e.page.parent.id]: e.page } };
       return replaceParentInWindow(s, e.page.parent);
+    }
+    case 'local.threadGone':
+      return dropThread(state, e.parentId);
+    case 'local.reconnected': {
+      const windows: Record<string, ChannelWindow> = {};
+      for (const [cid, w] of Object.entries(state.windows)) if (cid === state.openChannelId) windows[cid] = w;
+      const threads: Record<string, ThreadPage> = {};
+      for (const [pid, t] of Object.entries(state.threads)) if (pid === state.openThreadId) threads[pid] = t;
+      return { ...state, windows, threads };
     }
     case 'local.open': {
       const c = state.channels[e.channelId];

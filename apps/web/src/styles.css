@@ -142,6 +142,8 @@ button.link:hover { background: none; }
 .dialog-form label.check { font-weight: 400; }
 .dialog-form input[type="text"], .dialog-form input:not([type]) { margin-bottom: 0.75rem; }
 .dialog-actions { display: flex; gap: 0.5rem; margin-top: 0.75rem; flex-wrap: wrap; }
+.dialog-actions button.danger { color: var(--danger); border-color: var(--danger); }
+.dialog-actions button.danger:hover:not(:disabled) { background: color-mix(in srgb, var(--danger) 12%, transparent); }
 .danger-zone { border-top: 1px solid var(--rule); padding-top: 0.75rem; }
 .danger-zone button { color: var(--danger); border-color: var(--danger); }
 .danger-zone button:hover:not(:disabled) { background: color-mix(in srgb, var(--danger) 12%, transparent); }

@@ -379,7 +379,8 @@ describe('reactions and custom emoji', () => {
     s = run(s, { t: 'message.delete', message: msg(1, { body: '', editedAt: 5, deletedAt: 6 }) });
     expect(s.windows.c1!.messages[0]!.deletedAt).toBe(6);
     expect(s.windows.c1!.messages[0]!.reactions).toEqual([{ emoji: '+1', userIds: [BOB] }]);
-    expect(s.threads.m1!.parent.reactions).toEqual([{ emoji: '+1', userIds: [BOB] }]);
+    // m1 is the thread starter: its tombstone drops the cached thread (HD-R7).
+    expect(s.threads.m1).toBeUndefined();
   });
 
   it('a held newer edit still takes the incoming reactions (P3-R13)', () => {

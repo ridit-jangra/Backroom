@@ -25,7 +25,7 @@ export type ChatActions = {
   markThreadRead(messageId: string, seq: number): boolean;
   send(channelId: string, body: string, parentId?: string | null, alsoInChannel?: boolean, files?: FileInfo[]): void;
   /** Opens the message's channel (or thread, for a reply) and highlights it; false when it could not be found. */
-  jumpTo(t: { channelId: string; messageId: string; seq: number; parentId: string | null; alsoInChannel: boolean }): Promise<boolean>;
+  jumpTo(t: { channelId: string; messageId: string; seq: number; parentId: string | null; alsoInChannel: boolean }): Promise<boolean | 'deleted'>;
   retry(clientId: string): void;
   discard(clientId: string): void;
   /** False when the frame could not be sent (not connected); the caller keeps the user's input. */
@@ -43,6 +43,8 @@ const ACTIVITY_EVERY_MS = 60_000;
 export const MEMBER_REFRESH_MS = 10_000;
 /** emoji.update frames arriving within this window are applied as one state change. */
 export const EMOJI_COALESCE_MS = 50;
+/** After a reconnect the open channel/thread refetch runs at most this often (reconnect storms coalesce). */
+export const RECONNECT_REFETCH_MS = 2_000;
 
 /** User IDs a hub frame refers to (authors, typers, presence). */
 function frameUserIds(f: HubFrame): string[] {
@@ -186,6 +188,12 @@ function startSession(
       },
       (err) => {
         fail(err);
+        // The starter was deleted while we were away: close the panel instead of offering a useless Retry.
+        if (alive && err instanceof ApiClientError && err.status === 404 && state.openThreadId === parentId) {
+          reportThreadError(null);
+          dispatch({ t: 'local.threadGone', parentId });
+          return;
+        }
         if (alive && !isUnauthorized(err) && state.openThreadId === parentId) reportThreadError(parentId);
       },
     );
@@ -240,8 +248,12 @@ function startSession(
         return true;
       }
       await (latestLoads.get(channelId) ?? loadLatest(channelId));
-      const has = () => state.windows[channelId]?.messages.some((m) => m.id === messageId) ?? false;
-      for (let pages = 0; alive && !has() && state.windows[channelId]?.hasOlder && pages < MAX_JUMP_PAGES; pages++) {
+      const held = () => state.windows[channelId]?.messages.find((m) => m.id === messageId);
+      const has = () => {
+        const m = held();
+        return !!m && m.deletedAt === null;
+      };
+      for (let pages = 0; alive && !held() && state.windows[channelId]?.hasOlder && pages < MAX_JUMP_PAGES; pages++) {
         const inflight = olderLoading.get(channelId);
         if (inflight) {
           // Another load (e.g. scrolling) is running: wait for it and re-check instead of giving up.
@@ -253,7 +265,9 @@ function startSession(
         if (state.windows[channelId]?.messages[0]?.seq === before) break;
       }
       // The user may have switched channels while pages loaded.
-      if (!alive || state.openChannelId !== channelId || !has()) return false;
+      if (!alive || state.openChannelId !== channelId) return false;
+      if (held()?.deletedAt != null) return 'deleted';
+      if (!has()) return false;
       dispatch({ t: 'local.highlight', messageId });
       return true;
     },
@@ -275,6 +289,28 @@ function startSession(
     },
   };
 
+  /** Reconnect refetch: one page of the open channel and the open thread, at most every RECONNECT_REFETCH_MS. */
+  let connects = 0;
+  let lastRefetchAt = Number.NEGATIVE_INFINITY;
+  let refetchTimer: ReturnType<typeof setTimeout> | null = null;
+  const refetchVisible = () => {
+    refetchTimer = null;
+    if (!alive) return;
+    lastRefetchAt = Date.now();
+    const cid = state.openChannelId;
+    if (cid) latestLoads.set(cid, loadLatest(cid));
+    if (state.openThreadId) void loadThread(state.openThreadId);
+  };
+  const onReconnect = () => {
+    // Catch-up is `seq > lastSeen`: a deletion of something we already hold never arrives that way.
+    // Forget every other channel's cached window now (refetched when opened) and refetch what is on screen.
+    dispatch({ t: 'local.reconnected' });
+    if (refetchTimer !== null) return;
+    const wait = lastRefetchAt + RECONNECT_REFETCH_MS - Date.now();
+    if (wait <= 0) refetchVisible();
+    else refetchTimer = setTimeout(refetchVisible, wait);
+  };
+
   const onOpen = () => {
     // The hub may have missed read markers sent just before the drop; let them go out again.
     markSent.clear();
@@ -284,9 +320,9 @@ function startSession(
     lastActivityAt = Date.now();
     outbox.flush();
     // Edits and deletes carry no seq, so refetch counts and whatever is on screen after every (re)connect.
+    // The very first connect follows a fresh bootstrap and the open() loads, so it needs no window refetch.
     void loadBootstrap();
-    if (state.openChannelId) void loadLatest(state.openChannelId);
-    if (state.openThreadId) void loadThread(state.openThreadId);
+    if (connects++ > 0) onReconnect();
   };
 
   /** P2-R28: a user unknown to bootstrap (e.g. joined since) triggers a throttled bootstrap refetch. */
@@ -379,6 +415,7 @@ function startSession(
       alive = false;
       clearInterval(tick);
       takeEmojiQueue();
+      if (refetchTimer !== null) clearTimeout(refetchTimer);
       window.removeEventListener('keydown', onActivity);
       window.removeEventListener('pointerdown', onActivity);
       window.removeEventListener('focus', onFocus);

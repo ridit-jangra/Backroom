@@ -36,7 +36,7 @@ const target = (seq: number) => ({ channelId: GEN, messageId: ALL[seq - 1]!.id, 
 describe('jumpTo', () => {
   it('loads older pages until the message is present and highlights it', async () => {
     await mount();
-    let ok = false;
+    let ok: boolean | 'deleted' = false;
     await act(async () => {
       ok = await api!.actions.jumpTo(target(120));
     });
@@ -52,7 +52,7 @@ describe('jumpTo', () => {
     await mount((url) => (url === `/messages/${parent.id}/thread` ? { parent, replies: [reply] } : undefined), {
       [GEN]: { messages: [parent], hasMore: false },
     });
-    let ok = false;
+    let ok: boolean | 'deleted' = false;
     await act(async () => {
       ok = await api!.actions.jumpTo({ channelId: GEN, messageId: reply.id, seq: 2, parentId: parent.id, alsoInChannel: false });
     });
@@ -65,7 +65,7 @@ describe('jumpTo', () => {
   it('gives up after 20 older pages', async () => {
     const many = Array.from({ length: 1500 }, (_, i) => msg(i + 1));
     await mount(undefined, { [GEN]: many });
-    let ok = true;
+    let ok: boolean | 'deleted' = true;
     await act(async () => {
       ok = await api!.actions.jumpTo({ channelId: GEN, messageId: many[0]!.id, seq: 1, parentId: null, alsoInChannel: false });
     });
@@ -77,7 +77,7 @@ describe('jumpTo', () => {
   it('jumping to a channel that is not open loads the latest page once and keeps the highlight', async () => {
     const rand = Array.from({ length: 10 }, (_, i) => msg(i + 1, { channelId: RAND }));
     await mount(undefined, { [GEN]: ALL, [RAND]: rand });
-    let ok = false;
+    let ok: boolean | 'deleted' = false;
     await act(async () => {
       ok = await api!.actions.jumpTo({ channelId: RAND, messageId: rand[3]!.id, seq: 4, parentId: null, alsoInChannel: false });
     });
@@ -91,7 +91,7 @@ describe('jumpTo', () => {
     await act(async () => {
       await api!.actions.jumpTo(target(290));
     });
-    let ok = false;
+    let ok: boolean | 'deleted' = false;
     await act(async () => {
       const scroll = api!.actions.loadOlder(GEN);
       ok = await api!.actions.jumpTo(target(120));
@@ -102,7 +102,7 @@ describe('jumpTo', () => {
 
   it('returns false and does not highlight when the channel changes mid-jump', async () => {
     await mount();
-    let ok = true;
+    let ok: boolean | 'deleted' = true;
     await act(async () => {
       const p = api!.actions.jumpTo(target(120));
       api!.actions.open(RAND);
