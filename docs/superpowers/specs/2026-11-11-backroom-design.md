@@ -353,26 +353,39 @@ the server it only appears if a blob file has gone missing. The 25 MB file limit
 - Address rules (Rust, `config::normalize_server_url`; the page's own checks
   count for nothing): trimmed, `https://` added when no scheme is given, http or
   https only, no credentials, no path other than `/`, no query or fragment, no
-  `*.localhost` host, at most 263 characters; host lowercased and punycoded,
-  default port dropped; the result is a bare origin. Plain http is accepted only
+  port 0, at most 263 characters; host lowercased and punycoded, default port
+  dropped; a domain host must be dot-separated LDH labels (letters, digits,
+  hyphens) and not `*.localhost`; IPv4 and IPv6 literals are accepted. The
+  result is a bare origin, and only after its capability URL pattern (host
+  escaped for URLPattern syntax, e.g. `http://[\:\:1]:8787/*`) parses and
+  matches exactly that origin. The same rules (`src/origin.rs`) run in
+  `build.rs`, so a refused `BACKROOM_APP_URL` fails the build (and is logged as
+  `build_default_refused` if it ever reaches runtime). Plain http is accepted only
   for `localhost`, loopback, RFC 1918 addresses and `.local` names, and the page
   then warns that traffic is not encrypted and asks for a second Connect.
 - Setup page (`apps/desktop/dist/`, served from the app's own origin
-  `tauri://localhost`, or `http(s)://tauri.localhost` on Windows): one field,
+  `tauri://localhost`, or `http(s)://tauri.localhost` on Windows; each platform
+  accepts only its own spelling): one field,
   Connect, an inline error (`role="alert"`), light/dark, no external resources,
   its own CSP. It calls `check_server(url) -> {origin, insecure}` (normalises,
   then `GET <origin>/health` from Rust: 5 s timeout, no redirects, 1 KiB body
-  cap, User-Agent `Backroom-Desktop/<version>`, expects HTTP 200 and exactly
-  `{"ok":true}`) and `save_server(url)` (normalises again, saves, adds the remote
+  cap, User-Agent `Backroom-Desktop/<version>`, TLS verified against the OS
+  trust store like the webview, expects HTTP 200 and exactly `{"ok":true}`;
+  unreachable, timeout, untrusted certificate, other TLS failure, redirect,
+  unhealthy status and "not a Backroom server" each get their own message) and `save_server(url)` (normalises again, saves, adds the remote
   capability for that origin, then navigates the main window there from Rust;
   once per process). Both are granted only by the static LOCAL capability
   `capabilities/setup-page.json` (main window, app origin, no remote URLs).
 - "Change server…" (tray menu; macOS app menu; a small window menu bar when
   Linux has no tray host, so it works even when the remote page is broken)
   writes `{"serverUrl": null}` and restarts the app. Tauri cannot remove a
-  runtime capability, so the restart is what revokes the old origin together
-  with its page state and any pending verifier; the new process shows the
-  setup page, even when a build-time default exists.
+  runtime capability, so the restart is what revokes the old origin: its
+  capability and all in-memory state (page, pending verifier, pending
+  navigation) die with the process. Persistent WebKit storage for the old
+  origin (cookies including its session, localStorage, cache) stays in the
+  app's data directory and is used again if the user later returns to that
+  server. The new process shows the setup page, even when a build-time
+  default exists.
 - Main window is created in Rust and loads the server origin (or the setup
   page). Navigation lockdown (origin read from managed state on every
   request): `on_navigation` allows only the server origin; any other http(s)
