@@ -219,7 +219,7 @@ You can put Cloudflare's proxy (the orange cloud) in front of your server, usual
 
 Backroom shuts down gracefully on `SIGTERM` or `SIGINT`. It stops accepting connections, closes WebSockets with code 1001 (the web app reconnects by itself), finishes in-flight requests (up to about 10 seconds), checkpoints the database and exits 0. A second signal forces an immediate exit.
 
-Only one server may use a data folder at a time: a second one refuses to start (`server.lock`).
+Only one server may use a data folder at a time: a second one refuses to start (`server.lock`). The check compares process ids, so never point two containers at the same data volume: both may run as process 1 and would not see each other.
 
 ### systemd
 

@@ -650,5 +650,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          gh release edit "$TAG" --draft=false
-          gh release view "$TAG" --json url,isDraft,isPrerelease --jq '"published: \(.url) draft=\(.isDraft) prerelease=\(.isPrerelease)"'
+          # By release id: a draft cannot be looked up by tag.
+          mapfile -t ids < <(gh api "repos/${GH_REPO}/releases?per_page=100" --paginate \
+            --jq '.[] | select(.tag_name == env.TAG) | .id')
+          if [ "${#ids[@]}" -ne 1 ]; then
+            echo "::error::expected exactly one release for ${TAG}, found ${#ids[@]}"
+            exit 1
+          fi
+          gh api -X PATCH "repos/${GH_REPO}/releases/${ids[0]}" -F draft=false --jq '"published: \(.html_url) draft=\(.draft) prerelease=\(.prerelease)"'
