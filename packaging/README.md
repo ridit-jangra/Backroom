@@ -28,9 +28,10 @@ node scripts/packaging-bump.mjs 1.2.3
 
 - **Downloads:** it fetches `https://github.com/ridit-jangra/Backroom/releases/download/v1.2.3/SHA256SUMS`. It also downloads the tag's source tarball (`https://github.com/ridit-jangra/Backroom/archive/refs/tags/v1.2.3.tar.gz`) and hashes it for the from-source AUR package, because that tarball is not in `SHA256SUMS`.
 - **What it updates:** the version and checksums in both PKGBUILDs and their `.SRCINFO`, the cask, the Scoop manifest and the three winget manifests. It renames the winget version directory, resets `pkgrel` to 1 for a new version, and prints every changed line.
-- **The LICENSE checksum** (backroom-bin downloads `LICENSE` from the tag) is computed from this checkout's `LICENSE`. Run the bump on a checkout where `LICENSE` matches the tag.
-- **Offline:** `--sums path/to/SHA256SUMS --source-sha256 <hex>` uses no network. A local `--sums` file requires `--source-sha256`.
-- **Safety:** it writes nothing if anything is wrong: a pre-release or invalid version, a missing asset, a malformed `SHA256SUMS` line. Running it twice changes nothing.
+- **The LICENSE checksum** (backroom-bin downloads `LICENSE` from the tag) is the hash of `https://raw.githubusercontent.com/ridit-jangra/Backroom/v1.2.3/LICENSE`, downloaded online (64 KiB cap, 30 s timeout). `--check` fails, naming the mismatch, if the PKGBUILD carries another hash.
+- **Offline:** `--sums path/to/SHA256SUMS --source-sha256 <hex> --license-sha256 <hex>` uses no network. A local `--sums` file requires `--source-sha256`. Without `--license-sha256` it falls back to this checkout's `LICENSE` and prints a warning: that is only right when the checkout's `LICENSE` equals the tag's.
+- **Where it downloads from:** only https, only `github.com`, `objects.githubusercontent.com`, `release-assets.githubusercontent.com` and `raw.githubusercontent.com`, with at most 3 redirects, each checked the same way. `--sums <url>` must be an https URL under `https://github.com/ridit-jangra/Backroom/releases/download/`; a `SHA256SUMS` from any other source must be downloaded by hand and passed as a file.
+- **Safety:** it writes nothing if anything is wrong: a pre-release or invalid version, a missing asset, a malformed `SHA256SUMS` line, a failed download, or an I/O error. The files are staged next to their targets and renamed only after every staged write succeeded; the winget directory is swapped last. Running it twice changes nothing.
 
 Then verify, review and commit:
 
@@ -105,6 +106,8 @@ The manifest runs the NSIS installer silently into Scoop's app directory (`/S /N
   3. Run `winget validate --manifest manifests/r/Ridit/Backroom/1.2.3` on Windows (and ideally `winget install --manifest ...` in a sandbox).
   4. Open a pull request.
 
+**Warning: no `ProductCode` yet.** Nullsoft (NSIS) installers usually need `ProductCode` and `AppsAndFeaturesEntries` in the installer manifest so winget can detect an installed version and upgrade it. The moderators' pipeline may ask for them, and `winget upgrade` may not work without them. After a first install on Windows, find the value in the registry, under `HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\` (the installs are per-user): open the subkey whose `DisplayName` is Backroom. Use that subkey's name as `ProductCode` and `DisplayName`, `DisplayVersion` and `Publisher` for `AppsAndFeaturesEntries`. Do not guess a value.
+
 Microsoft's validation pipeline installs the package, and a moderator reviews it. The publisher (`Ridit`) and identifier (`Ridit.Backroom`) are taken by the first accepted submission. The manifests use schema 1.9.0. `scripts/packaging-validate.mjs` checks them against that schema's required fields and patterns offline, but it is not a substitute for `winget validate`.
 
 ## What CI checks
@@ -114,4 +117,4 @@ Microsoft's validation pipeline installs the package, and a moderator reviews it
   - builds `backroom-bin` in an Arch container from the deb the same run just built;
   - runs `namcap`;
   - uploads the package, which then becomes a release asset.
-- **`arch-source` job** (release.yml): builds the `backroom` PKGBUILD end to end from a `git archive` of the commit. A broken source package blocks the release.
+- **`arch-source` job** (release.yml): builds the `backroom` PKGBUILD end to end from a `git archive` of the commit. A broken source package blocks the release. It runs on every `workflow_dispatch` dry run as well as on tags, and it takes a long time: its `timeout-minutes` is 75 (the `arch` job's is 30). **The first dry run is the first real test of both container jobs**; expect to fix something there.

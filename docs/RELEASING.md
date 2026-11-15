@@ -57,6 +57,8 @@ From the Actions tab, choose **Release** → **Run workflow**, then pick a branc
 - **Caches:** a dry run may restore the Rust build cache, and only a dry run on `main` saves it. Tag builds never restore any cache, so nothing another run wrote can end up in a released installer.
 - **What it never does:** create a release. Manual runs never create one, whatever `dry_run` says. The `release` job runs only for a pushed `v*.*.*` tag. `dry_run` exists so the intent shows in the run's inputs. A real release always starts with a tag push.
 
+- **The Arch jobs:** the `arch` and `arch-source` jobs run on every dry run too, not only on tags. `arch-source` compiles the whole desktop app from source in an Arch container and has a `timeout-minutes` of 75 (the `arch` job: 30), so a dry run takes a long time. Neither container job has ever run: the first dry run is their first real test.
+
 Use a dry run before the first tag of a release cycle, and after any change to the bundle config or the workflow.
 
 ## Pre-releases
