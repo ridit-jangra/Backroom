@@ -563,7 +563,10 @@ fn restrict_data_dir<R: Runtime>(app: &AppHandle<R>) {
 }
 
 fn setup_deep_links<R: Runtime>(app: &AppHandle<R>) {
+    #[cfg(target_os = "linux")]
     let appimage = app.env().appimage.is_some();
+    #[cfg(not(target_os = "linux"))]
+    let appimage = false;
     if should_register_scheme(cfg!(debug_assertions), appimage, smoke_enabled())
         && app.deep_link().register_all().is_err()
     {
