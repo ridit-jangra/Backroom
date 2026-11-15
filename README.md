@@ -108,7 +108,7 @@ The tap and bucket names depend on where the maintainer publishes them; the rele
 
 #### First launch: enter your server's address
 
-The app has no server built in. On first launch it shows one field asking for your server's address, for example `https://chat.example.com`. It checks that a Backroom server answers there (it asks `<address>/health`) and remembers the address. `https://` is required, except for `localhost`, private network addresses and `.local` names, where plain `http://` is accepted.
+The app has no server built in. On first launch it shows one field asking for your server's address, for example `https://chat.example.com`. It checks that a Backroom server answers there (it asks `<address>/health`) and remembers the address (in `server.json` in the app's config folder; on Linux `~/.config/app.backroom.desktop/server.json`. On Windows and macOS the file lives in the app's config folder for `app.backroom.desktop`; the exact location is unconfirmed until a release has been built and run on those systems). `https://` is required, except for `localhost`, private network addresses and `.local` names, where plain `http://` is accepted.
 
 To switch servers later, use **Change server…** in the tray menu (or in the window's menu if your desktop has no tray). The app restarts and asks again.
 
@@ -184,7 +184,7 @@ The full list is in [docs/SELF_HOSTING.md](docs/SELF_HOSTING.md#troubleshooting)
 - **The sign-in email does not arrive.** Check the spam folder. In development (`npm run dev`) no email is sent: the link is printed in the terminal. On a real server, look for `"code":"email_failed"` in the log and check your Resend domain and API key. Only `OWNER_EMAIL` and invited people get a link, and sign-in requests are limited to 5 per hour per address.
 - **The desktop app shows the setup screen.** That is expected on first launch and after **Change server…**. Enter your server's address once and it is remembered.
 - **"That address does not look like a Backroom server."** The desktop app requests `<address>/health` and expects `{"ok":true}`. Enter the address of Backroom itself (no path), check it with `curl <address>/health`, and use `https://` unless the server is on localhost or a private network.
-- **"Reconnecting..." or dropped WebSockets behind a proxy.** The proxy must pass WebSocket upgrades on `/ws`. A connection with no traffic at all is closed after about 2 minutes by many proxies; that is normal, because the apps ping every 30 seconds and reconnect by themselves.
+- **"Reconnecting..." or dropped WebSockets behind a proxy.** The proxy must pass WebSocket upgrades on `/ws`. Proxies in front of the server may close a connection that carries no traffic at all after about 2 minutes. The Backroom apps send a ping every 30 seconds, which keeps a connected app alive; if a connection does drop, the app reconnects automatically.
 - **Can the desktop app run without a server?** No. It is a client for a Backroom server that you or someone else runs.
 
 ## Security notes

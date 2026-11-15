@@ -81,7 +81,7 @@ sudoedit /etc/backroom/backroom.env
 | `DATA_DIR` | `./data` | Folder for `backroom.sqlite` and `blobs/`. Relative to the working directory. Created with mode 700. |
 | `PORT` | `8080` | TCP port. |
 | `HOST` | `127.0.0.1` | Listen address. The default accepts connections from the same machine only, which is right behind a local reverse proxy. Use `0.0.0.0` in a container whose port is published to a proxy outside it. |
-| `TRUSTED_PROXY_HEADER` | unset | A header that holds the real client IP, set by your proxy: `x-forwarded-for` (the last address in it is used), `x-real-ip`, `cf-connecting-ip`, or another single-address header. Unset means the TCP peer address. Read [Client IP addresses](#security) before setting it. |
+| `TRUSTED_PROXY_HEADER` | unset | A header that holds the real client IP, set by your proxy: `x-forwarded-for` (the last address in it is used), `x-real-ip`, `cf-connecting-ip`, or another single-address header. Unset means the TCP peer address. Read [Security](#security) before setting it. |
 | `TRUSTED_PROXY_SECRET` | unset | Optional, needs `TRUSTED_PROXY_HEADER`. At least 24 visible characters (`openssl rand -hex 32`). The trusted header is then believed only on requests carrying `X-Backroom-Origin-Secret: <secret>`. See [Cloudflare](#cloudflare-in-front). |
 | `WEB_DIST` | `apps/web/dist` next to the bundle | The built web app. The `--web-dist <path>` flag overrides it. |
 | `FILES_QUOTA_BYTES` | `943718400` (900 MB) | Storage per workspace for files, thumbnails and custom emoji together. |
@@ -443,7 +443,7 @@ The message lists every problem, for example `APP_ORIGIN must be an http or http
 
 **The desktop app shows the setup screen again.**
 - It asks for the server address on first launch, and again after you choose **Change server…** in the tray menu (or the window menu on desktops without a tray). Enter the address once and it is remembered.
-- The address is kept in `server.json` in the app's config folder (on Linux `~/.config/app.backroom.desktop/server.json`). If the file is deleted, unreadable or edited into something the app does not accept, the app falls back to the setup screen. Enter the address again.
+- The address is kept in `server.json` in the app's config folder (on Linux `~/.config/app.backroom.desktop/server.json`; on Windows and macOS the file lives in the app's config folder for `app.backroom.desktop`; the exact location is unconfirmed until a release has been built and run on those systems). If the file is deleted, unreadable or edited into something the app does not accept, the app falls back to the setup screen. Enter the address again.
 
 **The desktop app says "That address does not look like a Backroom server."**
 - Before it saves an address, the app requests `<address>/health` and expects HTTP 200 with `{"ok":true}`. Test it yourself: `curl -si https://chat.example.com/health`. Anything else (an HTML page, a 404, a proxy error page) gives this message.
