@@ -193,8 +193,21 @@ pub fn run() {
             setup_deep_links(&handle);
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running Backroom");
+        .build(tauri::generate_context!())
+        .expect("error while building Backroom")
+        .run(|app, event| {
+            // macOS: closing the window only hides it, so a Dock-icon click must bring it back.
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen {
+                has_visible_windows: false,
+                ..
+            } = event
+            {
+                show_main(app);
+            }
+            #[cfg(not(target_os = "macos"))]
+            let _ = (app, event);
+        });
 }
 
 /// The remote capability a start needs: one for a remote start, none for the
