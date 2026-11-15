@@ -11,7 +11,7 @@
     {
       "binding": "DB",
       "database_name": "backroom",
-      "database_id": "9af7495f-721b-4482-8ead-8768dbf2d33d",
+      "database_id": "<set at deploy>",
       "migrations_dir": "migrations"
     }
   ],
@@ -21,7 +21,7 @@
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["WorkspaceHub"] }],
   // Blob storage (files, thumbnails, custom emoji) is Workers KV: free without a payment card. No R2 binding:
   // it makes `wrangler deploy` fail while R2 is not enabled on the account. Local dev uses a local KV.
-  "kv_namespaces": [{ "binding": "BLOBS", "id": "dedda6dbe4d44744a38f5393a3d1653c" }],
+  "kv_namespaces": [{ "binding": "BLOBS", "id": "<set at deploy>" }],
   "assets": {
     "directory": "../web/dist",
     "binding": "ASSETS",
@@ -31,6 +31,6 @@
   "triggers": { "crons": ["0 4 * * *"] },
   "vars": {
     "APP_ORIGIN": "http://localhost:8787",
-    "EMAIL_FROM": "Backroom <backroom@ridit.space>"
+    "EMAIL_FROM": "Backroom <backroom@example.com>"
   }
 }

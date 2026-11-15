@@ -6,7 +6,7 @@
 
 Backroom used to deploy to Cloudflare Workers (free tier). Steps 1 to 6 are one-time setup. Only steps 7 to 10 repeat on every later deploy (step 11 is only a note about the desktop app). `chat.example.com` and `example.com` below stand for your own hostname and zone.
 
-> **The committed `apps/worker/wrangler.jsonc` and the `deploy` scripts in `apps/worker/package.json` hold the original maintainer's values** (domain, D1 database id, KV namespace id, `EMAIL_FROM`). Replace them with your own before deploying.
+> **The committed `apps/worker/wrangler.jsonc` and the `deploy` scripts in `apps/worker/package.json` hold placeholders** (`<set at deploy>` for the D1 and KV ids, `example.com` for the domain and `EMAIL_FROM`). The original maintainer's Cloudflare deployment has been deleted. Fill in your own values before deploying.
 
 > **Always deploy with `npm run deploy -w apps/worker`.** The committed `wrangler.jsonc` has `APP_ORIGIN=http://localhost:8787` so local dev works (origin guard, non-Secure cookie). A bare `wrangler deploy` would ship that value to production and break login. The npm script passes `--var APP_ORIGIN:https://<your hostname> --domain <your hostname>`.
 

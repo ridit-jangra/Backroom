@@ -7,8 +7,8 @@
     "test": "vitest run",
     "predev": "mkdir -p ../web/dist && node ../../packages/emoji/scripts/generate.mjs && wrangler d1 migrations apply DB --local",
     "dev": "wrangler dev",
-    "deploy": "wrangler deploy --var APP_ORIGIN:https://chat.ridit.space --domain chat.ridit.space",
-    "deploy:dry-run": "wrangler deploy --var APP_ORIGIN:https://chat.ridit.space --domain chat.ridit.space --dry-run"
+    "deploy": "wrangler deploy --var APP_ORIGIN:https://chat.example.com --domain chat.example.com",
+    "deploy:dry-run": "wrangler deploy --var APP_ORIGIN:https://chat.example.com --domain chat.example.com --dry-run"
   },
   "dependencies": {
     "@backroom/emoji": "*",
