@@ -23,13 +23,18 @@ permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.ref }}
-  # Never cancel a tag run half way; a second manual run on the same ref replaces the first.
+  # The event is part of the group, so a manual run on a tag ref can never cancel (or queue
+  # behind) the tag push's release run. Tag runs are never cancelled.
+  group: release-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' }}
 
 defaults:
   run:
     shell: bash
+
+# Caches: tag builds (event `push`) restore no cache at all, so nothing another run wrote into
+# target/ or ~/.cargo can end up in a released installer, and setup-node's npm cache is not used
+# in any build job. Manual dry runs may restore the Rust cache, and only runs on main save it.
 
 jobs:
   version:
@@ -39,17 +44,20 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       prerelease: ${{ steps.version.outputs.prerelease }}
     steps:
+      # Full history, so the tagged commit can be checked against origin/main.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 0
           persist-credentials: false
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .nvmrc
 
-      # A tag must match the version in package.json, tauri.conf.json, Cargo.toml, Cargo.lock
-      # and package-lock.json (set by scripts/set-version.mjs), so a mis-tagged commit fails here
-      # before anything is built. Manual runs use the version the files carry.
+      # A tag must point at a commit on main and match the version in package.json,
+      # tauri.conf.json, Cargo.toml, Cargo.lock and package-lock.json (set by
+      # scripts/set-version.mjs), so a mis-tagged commit fails here before anything is built.
+      # Manual runs use the version the files carry, from any branch.
       - id: version
         name: Derive and check the version
         env:
@@ -64,12 +72,16 @@ jobs:
               echo "::error::release builds run only for tags"
               exit 1
             fi
+            if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+              echo "::error::the tagged commit is not on main; tag a commit of main"
+              exit 1
+            fi
             version="${REF_NAME#v}"
           else
             version="$(node -p "require('./apps/desktop/src-tauri/tauri.conf.json').version")"
             echo "Manual run (dry_run=${DRY_RUN}): building ${version}; no release will be created."
           fi
-          # Validates the semver syntax first, then compares every file with it.
+          # Validates the version syntax and limits first, then compares every file with it.
           node scripts/set-version.mjs "$version" --check
           case "$version" in
             *-*) prerelease=true ;;
@@ -79,7 +91,8 @@ jobs:
           echo "prerelease=${prerelease}" >> "$GITHUB_OUTPUT"
 
   # Each build job copies exactly its expected installers into release-assets/ (failing when one
-  # is missing) and uploads that folder. The names are listed in docs/RELEASING.md.
+  # is missing), records their SHA-256 in hashes/<job>.sha256 and uploads both. The release job
+  # compares those hashes with what it downloaded. The names are listed in docs/RELEASING.md.
   # Pre-releases (a `-` in the version) skip the RPM (RPM versions may not contain `-`) and the
   # MSI (WiX accepts only a numeric pre-release); see docs/RELEASING.md.
   linux:
@@ -97,7 +110,6 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .nvmrc
-          cache: npm
 
       # Same packages as ci.yml plus `file` for linuxdeploy. The RPM is written by the Tauri CLI
       # itself (no rpmbuild), and the CLI runs linuxdeploy with APPIMAGE_EXTRACT_AND_RUN=1, so
@@ -110,16 +122,21 @@ jobs:
             libwebkit2gtk-4.1-dev libsoup-3.0-dev \
             libayatana-appindicator3-dev librsvg2-dev file
 
-      # dtolnay/rust-toolchain has no release tags; it is selected by the branch `stable`.
-      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      # Pinned to a master commit: the `stable` branch is rebuilt on every master update, so an
+      # old `stable` SHA is not reachable from any branch.
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-10-16 (Add 1.99.1 patch release)
+        with:
+          toolchain: stable
 
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        if: github.event_name != 'push'
         with:
           workspaces: apps/desktop/src-tauri
           key: release-${{ runner.os }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      # Only the Tauri CLI is needed; skipping install scripts keeps the release path small.
-      - run: npm ci --ignore-scripts
+      # Only the desktop workspace's dependencies (the Tauri CLI), without install scripts.
+      - run: npm ci --workspace apps/desktop --include-workspace-root=false --ignore-scripts
 
       - name: Build deb, rpm and AppImage
         working-directory: apps/desktop
@@ -139,17 +156,20 @@ jobs:
           if [ "$PRERELEASE" != true ]; then
             expected+=("rpm/Backroom-${VERSION}-1.x86_64.rpm")
           fi
-          mkdir release-assets
+          mkdir release-assets hashes
           for f in "${expected[@]}"; do
             test -f "$bundle/$f" || { echo "::error::missing $bundle/$f"; ls -R "$bundle" || true; exit 1; }
             cp "$bundle/$f" release-assets/
           done
-          ls -l release-assets
+          (cd release-assets && sha256sum -- *) > hashes/linux.sha256
+          cat hashes/linux.sha256
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: backroom-linux
-          path: release-assets/
+          path: |
+            release-assets/
+            hashes/
           if-no-files-found: error
           retention-days: 14
 
@@ -168,17 +188,19 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .nvmrc
-          cache: npm
 
-      # dtolnay/rust-toolchain has no release tags; it is selected by the branch `stable`.
-      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-10-16 (Add 1.99.1 patch release)
+        with:
+          toolchain: stable
 
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        if: github.event_name != 'push'
         with:
           workspaces: apps/desktop/src-tauri
           key: release-${{ runner.os }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      - run: npm ci --ignore-scripts
+      - run: npm ci --workspace apps/desktop --include-workspace-root=false --ignore-scripts
 
       # The Tauri CLI downloads NSIS and WiX itself. Unsigned (no signing secrets exist).
       - name: Build the NSIS installer and the MSI
@@ -199,17 +221,20 @@ jobs:
           if [ "$PRERELEASE" != true ]; then
             expected+=("msi/Backroom_${VERSION}_x64_en-US.msi")
           fi
-          mkdir release-assets
+          mkdir release-assets hashes
           for f in "${expected[@]}"; do
             test -f "$bundle/$f" || { echo "::error::missing $bundle/$f"; ls -R "$bundle" || true; exit 1; }
             cp "$bundle/$f" release-assets/
           done
-          ls -l release-assets
+          (cd release-assets && sha256sum -- *) > hashes/windows.sha256
+          cat hashes/windows.sha256
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: backroom-windows
-          path: release-assets/
+          path: |
+            release-assets/
+            hashes/
           if-no-files-found: error
           retention-days: 14
 
@@ -227,22 +252,24 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .nvmrc
-          cache: npm
 
-      # dtolnay/rust-toolchain has no release tags; it is selected by the branch `stable`.
-      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
-
-      - name: Add both macOS targets for the universal build
-        run: rustup target add x86_64-apple-darwin aarch64-apple-darwin
+      # Both macOS targets, for the universal build.
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-10-16 (Add 1.99.1 patch release)
+        with:
+          toolchain: stable
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
 
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        if: github.event_name != 'push'
         with:
           workspaces: apps/desktop/src-tauri
           key: release-${{ runner.os }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      - run: npm ci --ignore-scripts
+      - run: npm ci --workspace apps/desktop --include-workspace-root=false --ignore-scripts
 
-      # One universal (arm64 + x86_64) app and dmg. Unsigned: no signingIdentity is configured.
+      # One universal (arm64 + x86_64) app and dmg, ad-hoc signed (signingIdentity "-" in
+      # tauri.macos.conf.json; no certificate, not notarized).
       - name: Build the universal app and dmg
         working-directory: apps/desktop
         run: npx tauri build --ci --target universal-apple-darwin
@@ -252,24 +279,28 @@ jobs:
           set -euo pipefail
           bundle=apps/desktop/src-tauri/target/universal-apple-darwin/release/bundle
           expected=("dmg/Backroom_${VERSION}_universal.dmg")
-          mkdir release-assets
+          mkdir release-assets hashes
           for f in "${expected[@]}"; do
             test -f "$bundle/$f" || { echo "::error::missing $bundle/$f"; ls -R "$bundle" || true; exit 1; }
             cp "$bundle/$f" release-assets/
           done
-          ls -l release-assets
+          (cd release-assets && shasum -a 256 -- *) > hashes/macos.sha256
+          cat hashes/macos.sha256
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: backroom-macos
-          path: release-assets/
+          path: |
+            release-assets/
+            hashes/
           if-no-files-found: error
           retention-days: 14
 
   # ---------------------------------------------------------------------------------------------
   # PLACEHOLDER: Arch Linux package job (Task 3 adds it once packaging/aur/ exists).
   # It will build the PKGBUILDs in an Arch container, run namcap, upload the .pkg.tar.zst as an
-  # artifact, and be added to the release job's `needs` and expected assets.
+  # artifact (with its hashes/<job>.sha256), and be added to the release job's `needs` and
+  # expected assets.
   # ---------------------------------------------------------------------------------------------
 
   release:
@@ -277,13 +308,14 @@ jobs:
     # Only for a pushed v* tag; never for manual runs (dry run or not).
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 30
     permissions:
       contents: write
     env:
       VERSION: ${{ needs.version.outputs.version }}
       PRERELEASE: ${{ needs.version.outputs.prerelease }}
       TAG: ${{ github.ref_name }}
+      GH_REPO: ${{ github.repository }}
     steps:
       # Full history and tags, for the notes (commit subjects since the previous tag).
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -309,11 +341,11 @@ jobs:
             expected+=("Backroom-${VERSION}-1.x86_64.rpm" "Backroom_${VERSION}_x64_en-US.msi")
           fi
           mkdir assets
-          find downloaded -type f -exec mv -n {} assets/ \;
+          find downloaded -path '*/release-assets/*' -type f -exec mv -n {} assets/ \;
           # A file left behind means two artifacts carried the same name.
-          if [ -n "$(find downloaded -type f)" ]; then
+          if [ -n "$(find downloaded -path '*/release-assets/*' -type f)" ]; then
             echo "::error::duplicate asset names"
-            find downloaded -type f
+            find downloaded -path '*/release-assets/*' -type f
             exit 1
           fi
           for f in "${expected[@]}"; do
@@ -328,6 +360,21 @@ jobs:
           (cd assets && sha256sum -- "${expected[@]}" | LC_ALL=C sort -k2 > SHA256SUMS)
           cat assets/SHA256SUMS
 
+      # The hashes each build job recorded right after building must equal what arrived here.
+      # (Git Bash's sha256sum marks binary mode with `*`; normalise that to two spaces.)
+      - name: Compare with the build jobs' hashes
+        run: |
+          set -euo pipefail
+          find downloaded -path '*/hashes/*.sha256' -type f -exec cat {} + \
+            | sed -E 's/^([0-9a-f]{64}) [ *]/\1  /' | LC_ALL=C sort -k2 > built.sha256
+          if ! diff -u built.sha256 assets/SHA256SUMS; then
+            echo "::error::the downloaded assets differ from the hashes the build jobs recorded"
+            exit 1
+          fi
+          echo "build-job hashes match SHA256SUMS"
+
+      # Commit subjects only. `@` gets a zero-width space after it so a subject cannot mention
+      # (notify) a GitHub user or team; reviewers still read the notes before publishing.
       - name: Write the release notes
         run: |
           set -euo pipefail
@@ -339,6 +386,7 @@ jobs:
             range="$TAG"
             since="(first release)"
           fi
+          zwsp=$'\xe2\x80\x8b'
           {
             echo "Backroom ${VERSION}"
             echo
@@ -347,17 +395,31 @@ jobs:
             echo "Verify downloads with SHA256SUMS (sha256sum -c SHA256SUMS --ignore-missing)."
             echo
             echo "Changes ${since}:"
-            git log --no-merges --pretty='format:- %s (%h)' "$range"
+            git log --no-merges --pretty='format:- %s (%h)' "$range" | sed "s/@/@${zwsp}/g"
             echo
           } > notes.txt
           cat notes.txt
+
+      # Lists releases through the API because drafts cannot be looked up by tag.
+      - name: Refuse when a release for the tag already exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          existing="$(gh api "repos/${GH_REPO}/releases?per_page=100" --paginate \
+            --jq '.[] | select(.tag_name == env.TAG) | .draft')"
+          if [ -n "$existing" ]; then
+            kinds="$(echo "$existing" | sed 's/^true$/draft/; s/^false$/published/' | paste -sd, -)"
+            echo "::error::a release for ${TAG} already exists (${kinds}); delete it on GitHub first, then re-run this job"
+            exit 1
+          fi
+          echo "no release exists for ${TAG}"
 
       # Draft only: never published, never marked latest by this workflow. `--verify-tag` refuses
       # to create a tag that does not exist on the remote.
       - name: Create the draft release
         env:
           GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           args=(--draft --verify-tag --title "Backroom ${VERSION}" --notes-file notes.txt)
@@ -366,3 +428,35 @@ jobs:
           fi
           mapfile -t files < <(sed 's|^[0-9a-f]*  |assets/|' assets/SHA256SUMS)
           gh release create "$TAG" "${args[@]}" "${files[@]}" assets/SHA256SUMS
+
+      # Downloads every asset of the new draft through the API (by release id, which works for
+      # drafts) and checks it against SHA256SUMS, so a corrupted upload fails the run.
+      - name: Verify the uploaded assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mapfile -t ids < <(gh api "repos/${GH_REPO}/releases?per_page=100" --paginate \
+            --jq '.[] | select(.tag_name == env.TAG) | .id')
+          if [ "${#ids[@]}" -ne 1 ]; then
+            echo "::error::expected exactly one release for ${TAG}, found ${#ids[@]}"
+            exit 1
+          fi
+          mkdir verify
+          gh api "repos/${GH_REPO}/releases/${ids[0]}/assets?per_page=100" --paginate \
+            --jq '.[] | [.id, .name] | @tsv' > verify-list.tsv
+          while IFS=$'\t' read -r asset_id name; do
+            if ! [[ "$asset_id" =~ ^[0-9]+$ && "$name" =~ ^[A-Za-z0-9._-]+$ ]]; then
+              echo "::error::unexpected asset entry"
+              exit 1
+            fi
+            gh api -H 'Accept: application/octet-stream' "repos/${GH_REPO}/releases/assets/${asset_id}" > "verify/${name}"
+          done < verify-list.tsv
+          want=$(( $(wc -l < assets/SHA256SUMS) + 1 ))
+          got="$(find verify -type f | wc -l)"
+          if [ "$got" -ne "$want" ]; then
+            echo "::error::the draft has ${got} assets, expected ${want}"
+            exit 1
+          fi
+          cmp verify/SHA256SUMS assets/SHA256SUMS
+          (cd verify && sha256sum -c SHA256SUMS)

@@ -15,35 +15,45 @@ Released builds have no server address baked in. On first launch they show a set
 
    - It updates `apps/desktop/package.json`, `apps/desktop/src-tauri/tauri.conf.json`, `apps/desktop/src-tauri/Cargo.toml`, the `backroom-desktop` entry in `apps/desktop/src-tauri/Cargo.lock`, and the `apps/desktop` entry in `package-lock.json`. It prints each file it changed.
    - It refuses to run on a tree with uncommitted changes (`--force` overrides that), and it refuses anything that is not `x.y.z` or `x.y.z-pre`.
+   - Major and minor may be at most 255 and patch at most 65535: an MSI product version cannot carry more.
+   - It refuses files with CRLF line endings (convert them to LF first).
    - Running it again with the same version changes nothing.
    - `node scripts/set-version.mjs 1.2.3 --check` only verifies the files. The workflow runs this check.
 3. Run the tests (`npm test`), then commit: `git commit -am "chore(release): 1.2.3"`.
-4. Tag the commit and push the tag:
+4. Tag the commit and push the branch and the tag together:
 
    ```sh
    git tag v1.2.3
-   git push origin main v1.2.3
+   git push --atomic origin main v1.2.3
    ```
 
+   `--atomic` pushes both or neither. The tag must point at a commit of `main`: the workflow refuses to build any other commit. Protect release tags with a repository ruleset (Settings → Rules → Rulesets → new tag ruleset targeting `v*`, restricting creation, update and deletion to maintainers), so nobody else can push a `v*` tag.
+
 5. Watch the **Release** workflow run in the Actions tab.
-   - The `version` job fails straight away if the tag (minus the `v`) does not match the version in the files, so a mis-tagged commit never builds.
+   - The `version` job fails straight away if the tagged commit is not on `main`, or if the tag (minus the `v`) does not match the version in the files, so a mis-tagged commit never builds.
    - The `linux`, `windows` and `macos` jobs build the installers.
-   - The `release` job checks that every expected file exists (and nothing else), writes `SHA256SUMS`, and creates a draft release named "Backroom 1.2.3". The notes list the commit subjects since the previous tag.
+   - The `release` job:
+     - checks that every expected file exists (and nothing else);
+     - writes `SHA256SUMS` and compares it with the hashes each build job recorded right after building;
+     - refuses to continue if any release (draft or published) already exists for the tag;
+     - creates a draft release named "Backroom 1.2.3", whose notes list the commit subjects since the previous tag;
+     - downloads every uploaded asset again and checks it against `SHA256SUMS`.
 6. Open the draft under Releases and check it:
    - every asset from the table below is attached;
    - `SHA256SUMS` lists them all;
-   - the notes read well (edit them freely);
+   - the notes read well (edit them freely). Every `@` in a commit subject gets an invisible zero-width space after it so the notes cannot mention a user or team, but still scan the notes for anything that should not be public before publishing;
    - run the [manual checklist](#manual-pre-release-checklist) against the attached installers.
 7. Click **Publish release**. Only then can anyone see it. Package-manager manifests are bumped from this release's `SHA256SUMS` after publishing.
 
-If a build fails, fix it on `main`, delete the tag (`git push origin :refs/tags/v1.2.3` and `git tag -d v1.2.3`), delete any draft that was created, and tag again. The release job refuses to create a release for a tag that does not exist on GitHub (`--verify-tag`). Re-running a finished release job can leave a second draft for the same tag; delete the stale one.
+If a build fails, fix it on `main`, delete the tag (`git push origin :refs/tags/v1.2.3` and `git tag -d v1.2.3`), delete any draft that was created, and tag again. The release job refuses to create a release for a tag that does not exist on GitHub (`--verify-tag`). It also stops with an error when a release for the tag already exists; delete that draft or release first, then re-run the job.
 
 ## Dry run (manual build)
 
 From the Actions tab, choose **Release** → **Run workflow**, then pick a branch. `dry_run` defaults to true.
 
 - **What it builds:** the same three build jobs as a tag run, for the version the files on that branch carry. The `version` job still checks that all five files agree.
-- **Where the bundles land:** the run's **Artifacts** section, as `backroom-linux`, `backroom-windows` and `backroom-macos`. They are kept for 14 days.
+- **Where the bundles land:** the run's **Artifacts** section, as `backroom-linux`, `backroom-windows` and `backroom-macos`. Each holds `release-assets/` (the installers) and `hashes/<job>.sha256`. They are kept for 14 days.
+- **Caches:** a dry run may restore the Rust build cache, and only a dry run on `main` saves it. Tag builds never restore any cache, so nothing another run wrote can end up in a released installer.
 - **What it never does:** create a release. Manual runs never create one, whatever `dry_run` says. The `release` job runs only for a pushed `v*.*.*` tag. `dry_run` exists so the intent shows in the run's inputs. A real release always starts with a tag push.
 
 Use a dry run before the first tag of a release cycle, and after any change to the bundle config or the workflow.
@@ -54,6 +64,7 @@ A version with a pre-release part (`1.3.0-beta.1`) becomes a GitHub pre-release,
 
 - **No RPM.** RPM versions may not contain `-`. The Tauri CLI fails with `invalid version "0.2.0-beta.1": contains invalid character` (verified by a local build), so the Linux job builds only the deb and the AppImage.
 - **No MSI.** WiX accepts only a numeric pre-release of at most 65535 (Tauri documentation), so the Windows job builds only the NSIS installer.
+- **Manifests:** package-manager manifests (`packaging/`) must not reference the RPM or the MSI for a pre-release version, because those files do not exist.
 - The deb is built, but Debian reads `1.3.0-beta.1` as upstream version `1.3.0` with revision `beta.1`. It therefore sorts **after** a later `1.3.0` deb. Testers should uninstall the pre-release deb before installing the final release.
 
 ## Asset names
@@ -78,25 +89,25 @@ Users can check a download with `sha256sum -c SHA256SUMS --ignore-missing` (on m
 
 - **Linux:** the deb and rpm install `/usr/bin/backroom-desktop`, icons, and `Backroom.desktop`. The desktop file has `Exec=backroom-desktop %u` and `MimeType=x-scheme-handler/backroom;`, so `backroom://` links open the app. Dependencies are `libwebkit2gtk-4.1-0`, `libgtk-3-0` and `libayatana-appindicator3-1`. The AppImage carries its own libraries and registers the scheme itself on first start.
 - **Windows:**
-  - the NSIS installer installs for the current user only (no administrator prompt), adds a Start Menu shortcut, shows the MIT license, and runs in English;
+  - the NSIS installer installs for the current user only (no administrator prompt), adds a Start Menu shortcut, and runs in English. It should show the MIT license (from the Tauri documentation, confirm on the first dry run);
   - when WebView2 is missing, it downloads Microsoft's bootstrapper and installs WebView2, which needs a network connection;
-  - it registers `backroom://` under the current user's `Software\Classes`;
-  - the MSI (English, fixed upgrade code) carries the same app.
-- **macOS:** a universal `Backroom.app` inside the dmg. It keeps the bundle identifier `app.backroom.desktop`, needs at least macOS 10.13 (Tauri's default), and has the Productivity category. The `backroom://` scheme comes from the deep-link plugin configuration (CFBundleURLTypes in Info.plist). It is not signed, and hardened runtime is off.
+  - it registers `backroom://` under the current user's `Software\Classes` (seen in the NSIS template inside the Tauri CLI);
+  - the MSI (English, fixed upgrade code) carries the same app. It should register `backroom://` and show the license as well (from the Tauri documentation, confirm on the first dry run).
+- **macOS:** a universal `Backroom.app` inside the dmg. It keeps the bundle identifier `app.backroom.desktop`, needs at least macOS 10.13 (Tauri's default), and has the Productivity category. The `backroom://` scheme should come from the deep-link plugin configuration as CFBundleURLTypes in Info.plist (from the Tauri documentation, confirm on the first dry run). The app is ad-hoc signed (`signingIdentity: "-"` in `tauri.macos.conf.json`): it has a signature, but no certificate and no notarization. Hardened runtime is off.
 
 ## Unsigned builds: what users will see
 
-The project has no code-signing certificates, so none of the installers are signed (ruling P8-R2).
+The project has no code-signing certificates, so none of the installers are signed with a certificate (ruling P8-R2). The macOS app is only ad-hoc signed.
 
 - **Windows:**
   - SmartScreen shows "Windows protected your PC". Click **More info**, then **Run anyway**.
   - Some antivirus tools may also flag a new unsigned installer.
   - The MSI shows "Unknown publisher".
-- **macOS:**
-  - Gatekeeper refuses to open the app ("Backroom can't be opened because Apple cannot check it for malicious software", or on newer macOS versions "Backroom Not Opened").
-  - Fix: drag Backroom into Applications, then **right-click (or Control-click) Backroom → Open → Open**.
-  - On macOS 15 and later, the override lives in **System Settings → Privacy & Security → Open Anyway**.
-  - From a terminal: `xattr -dr com.apple.quarantine /Applications/Backroom.app`.
+- **macOS** (expected behaviour; confirm on the first dry run):
+  - Without a signature, Apple silicon Macs usually report the app as "damaged" with no way to open it. The ad-hoc signature is there to avoid that.
+  - With the ad-hoc signature, Gatekeeper should refuse the first launch with an overridable warning ("Backroom can't be opened because Apple cannot check it for malicious software", or "Backroom Not Opened" on newer versions).
+  - Override: drag Backroom into Applications, then **right-click (or Control-click) Backroom → Open → Open**. On macOS 15 and later the override lives in **System Settings → Privacy & Security → Open Anyway**.
+  - Guaranteed workaround, whatever the dialog says: `xattr -dr com.apple.quarantine /Applications/Backroom.app` in a terminal, then open the app normally.
 - **Linux:** no warning. The deb, rpm and AppImage are not GPG-signed, so check them against `SHA256SUMS`.
 
 Describe this in the release notes for every release (the workflow's generated notes already include a short line).
@@ -114,6 +125,10 @@ Nothing below exists in the workflow today. If a maintainer gets certificates, t
 
 Signing secrets must never reach the `version` or `release` jobs, or any workflow that runs for pull requests.
 
+## Known residual: unpinned AppImage tooling
+
+To build the AppImage, the Tauri CLI downloads `linuxdeploy` and its plugins from GitHub on every run, without pinning or checksums. One of them, `linuxdeploy-plugin-appimage`, comes from a `continuous` release URL whose contents can change. This is upstream Tauri CLI behaviour and the workflow cannot pin it today. Of all the release artifacts, the AppImage therefore has the weakest supply chain. The deb and rpm are written by the CLI itself.
+
 ## Manual pre-release checklist
 
 None of these can be automated in CI. Run them on the draft's installers, on a real desktop for each OS, before publishing.
@@ -124,6 +139,7 @@ None of these can be automated in CI. Run them on the draft's installers, on a r
   - Hostile input is refused: `javascript:alert(1)`, `file:///etc/passwd`, `https://user:pass@host`, `https://host/path`.
   - Plain `http://` to a public host is refused; `http://localhost:8787` asks for confirmation.
 - [ ] **Sign-in round trip:** the email link opens the browser, which hands back to the app through `backroom://`, and the app ends up signed in.
+- [ ] **macOS ad-hoc signature and first launch:** `codesign -dv /Applications/Backroom.app` reports `Signature=adhoc`. On an Apple silicon Mac, a fresh download opens through the documented Gatekeeper override (not "damaged"). Note which dialog appears and update the section above.
 - [ ] **macOS app menu:** "Change server…" appears after "About". It clears the server and restarts into the setup page.
 - [ ] **Linux without a tray** (for example GNOME without the AppIndicator extension):
   - the window shows the small "Backroom" menu bar with "Change server…" and "Quit";
